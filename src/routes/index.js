@@ -8,6 +8,8 @@ import internshipRoutes from "../modules/internships/internship.routes.js";
 import reportRoutes from "../modules/reports/report.routes.js";
 import parameterRoutes from "../modules/parameters/parameter.routes.js";
 import documentRoutes from "../modules/documents/document.routes.js";
+import rolesRoutes from "../modules/roles/roles.routes.js";
+import userAdministrativoRoutes from '../modules/usersAdministrativos/userAdministrativo.routes.js';
 
 const router = express.Router();
 
@@ -20,5 +22,8 @@ router.use("/internships", internshipRoutes);
 router.use("/reports", reportRoutes);
 router.use("/parameters", parameterRoutes);
 router.use("/documents", documentRoutes);
+router.use("/roles", rolesRoutes);
+router.use("/users-administrativos", userAdministrativoRoutes);
+
 
 export default router;
