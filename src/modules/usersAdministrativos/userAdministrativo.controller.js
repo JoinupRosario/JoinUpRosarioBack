@@ -354,3 +354,45 @@ export const cambiarEstadoRolUserAdministrativo = async (req, res) => {
     });
   }
 };
+
+// Cambiar estado del usuario administrativo (activar/desactivar)
+export const cambiarEstadoUserAdministrativo = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { estado } = req.body;
+
+    const userAdministrativo = await UserAdministrativo.findById(id);
+    if (!userAdministrativo) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario administrativo no encontrado'
+      });
+    }
+
+    // Actualizar estado en el modelo UserAdministrativo
+    userAdministrativo.estado = estado;
+    await userAdministrativo.save();
+
+    // Actualizar estado en el modelo User relacionado
+    await User.findByIdAndUpdate(userAdministrativo.user, { estado });
+
+    // Obtener el usuario actualizado con populate
+    const userActualizado = await UserAdministrativo.findById(id)
+      .populate('user', 'name email estado')
+      .populate('roles.rol', 'nombre estado');
+
+    res.json({
+      success: true,
+      message: `Usuario ${estado ? 'activado' : 'desactivado'} exitosamente`,
+      data: userActualizado
+    });
+
+  } catch (error) {
+    console.error('Error al cambiar estado del usuario administrativo:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+};

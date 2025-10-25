@@ -7,7 +7,8 @@ import {
   eliminarUserAdministrativo,
   agregarRolUserAdministrativo,
   removerRolUserAdministrativo,
-  cambiarEstadoRolUserAdministrativo
+  cambiarEstadoRolUserAdministrativo,
+  cambiarEstadoUserAdministrativo
 } from './userAdministrativo.controller.js';
 
 const router = express.Router();
@@ -23,5 +24,8 @@ router.delete('/:id', eliminarUserAdministrativo);
 router.post('/:id/roles', agregarRolUserAdministrativo);
 router.delete('/:id/roles', removerRolUserAdministrativo);
 router.patch('/:id/roles/estado', cambiarEstadoRolUserAdministrativo);
+
+// Ruta para cambiar estado del usuario administrativo
+router.patch('/:id/estado', cambiarEstadoUserAdministrativo);
 
 export default router;

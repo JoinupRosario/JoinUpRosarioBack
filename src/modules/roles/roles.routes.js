@@ -9,7 +9,8 @@ import {
   removerPermiso,
   cambiarEstadoPermiso,
   eliminarRol,
-  obtenerPermisos // Agrega esta importación
+  obtenerPermisos,
+  actualizarPermisos // Agrega esta importación
 } from './roles.controller.js';
 
 const router = express.Router();
@@ -27,6 +28,7 @@ router.get('/permisos/todos', obtenerPermisos); // Agrega esta línea
 
 // Rutas para gestión de permisos en roles
 router.post('/:id/permisos', agregarPermiso);
+router.put('/:id/permisos', actualizarPermisos); // Nueva ruta para actualizar todos los permisos
 router.delete('/:id/permisos', removerPermiso);
 router.patch('/:id/permisos/estado', cambiarEstadoPermiso);
 
