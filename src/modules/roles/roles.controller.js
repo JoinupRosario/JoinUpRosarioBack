@@ -382,3 +382,58 @@ export const obtenerPermisos = async (req, res) => {
     });
   }
 };
+
+// NUEVA FUNCIÓN ESCALABLE - Actualizar todos los permisos de un rol de una vez
+export const actualizarPermisosRol = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { permisos } = req.body; // Array de IDs de permisos
+
+    const rol = await Rol.findById(id);
+    if (!rol) {
+      return res.status(404).json({
+        success: false,
+        message: 'Rol no encontrado'
+      });
+    }
+
+    // Validar que los permisos existan
+    if (permisos && permisos.length > 0) {
+      const permisosValidos = await Permiso.find({ 
+        _id: { $in: permisos } 
+      });
+      
+      if (permisosValidos.length !== permisos.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'Algunos permisos no existen en la base de datos'
+        });
+      }
+    }
+
+    // Reemplazar todos los permisos del rol
+    rol.permisos = permisos.map(permisoId => ({
+      permiso: permisoId,
+      estado: true
+    }));
+
+    await rol.save();
+
+    const rolActualizado = await Rol.findById(id)
+      .populate('permisos.permiso');
+
+    res.json({
+      success: true,
+      message: 'Permisos actualizados exitosamente',
+      data: rolActualizado
+    });
+
+  } catch (error) {
+    console.error('Error al actualizar permisos del rol:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+};
