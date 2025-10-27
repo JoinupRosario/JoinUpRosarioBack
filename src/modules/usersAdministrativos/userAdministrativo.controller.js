@@ -3,7 +3,7 @@ import User from '../users/user.model.js';
 import Rol from '../roles/roles.model.js';
 import bcrypt from 'bcryptjs';
 
-// Crear usuario administrativo (parte actualizada)
+// Crear usuario administrativo
 export const crearUserAdministrativo = async (req, res) => {
   try {
     const {
@@ -89,7 +89,7 @@ export const crearUserAdministrativo = async (req, res) => {
   }
 };
 
-// Actualizar usuario administrativo (parte actualizada)
+// Actualizar usuario administrativo
 export const actualizarUserAdministrativo = async (req, res) => {
   try {
     const { id } = req.params;
@@ -204,7 +204,6 @@ export const obtenerUserAdministrativoPorId = async (req, res) => {
     });
   }
 };
-
 
 // Eliminar usuario administrativo
 export const eliminarUserAdministrativo = async (req, res) => {
@@ -396,7 +395,6 @@ export const cambiarEstadoUserAdministrativo = async (req, res) => {
     });
   }
 };
-
 
 // NUEVA FUNCIÓN ESCALABLE - Actualizar todos los roles de un usuario de una vez
 export const actualizarRolesUsuario = async (req, res) => {
