@@ -55,10 +55,6 @@ const userAdministrativoSchema = new mongoose.Schema({
       default: true
     }
   }],
-  estado: {
-    type: Boolean,
-    default: true
-  }
 }, {
   timestamps: true,
   versionKey: false

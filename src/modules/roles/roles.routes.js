@@ -1,4 +1,3 @@
-// roles.routes.js - ACTUALIZADO
 import express from 'express';
 import {
   crearRol,
@@ -10,8 +9,7 @@ import {
   removerPermiso,
   cambiarEstadoPermiso,
   eliminarRol,
-  obtenerPermisos,
-  actualizarPermisosRol // Agregar esta importación
+  obtenerPermisos // Agrega esta importación
 } from './roles.controller.js';
 
 const router = express.Router();
@@ -25,14 +23,11 @@ router.patch('/:id/estado', cambiarEstadoRol);
 router.delete('/:id', eliminarRol);
 
 // Ruta para obtener todos los permisos
-router.get('/permisos/todos', obtenerPermisos);
+router.get('/permisos/todos', obtenerPermisos); // Agrega esta línea
 
 // Rutas para gestión de permisos en roles
 router.post('/:id/permisos', agregarPermiso);
 router.delete('/:id/permisos', removerPermiso);
 router.patch('/:id/permisos/estado', cambiarEstadoPermiso);
-
-// NUEVA RUTA ESCALABLE - Actualizar todos los permisos de una vez
-router.put('/:id/permisos', actualizarPermisosRol);
 
 export default router;
