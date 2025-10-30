@@ -9,19 +9,16 @@ const userAdministrativoSchema = new mongoose.Schema({
   nombres: {
     type: String,
     required: [true, 'Los nombres son obligatorios'],
-    trim: true,
-    maxlength: [100, 'Los nombres no pueden exceder los 100 caracteres']
+    trim: true
   },
   apellidos: {
     type: String,
     required: [true, 'Los apellidos son obligatorios'],
-    trim: true,
-    maxlength: [100, 'Los apellidos no pueden exceder los 100 caracteres']
+    trim: true
   },
   cargo: {
     type: String,
-    trim: true,
-    maxlength: [100, 'El cargo no puede exceder los 100 caracteres']
+    trim: true
   },
   identificacion: {
     type: String,
@@ -31,18 +28,15 @@ const userAdministrativoSchema = new mongoose.Schema({
   },
   telefono: {
     type: String,
-    trim: true,
-    match: [/^[0-9]{7,10}$/, 'El número de teléfono debe tener entre 7 y 10 dígitos']
+    trim: true
   },
   extension: {
     type: String,
-    trim: true,
-    maxlength: [10, 'La extensión no puede exceder los 10 caracteres']
+    trim: true
   },
   movil: {
     type: String,
-    trim: true,
-    match: [/^[0-9]{10}$/, 'El número móvil debe tener 10 dígitos']
+    trim: true
   },
   roles: [{
     rol: {
