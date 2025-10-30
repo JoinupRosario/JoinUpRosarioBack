@@ -1,3 +1,4 @@
+// roles.routes.js - ACTUALIZADO
 import express from 'express';
 import {
   crearRol,
@@ -10,7 +11,7 @@ import {
   cambiarEstadoPermiso,
   eliminarRol,
   obtenerPermisos,
-  actualizarPermisosRol
+  actualizarPermisosRol // Agregar esta importación
 } from './roles.controller.js';
 
 const router = express.Router();

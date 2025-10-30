@@ -1,3 +1,4 @@
+// userAdministrativo.routes.js - ACTUALIZADO
 import express from 'express';
 import {
   crearUserAdministrativo,
@@ -9,7 +10,7 @@ import {
   removerRolUserAdministrativo,
   cambiarEstadoRolUserAdministrativo,
   cambiarEstadoUserAdministrativo,
-  actualizarRolesUsuario
+  actualizarRolesUsuario // Agregar esta importación
 } from './userAdministrativo.controller.js';
 
 const router = express.Router();
