@@ -142,12 +142,6 @@ dist/
 # PM2 files
 .pm2/
 
-# Docker
-.dockerignore
-Dockerfile
-docker-compose.yml
-docker-compose.yaml
-
 # Local development
 .local/
 local/
