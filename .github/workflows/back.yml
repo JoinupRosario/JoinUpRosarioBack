@@ -32,6 +32,15 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::534039229473:role/rosario-gha-role
 
+      # ✅ Crear el archivo .env directamente desde aquí
+      - name: 🗝️ Create .env file
+        run: |
+          echo "PORT=5000" >> .env
+          echo "NODE_ENV=development" >> .env
+          echo "MONGO_URI=mongodb+srv://rosario_db_user:0UElgliefpes3YkL@cluster0.81a63cr.mongodb.net/Rosario?retryWrites=true&w=majority&appName=Cluster0" >> .env
+          echo "JWT_SECRET=tu_jwt_secret_super_seguro_aqui_cambiar_en_produccion" >> .env
+          echo "CORS_ORIGIN=http://localhost:5173" >> .env
+
       - name: 🐳 Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 

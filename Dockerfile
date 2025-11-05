@@ -17,9 +17,8 @@ COPY --from=deps /app/node_modules ./node_modules
 # Copiamos el resto del código
 COPY . .
 
-# ✅ El .env se copiará automáticamente si existe en el repo raíz
-# (no es necesario forzarlo si ya está en el contexto)
-# COPY .env .env
+# ✅ Copiamos el archivo .env al contenedor
+COPY .env .env
 
 # Puerto donde escucha tu app
 EXPOSE 5000
