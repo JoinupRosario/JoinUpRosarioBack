@@ -17,8 +17,9 @@ COPY --from=deps /app/node_modules ./node_modules
 # Copiamos el resto del código
 COPY . .
 
-# ✅ Copiamos el archivo .env al contenedor (clave para que no falten vars)
-#COPY .env .env
+# ✅ El .env se copiará automáticamente si existe en el repo raíz
+# (no es necesario forzarlo si ya está en el contexto)
+# COPY .env .env
 
 # Puerto donde escucha tu app
 EXPOSE 5000
@@ -26,5 +27,5 @@ EXPOSE 5000
 # Healthcheck (opcional)
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD wget -qO- http://localhost:5000/ping || exit 1
 
-# Comando de arranque
-CMD ["node", "server.js"]
+# ✅ Cambiamos el punto de entrada a la ruta correcta
+CMD ["node", "src/server.js"]
