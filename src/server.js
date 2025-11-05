@@ -15,7 +15,15 @@ connectDB();
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use(cors());
+app.use(
+  cors({
+    origin: [
+      "https://app.rosario.mozartia.com", 
+      "http://localhost:5173", 
+    ],
+    credentials: true,
+  })
+);
 app.use(morgan("dev"));
 app.use(helmet());
 app.use(compression());
@@ -34,25 +42,25 @@ app.use((req, res) => {
 // Manejo global de errores
 app.use((error, req, res, next) => {
   console.error("Error:", error);
-  
+
   if (error.name === "ValidationError") {
     return res.status(400).json({
       message: "Error de validación",
-      errors: Object.values(error.errors).map(err => ({
+      errors: Object.values(error.errors).map((err) => ({
         field: err.path,
-        message: err.message
-      }))
+        message: err.message,
+      })),
     });
   }
-  
+
   if (error.name === "CastError") {
     return res.status(400).json({ message: "ID inválido" });
   }
-  
+
   if (error.code === 11000) {
     return res.status(400).json({ message: "Recurso duplicado" });
   }
-  
+
   res.status(500).json({ message: "Error interno del servidor" });
 });
 
