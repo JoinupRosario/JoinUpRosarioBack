@@ -10,6 +10,7 @@ import parameterRoutes from "../modules/parameters/parameter.routes.js";
 import documentRoutes from "../modules/documents/document.routes.js";
 import rolesRoutes from "../modules/roles/roles.routes.js";
 import userAdministrativoRoutes from '../modules/usersAdministrativos/userAdministrativo.routes.js';
+import sucursalRoutes from '../modules/sucursales/sucursal.routes.js';
 
 const router = express.Router();
 
@@ -24,6 +25,7 @@ router.use("/parameters", parameterRoutes);
 router.use("/documents", documentRoutes);
 router.use("/roles", rolesRoutes);
 router.use("/users-administrativos", userAdministrativoRoutes);
+router.use("/sucursales", sucursalRoutes);
 
 
 export default router;

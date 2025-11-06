@@ -49,6 +49,10 @@ const userAdministrativoSchema = new mongoose.Schema({
       default: true
     }
   }],
+  sucursal: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Sucursal'
+  },
   estado: {
     type: Boolean,
     default: true
@@ -63,6 +67,7 @@ userAdministrativoSchema.index({ identificacion: 1 });
 userAdministrativoSchema.index({ user: 1 });
 userAdministrativoSchema.index({ estado: 1 });
 userAdministrativoSchema.index({ 'roles.rol': 1 });
+userAdministrativoSchema.index({ sucursal: 1 });
 
 // Método para agregar rol
 userAdministrativoSchema.methods.agregarRol = function(rolId, estado = true) {

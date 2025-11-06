@@ -23,6 +23,11 @@ const userSchema = new mongoose.Schema({
   estado: {
     type: Boolean,
     default: true
+  },
+  modulo: {
+    type: String,
+    enum: ['administrativo', 'estudiante', 'entidades'],
+    trim: true
   }
 }, {
   timestamps: true,
@@ -32,5 +37,6 @@ const userSchema = new mongoose.Schema({
 // Índices
 userSchema.index({ email: 1 });
 userSchema.index({ estado: 1 });
+userSchema.index({ modulo: 1 });
 
 export default mongoose.model('User', userSchema);

@@ -8,10 +8,15 @@ import {
   agregarRolUserAdministrativo,
   removerRolUserAdministrativo,
   cambiarEstadoRolUserAdministrativo,
-  cambiarEstadoUserAdministrativo
+  cambiarEstadoUserAdministrativo,
+  asociarSedeUserAdministrativo
 } from './userAdministrativo.controller.js';
+import { verifyToken, authorizeRoles } from '../../middlewares/auth.js';
 
 const router = express.Router();
+
+// Todas las rutas requieren autenticación
+router.use(verifyToken);
 
 // Rutas para usuarios administrativos
 router.post('/', crearUserAdministrativo);
@@ -25,5 +30,8 @@ router.post('/:id/roles', agregarRolUserAdministrativo);
 router.delete('/:id/roles', removerRolUserAdministrativo);
 router.patch('/:id/roles/estado', cambiarEstadoRolUserAdministrativo);
 router.patch('/:id/estado', cambiarEstadoUserAdministrativo);
+
+// Rutas para gestión de sedes en usuarios administrativos
+router.put('/:id/sede', asociarSedeUserAdministrativo);
 
 export default router;

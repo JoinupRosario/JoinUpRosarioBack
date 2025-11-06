@@ -38,21 +38,39 @@ export const loginUser = async (req, res) => {
     if (!validPass) return res.status(400).json({ message: "Contraseña incorrecta" });
 
     const token = jwt.sign(
-      { id: user._id, role: user.role },
+      { id: user._id, modulo: user.modulo },
       process.env.JWT_SECRET,
       { expiresIn: "8h" }
     );
 
     // No devolver la contraseña en la respuesta
+    // Asegurar que modulo siempre esté presente (incluso si es null o undefined)
     const userResponse = {
       _id: user._id,
       name: user.name,
       email: user.email,
-      role: user.role,
-      active: user.active,
+      modulo: user.modulo !== undefined ? user.modulo : null,
+      active: user.estado !== undefined ? user.estado : true,
+      estado: user.estado !== undefined ? user.estado : true, // Mantener compatibilidad
       createdAt: user.createdAt,
       updatedAt: user.updatedAt
     };
+    
+    // Log para debug
+    console.log('=== LOGIN DEBUG ===');
+    console.log('Usuario encontrado:', {
+      _id: user._id,
+      email: user.email,
+      modulo: user.modulo,
+      moduloType: typeof user.modulo,
+      estado: user.estado
+    });
+    console.log('Respuesta enviada:', {
+      ...userResponse,
+      modulo: userResponse.modulo,
+      moduloType: typeof userResponse.modulo
+    });
+    console.log('==================');
     
     res.json({ token, user: userResponse });
   } catch (error) {
