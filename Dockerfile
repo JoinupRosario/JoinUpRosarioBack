@@ -14,11 +14,14 @@ ENV NODE_ENV=production
 # Copiamos node_modules ya resueltas
 COPY --from=deps /app/node_modules ./node_modules
 
-# Copiamos el resto del código
-COPY . .
+# Copiamos package.json para referencia
+COPY package*.json ./
 
-# ✅ Copiamos el archivo .env al contenedor
-COPY .env .env
+# Copiamos explícitamente la carpeta src completa
+COPY src ./src
+
+# ✅ Copiamos el archivo .env al contenedor (si existe)
+COPY .env* ./
 
 # Puerto donde escucha tu app
 EXPOSE 5000
