@@ -11,7 +11,11 @@ import { handleUploadError } from "./middlewares/upload.js";
 dotenv.config();
 
 const app = express();
-connectDB();
+
+// Conectar a la base de datos (no bloquea el inicio del servidor)
+connectDB().catch((err) => {
+  console.error("Error al conectar a la base de datos:", err);
+});
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -58,6 +62,11 @@ app.use(
 
 app.use(compression());
 
+// Ruta de healthcheck (antes de CORS para que funcione siempre)
+app.get("/ping", (req, res) => {
+  res.status(200).json({ status: "ok", message: "Server is running" });
+});
+
 // Manejar preflight requests explícitamente (antes de las rutas)
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") {
@@ -70,6 +79,9 @@ app.use((req, res, next) => {
     
     if (origin && allowedOrigins.includes(origin)) {
       res.header("Access-Control-Allow-Origin", origin);
+    } else if (!origin) {
+      // Permitir requests sin origin (healthchecks, etc.)
+      res.header("Access-Control-Allow-Origin", "*");
     }
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
     res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin");
