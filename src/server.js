@@ -15,70 +15,19 @@ connectDB();
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
-
-// Configuración de CORS antes de otros middlewares
 app.use(
   cors({
-    origin: function (origin, callback) {
-      const allowedOrigins = [
-        "https://app.rosario.mozartia.com",
-        "https://app.rosario.mozartia.com/",
-        "http://localhost:5173",
-      ];
-      // Permitir requests sin origin (mobile apps, Postman, etc.)
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("No permitido por CORS"));
-      }
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Requested-With",
-      "Accept",
-      "Origin",
-    ],
-    exposedHeaders: ["Authorization"],
-    optionsSuccessStatus: 200, // Para navegadores legacy
-  })
-);
-
-app.use(morgan("dev"));
-
-// Configurar Helmet para no interferir con CORS
-app.use(
-  helmet({
-    crossOriginResourcePolicy: { policy: "cross-origin" },
-    crossOriginEmbedderPolicy: false,
-  })
-);
-
-app.use(compression());
-
-// Manejar preflight requests explícitamente (antes de las rutas)
-app.use((req, res, next) => {
-  if (req.method === "OPTIONS") {
-    const allowedOrigins = [
+    origin: [
       "https://app.rosario.mozartia.com",
       "https://app.rosario.mozartia.com/",
-      "http://localhost:5173",
-    ];
-    const origin = req.headers.origin;
-    
-    if (origin && allowedOrigins.includes(origin)) {
-      res.header("Access-Control-Allow-Origin", origin);
-    }
-    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin");
-    res.header("Access-Control-Allow-Credentials", "true");
-    res.header("Access-Control-Max-Age", "86400"); // 24 horas
-    return res.sendStatus(200);
-  }
-  next();
-});
+      "http://localhost:5173", 
+    ],
+    credentials: true,
+  })
+);
+app.use(morgan("dev"));
+app.use(helmet());
+app.use(compression());
 
 // Rutas principales
 app.use("/api", routes);
