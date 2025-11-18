@@ -148,7 +148,9 @@ export const getOpportunityById = async (req, res) => {
       .populate("postulaciones.revisadoPor", "name email")
       .populate("revisadoPor", "name email")
       .populate("activadoPor", "name email")
-      .populate("rechazadoPor", "name email");
+      .populate("rechazadoPor", "name email")
+      .populate("aprobacionesPorPrograma.aprobadoPor", "name email")
+      .populate("historialEstados.cambiadoPor", "name email");
 
     if (!opportunity) {
       return res.status(404).json({ message: "Oportunidad no encontrada" });
@@ -233,11 +235,19 @@ export const createOpportunity = async (req, res) => {
       documentos: documentos.length > 0 ? documentos : undefined,
       estado: "Creada",
       creadoPor: req.user.id,
-      fechaCreacion: new Date()
+      fechaCreacion: new Date(),
+      historialEstados: [{
+        estadoAnterior: null,
+        estadoNuevo: "Creada",
+        cambiadoPor: req.user.id,
+        fechaCambio: new Date(),
+        comentarios: "Oportunidad creada"
+      }]
     });
 
     await opportunity.populate("company", "name commercialName sector logo");
     await opportunity.populate("creadoPor", "name email");
+    await opportunity.populate("historialEstados.cambiadoPor", "name email");
 
     res.status(201).json({
       message: "Oportunidad creada correctamente",
@@ -316,6 +326,8 @@ export const changeStatus = async (req, res) => {
       return res.status(404).json({ message: "Oportunidad no encontrada" });
     }
 
+    const estadoAnterior = opportunity.estado;
+
     // Actualizar estado y usuario correspondiente
     const updateData = {
       estado,
@@ -338,15 +350,162 @@ export const changeStatus = async (req, res) => {
       id,
       updateData,
       { new: true, runValidators: true }
-    )
+    );
+
+    // Registrar en historial si cambió el estado
+    if (estadoAnterior !== estado && updatedOpportunity) {
+      const historialEntry = {
+        estadoAnterior,
+        estadoNuevo: estado,
+        cambiadoPor: req.user.id,
+        fechaCambio: new Date(),
+        comentarios: comentarios || null
+      };
+      
+      updatedOpportunity.historialEstados.push(historialEntry);
+      await updatedOpportunity.save();
+    }
+
+    const finalOpportunity = await Opportunity.findById(id)
       .populate("company", "name commercialName sector logo")
       .populate("revisadoPor", "name email")
       .populate("activadoPor", "name email")
-      .populate("rechazadoPor", "name email");
+      .populate("rechazadoPor", "name email")
+      .populate("historialEstados.cambiadoPor", "name email");
 
     res.json({
       message: `Estado cambiado a "${estado}" correctamente`,
-      opportunity: updatedOpportunity
+      opportunity: finalOpportunity
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Rechazar oportunidad con motivo
+export const rejectOpportunity = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { motivoRechazo, motivoRechazoOtro } = req.body;
+
+    if (!motivoRechazo) {
+      return res.status(400).json({ 
+        message: "Debe proporcionar un motivo de rechazo" 
+      });
+    }
+
+    const opportunity = await Opportunity.findById(id);
+    if (!opportunity) {
+      return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+
+    const estadoAnterior = opportunity.estado;
+
+    // Actualizar oportunidad
+    const updateData = {
+      estado: "Rechazada",
+      rechazadoPor: req.user.id,
+      motivoRechazo,
+      motivoRechazoOtro: motivoRechazo === "Otro" ? motivoRechazoOtro : null
+    };
+
+    const updatedOpportunity = await Opportunity.findByIdAndUpdate(
+      id,
+      updateData,
+      { new: true, runValidators: true }
+    );
+
+    // Registrar en historial
+    if (estadoAnterior !== "Rechazada" && updatedOpportunity) {
+      const historialEntry = {
+        estadoAnterior,
+        estadoNuevo: "Rechazada",
+        cambiadoPor: req.user.id,
+        fechaCambio: new Date(),
+        motivo: motivoRechazo,
+        comentarios: motivoRechazo === "Otro" ? motivoRechazoOtro : motivoRechazo
+      };
+      
+      updatedOpportunity.historialEstados.push(historialEntry);
+      await updatedOpportunity.save();
+    }
+
+    const finalOpportunity = await Opportunity.findById(id)
+      .populate("company", "name commercialName sector logo")
+      .populate("rechazadoPor", "name email")
+      .populate("historialEstados.cambiadoPor", "name email");
+
+    res.json({
+      message: "Oportunidad rechazada correctamente",
+      opportunity: finalOpportunity
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Obtener historial de estados
+export const getStatusHistory = async (req, res) => {
+  try {
+    const opportunity = await Opportunity.findById(req.params.id)
+      .populate("historialEstados.cambiadoPor", "name email")
+      .select("historialEstados");
+
+    if (!opportunity) {
+      return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+
+    res.json({
+      historial: opportunity.historialEstados || []
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Duplicar oportunidad
+export const duplicateOpportunity = async (req, res) => {
+  try {
+    const originalOpportunity = await Opportunity.findById(req.params.id);
+    
+    if (!originalOpportunity) {
+      return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+
+    // Crear nueva oportunidad con los mismos datos pero estado "Creada"
+    const opportunityData = originalOpportunity.toObject();
+    
+    // Eliminar campos que no deben duplicarse
+    delete opportunityData._id;
+    delete opportunityData.createdAt;
+    delete opportunityData.updatedAt;
+    delete opportunityData.postulaciones;
+    delete opportunityData.historialEstados;
+    delete opportunityData.aprobacionesPorPrograma;
+    delete opportunityData.revisadoPor;
+    delete opportunityData.activadoPor;
+    delete opportunityData.rechazadoPor;
+    delete opportunityData.fechaRevision;
+    delete opportunityData.fechaActivacion;
+    delete opportunityData.fechaCierre;
+    delete opportunityData.fechaVencimientoEstado;
+    delete opportunityData.comentariosRevision;
+    delete opportunityData.motivoRechazo;
+    delete opportunityData.motivoRechazoOtro;
+
+    // Establecer estado inicial
+    opportunityData.estado = "Creada";
+    opportunityData.creadoPor = req.user.id;
+    opportunityData.fechaCreacion = new Date();
+
+    const newOpportunity = await Opportunity.create(opportunityData);
+
+    await newOpportunity.populate("company", "name commercialName sector logo");
+    await newOpportunity.populate("creadoPor", "name email");
+
+    res.status(201).json({
+      message: "Oportunidad duplicada correctamente",
+      opportunity: newOpportunity
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -547,6 +706,120 @@ export const selectMultipleApplications = async (req, res) => {
 
     res.json({
       message: `${postulacionIds.length} postulante(s) seleccionado(s) correctamente`,
+      opportunity: updatedOpportunity
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Aprobar oportunidad por programa académico
+export const approveProgram = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { programa, comentarios } = req.body; // programa: { level, program }
+
+    if (!programa || !programa.level || !programa.program) {
+      return res.status(400).json({ 
+        message: "Debe proporcionar el programa (level y program)" 
+      });
+    }
+
+    const opportunity = await Opportunity.findById(id);
+    if (!opportunity) {
+      return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+
+    // Verificar que la oportunidad está en revisión
+    if (opportunity.estado !== "En Revisión") {
+      return res.status(400).json({ 
+        message: "Solo se pueden aprobar programas cuando la oportunidad está en revisión" 
+      });
+    }
+
+    // Buscar la aprobación del programa
+    const aprobacionIndex = opportunity.aprobacionesPorPrograma.findIndex(
+      ap => ap.programa.level === programa.level && ap.programa.program === programa.program
+    );
+
+    if (aprobacionIndex === -1) {
+      return res.status(404).json({ 
+        message: "Programa no encontrado en la formación académica de esta oportunidad" 
+      });
+    }
+
+    // Actualizar la aprobación
+    opportunity.aprobacionesPorPrograma[aprobacionIndex].estado = "aprobado";
+    opportunity.aprobacionesPorPrograma[aprobacionIndex].aprobadoPor = req.user.id;
+    opportunity.aprobacionesPorPrograma[aprobacionIndex].fechaAprobacion = new Date();
+    opportunity.aprobacionesPorPrograma[aprobacionIndex].comentarios = comentarios || null;
+
+    await opportunity.save();
+
+    const updatedOpportunity = await Opportunity.findById(id)
+      .populate("company", "name commercialName sector logo")
+      .populate("aprobacionesPorPrograma.aprobadoPor", "name email")
+      .populate("creadoPor", "name email");
+
+    res.json({
+      message: `Programa ${programa.program} aprobado correctamente`,
+      opportunity: updatedOpportunity
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Rechazar oportunidad por programa académico
+export const rejectProgram = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { programa, comentarios } = req.body; // programa: { level, program }
+
+    if (!programa || !programa.level || !programa.program) {
+      return res.status(400).json({ 
+        message: "Debe proporcionar el programa (level y program)" 
+      });
+    }
+
+    const opportunity = await Opportunity.findById(id);
+    if (!opportunity) {
+      return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+
+    // Verificar que la oportunidad está en revisión
+    if (opportunity.estado !== "En Revisión") {
+      return res.status(400).json({ 
+        message: "Solo se pueden rechazar programas cuando la oportunidad está en revisión" 
+      });
+    }
+
+    // Buscar la aprobación del programa
+    const aprobacionIndex = opportunity.aprobacionesPorPrograma.findIndex(
+      ap => ap.programa.level === programa.level && ap.programa.program === programa.program
+    );
+
+    if (aprobacionIndex === -1) {
+      return res.status(404).json({ 
+        message: "Programa no encontrado en la formación académica de esta oportunidad" 
+      });
+    }
+
+    // Actualizar la aprobación
+    opportunity.aprobacionesPorPrograma[aprobacionIndex].estado = "rechazado";
+    opportunity.aprobacionesPorPrograma[aprobacionIndex].aprobadoPor = req.user.id;
+    opportunity.aprobacionesPorPrograma[aprobacionIndex].fechaAprobacion = new Date();
+    opportunity.aprobacionesPorPrograma[aprobacionIndex].comentarios = comentarios || null;
+
+    await opportunity.save();
+
+    const updatedOpportunity = await Opportunity.findById(id)
+      .populate("company", "name commercialName sector logo")
+      .populate("aprobacionesPorPrograma.aprobadoPor", "name email")
+      .populate("creadoPor", "name email");
+
+    res.json({
+      message: `Programa ${programa.program} rechazado correctamente`,
       opportunity: updatedOpportunity
     });
   } catch (error) {

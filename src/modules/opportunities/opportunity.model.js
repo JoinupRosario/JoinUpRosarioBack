@@ -140,8 +140,8 @@ const opportunitySchema = new mongoose.Schema(
 
     // Salario emocional y promedio
     salarioEmocional: {
-      type: String,
-      default: null
+      type: [String],
+      default: []
     },
     promedioMinimoRequerido: {
       type: String,
@@ -242,6 +242,60 @@ const opportunitySchema = new mongoose.Schema(
       type: String,
       default: null
     },
+    motivoRechazo: {
+      type: String,
+      default: null
+    },
+    motivoRechazoOtro: {
+      type: String,
+      default: null
+    },
+    
+    // Historial de cambios de estado
+    historialEstados: [{
+      estadoAnterior: {
+        type: String,
+        enum: [
+          "Creada",
+          "En Revisión",
+          "Revisada",
+          "Activa",
+          "Rechazada",
+          "Cerrada",
+          "Vencida"
+        ]
+      },
+      estadoNuevo: {
+        type: String,
+        enum: [
+          "Creada",
+          "En Revisión",
+          "Revisada",
+          "Activa",
+          "Rechazada",
+          "Cerrada",
+          "Vencida"
+        ],
+        required: true
+      },
+      cambiadoPor: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true
+      },
+      fechaCambio: {
+        type: Date,
+        default: Date.now
+      },
+      motivo: {
+        type: String,
+        default: null
+      },
+      comentarios: {
+        type: String,
+        default: null
+      }
+    }],
 
     // Postulaciones (relación con estudiantes)
     postulaciones: [{
@@ -289,7 +343,40 @@ const opportunitySchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true
-    }
+    },
+
+    // Aprobación por programa académico
+    aprobacionesPorPrograma: [{
+      programa: {
+        level: {
+          type: String,
+          enum: ["Pregrado", "Posgrado"],
+          required: true
+        },
+        program: {
+          type: String,
+          required: true
+        }
+      },
+      estado: {
+        type: String,
+        enum: ["pendiente", "aprobado", "rechazado"],
+        default: "pendiente"
+      },
+      aprobadoPor: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null
+      },
+      fechaAprobacion: {
+        type: Date,
+        default: null
+      },
+      comentarios: {
+        type: String,
+        default: null
+      }
+    }]
   },
   {
     timestamps: true
@@ -303,6 +390,24 @@ opportunitySchema.index({ fechaVencimiento: 1 });
 opportunitySchema.index({ "postulaciones.estudiante": 1 });
 opportunitySchema.index({ creadoPor: 1 });
 
+// Middleware para inicializar aprobaciones por programa cuando se crea la oportunidad
+opportunitySchema.pre("save", function(next) {
+  // Si es un nuevo documento y tiene formación académica, inicializar aprobaciones
+  if (this.isNew && this.formacionAcademica && this.formacionAcademica.length > 0) {
+    // Solo inicializar si no existen aprobaciones
+    if (!this.aprobacionesPorPrograma || this.aprobacionesPorPrograma.length === 0) {
+      this.aprobacionesPorPrograma = this.formacionAcademica.map(formacion => ({
+        programa: {
+          level: formacion.level,
+          program: formacion.program
+        },
+        estado: "pendiente"
+      }));
+    }
+  }
+  next();
+});
+
 // Middleware para actualizar fechas según el estado
 opportunitySchema.pre("save", function(next) {
   if (this.isModified("estado")) {
@@ -311,6 +416,18 @@ opportunitySchema.pre("save", function(next) {
     switch (this.estado) {
       case "En Revisión":
         this.fechaRevision = now;
+        // Inicializar aprobaciones por programa si no existen y hay formación académica
+        if (this.formacionAcademica && this.formacionAcademica.length > 0) {
+          if (!this.aprobacionesPorPrograma || this.aprobacionesPorPrograma.length === 0) {
+            this.aprobacionesPorPrograma = this.formacionAcademica.map(formacion => ({
+              programa: {
+                level: formacion.level,
+                program: formacion.program
+              },
+              estado: "pendiente"
+            }));
+          }
+        }
         break;
       case "Activa":
         this.fechaActivacion = now;

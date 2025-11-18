@@ -12,7 +12,12 @@ import {
   applyToOpportunity,
   getApplications,
   reviewApplication,
-  selectMultipleApplications
+  selectMultipleApplications,
+  approveProgram,
+  rejectProgram,
+  rejectOpportunity,
+  getStatusHistory,
+  duplicateOpportunity
 } from "./opportunity.controller.js";
 import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
 
@@ -88,5 +93,18 @@ router.post("/:id/apply", authorizeRoles("student"), applyToOpportunity);
 router.get("/:id/applications", authorizeRoles("company", "admin", "superadmin", "leader"), getApplications);
 router.patch("/:id/applications/:postulacionId", authorizeRoles("company", "admin", "superadmin", "leader"), reviewApplication);
 router.post("/:id/applications/select-multiple", authorizeRoles("company", "admin", "superadmin", "leader"), selectMultipleApplications);
+
+// Aprobación por programa académico
+router.post("/:id/approve-program", authorizeRoles("admin", "superadmin", "leader"), approveProgram);
+router.post("/:id/reject-program", authorizeRoles("admin", "superadmin", "leader"), rejectProgram);
+
+// Rechazar oportunidad con motivo
+router.post("/:id/reject", authorizeRoles("admin", "superadmin", "leader"), rejectOpportunity);
+
+// Historial de estados
+router.get("/:id/history", authorizeRoles("admin", "superadmin", "leader"), getStatusHistory);
+
+// Duplicar oportunidad
+router.post("/:id/duplicate", authorizeRoles("company", "admin", "superadmin"), duplicateOpportunity);
 
 export default router;
