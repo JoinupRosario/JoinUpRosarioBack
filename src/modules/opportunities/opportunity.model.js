@@ -390,7 +390,7 @@ opportunitySchema.index({ fechaVencimiento: 1 });
 opportunitySchema.index({ "postulaciones.estudiante": 1 });
 opportunitySchema.index({ creadoPor: 1 });
 
-// Middleware para inicializar aprobaciones por programa cuando se crea la oportunidad
+// Middleware para inicializar aprobaciones por programa cuando se crea la oportunidad o se actualiza formacionAcademica
 opportunitySchema.pre("save", function(next) {
   // Si es un nuevo documento y tiene formación académica, inicializar aprobaciones
   if (this.isNew && this.formacionAcademica && this.formacionAcademica.length > 0) {
@@ -405,6 +405,34 @@ opportunitySchema.pre("save", function(next) {
       }));
     }
   }
+  
+  // Si se modificó formacionAcademica y no es nuevo, agregar aprobaciones para programas nuevos
+  if (!this.isNew && this.isModified("formacionAcademica") && this.formacionAcademica && this.formacionAcademica.length > 0) {
+    // Inicializar si no existe
+    if (!this.aprobacionesPorPrograma) {
+      this.aprobacionesPorPrograma = [];
+    }
+    
+    // Identificar programas existentes en aprobaciones
+    const programasExistentes = this.aprobacionesPorPrograma.map(
+      ap => `${ap.programa.level}|${ap.programa.program}`
+    );
+    
+    // Agregar aprobaciones para programas nuevos
+    this.formacionAcademica.forEach(formacion => {
+      const programaKey = `${formacion.level}|${formacion.program}`;
+      if (!programasExistentes.includes(programaKey)) {
+        this.aprobacionesPorPrograma.push({
+          programa: {
+            level: formacion.level,
+            program: formacion.program
+          },
+          estado: "pendiente"
+        });
+      }
+    });
+  }
+  
   next();
 });
 
