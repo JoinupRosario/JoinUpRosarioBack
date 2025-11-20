@@ -24,6 +24,7 @@ app.use(
         "https://app.rosario.mozartia.com",
         "https://app.rosario.mozartia.com/",
         "http://localhost:5173",
+        "http://localhost:5174",
       ];
       // Permitir requests sin origin (mobile apps, Postman, etc.)
       if (!origin || allowedOrigins.includes(origin)) {
@@ -65,6 +66,7 @@ app.use((req, res, next) => {
       "https://app.rosario.mozartia.com",
       "https://app.rosario.mozartia.com/",
       "http://localhost:5173",
+      "http://localhost:5174",
     ];
     const origin = req.headers.origin;
     
