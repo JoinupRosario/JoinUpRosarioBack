@@ -87,6 +87,11 @@ app.use((req, res, next) => {
   next();
 });
 
+// Ruta de healthcheck para Docker/ECS
+app.get("/ping", (req, res) => {
+  res.status(200).send("pong");
+});
+
 // Servir archivos estáticos de uploads (ANTES de las rutas de API)
 // Los archivos se guardan en src/uploads/, __dirname es src/
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
