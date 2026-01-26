@@ -11,6 +11,8 @@ import documentRoutes from "../modules/documents/document.routes.js";
 import rolesRoutes from "../modules/roles/roles.routes.js";
 import userAdministrativoRoutes from '../modules/usersAdministrativos/userAdministrativo.routes.js';
 import sucursalRoutes from '../modules/sucursales/sucursal.routes.js';
+import postulantRoutes from '../modules/postulants/routes/postulant.routes.js';
+import postulantLogRoutes from '../modules/postulants/routes/postulantLogs.routes.js';
 
 const router = express.Router();
 
@@ -26,6 +28,7 @@ router.use("/documents", documentRoutes);
 router.use("/roles", rolesRoutes);
 router.use("/users-administrativos", userAdministrativoRoutes);
 router.use("/sucursales", sucursalRoutes);
-
+router.use("/postulants", postulantRoutes);
+router.use("/postulant-logs", postulantLogRoutes);
 
 export default router;

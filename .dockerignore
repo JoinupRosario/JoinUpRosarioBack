@@ -4,6 +4,7 @@ node_modules
 npm-debug.log
 Dockerfile
 .dockerignore
+.env
 **/*.md
 tests
 __tests__

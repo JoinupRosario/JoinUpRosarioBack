@@ -1,6 +1,14 @@
 import multer from "multer";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
+import fs from "fs";
+
+// Función para asegurar que el directorio existe
+const ensureDirectoryExists = (dirPath) => {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
+};
 
 // Configuración de almacenamiento
 const storage = multer.diskStorage({
@@ -15,6 +23,9 @@ const storage = multer.diskStorage({
       case "logo":
         uploadPath += "logos/";
         break;
+      case "profile_picture":
+        uploadPath += "profile_pictures/";
+        break;
       case "certificate":
         uploadPath += "certificates/";
         break;
@@ -27,6 +38,9 @@ const storage = multer.diskStorage({
       default:
         uploadPath += "attachments/";
     }
+    
+    // Asegurar que el directorio existe
+    ensureDirectoryExists(uploadPath);
     
     cb(null, uploadPath);
   },
@@ -42,6 +56,7 @@ const fileFilter = (req, file, cb) => {
   const allowedTypes = {
     "cv": ["application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
     "logo": ["image/jpeg", "image/png", "image/gif"],
+    "profile_picture": ["image/jpeg", "image/png", "image/gif", "image/webp"],
     "certificate": ["application/pdf", "image/jpeg", "image/png"],
     "document": ["application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "image/jpeg", "image/png"],
     "report": ["application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]

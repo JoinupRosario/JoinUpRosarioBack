@@ -9,7 +9,9 @@
     "dev": "nodemon src/server.js",
     "lint": "eslint . --ext .js",
     "seed": "node src/seeders/runSeeders.js",
-    "seed:clear": "node src/seeders/runSeeders.js --clear"
+    "seed:clear": "node src/seeders/runSeeders.js --clear",
+    "seed:backfill-code": "node src/seeders/backfillUserCode.js",
+    "seed:postulants": "node src/seeders/seedPostulantsFromUsers.js"
   },
   "keywords": [],
   "author": "",
@@ -22,9 +24,11 @@
     "express": "^5.1.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
+    "mongodb": "^7.0.0",
     "mongoose": "^8.19.1",
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
+    "mysql2": "^3.16.1",
     "uuid": "^13.0.0"
   },
   "devDependencies": {

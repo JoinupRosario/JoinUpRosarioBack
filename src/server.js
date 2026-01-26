@@ -4,9 +4,14 @@ import cors from "cors";
 import morgan from "morgan";
 import helmet from "helmet";
 import compression from "compression";
+import path from "path";
+import { fileURLToPath } from "url";
 import connectDB from "./config/db.js";
 import routes from "./routes/index.js";
 import { handleUploadError } from "./middlewares/upload.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
@@ -79,6 +84,16 @@ app.use((req, res, next) => {
     res.header("Access-Control-Max-Age", "86400"); // 24 horas
     return res.sendStatus(200);
   }
+  next();
+});
+
+// Servir archivos estáticos de uploads (ANTES de las rutas de API)
+// Los archivos se guardan en src/uploads/, __dirname es src/
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+// Middleware de debugging antes de rutas
+app.use("/api", (req, res, next) => {
+  console.log(`🚀 [SERVER] Petición recibida: ${req.method} ${req.originalUrl}`);
   next();
 });
 
