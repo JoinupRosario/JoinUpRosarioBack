@@ -4,7 +4,9 @@ import connectMySQL, { query, closePool } from "../config/mysql.js";
 import Company from "../modules/companies/company.model.js";
 import User from "../modules/users/user.model.js";
 import Country from "../modules/shared/location/models/country.schema.js";
+import State from "../modules/shared/location/models/state.schema.js";
 import City from "../modules/shared/location/models/city.schema.js";
+import Item from "../modules/shared/location/models/item.schema.js";
 import bcrypt from "bcryptjs";
 
 dotenv.config();
@@ -16,7 +18,7 @@ const migrateCompaniesFromMySQL = async () => {
     await connectDB();
     await connectMySQL();
     
-    // Consultar todas las empresas con sus relaciones
+    // Consultar todas las empresas con sus relaciones (obteniendo IDs de MySQL directamente)
     const companiesSql = `
       SELECT 
         c.id AS mysql_id,
@@ -56,7 +58,19 @@ const migrateCompaniesFromMySQL = async () => {
         c.chamber_commerce_cert,
         c.rut,
         c.agency_head_hunter_cert,
-        -- Relaciones con item (valores de texto)
+        -- IDs de MySQL para relaciones con item (para buscar por mysqlId en MongoDB)
+        c.sector AS sector_mysql_id,
+        c.snies_sector AS snies_sector_mysql_id,
+        c.size AS size_mysql_id,
+        c.arl AS arl_mysql_id,
+        c.business_sector AS business_sector_mysql_id,
+        c.identification_type AS identification_type_mysql_id,
+        c.lr_identification_type AS lr_identification_type_mysql_id,
+        c.resources_type AS resources_type_mysql_id,
+        -- IDs de MySQL para relaciones con country, state y city
+        c.country AS country_mysql_id,
+        c.city AS city_mysql_id,
+        -- Valores de texto para referencia (opcional)
         sector_item.value AS sector_value,
         snies_item.value AS snies_sector_value,
         size_item.value AS size_value,
@@ -64,10 +78,10 @@ const migrateCompaniesFromMySQL = async () => {
         business_sector_item.value AS business_sector_value,
         id_type_item.value AS identification_type_value,
         lr_id_type_item.value AS lr_identification_type_value,
-        -- Relaciones con country y city
         country.name AS country_name,
         country.sortname AS country_code,
         city.name AS city_name,
+        state.id AS state_mysql_id,
         state.name AS state_name,
         state.dian_code AS state_code
       FROM company c
@@ -137,6 +151,67 @@ const migrateCompaniesFromMySQL = async () => {
           return 'pending_approval';
         };
         
+        // Buscar relaciones en MongoDB usando mysqlId
+        // Items - todas las relaciones con item
+        const sectorItem = mysqlCompany.sector_mysql_id 
+          ? await Item.findOne({ mysqlId: mysqlCompany.sector_mysql_id })
+          : null;
+        const sniesSectorItem = mysqlCompany.snies_sector_mysql_id 
+          ? await Item.findOne({ mysqlId: mysqlCompany.snies_sector_mysql_id })
+          : null;
+        const sizeItem = mysqlCompany.size_mysql_id 
+          ? await Item.findOne({ mysqlId: mysqlCompany.size_mysql_id })
+          : null;
+        const arlItem = mysqlCompany.arl_mysql_id 
+          ? await Item.findOne({ mysqlId: mysqlCompany.arl_mysql_id })
+          : null;
+        const businessSectorItem = mysqlCompany.business_sector_mysql_id 
+          ? await Item.findOne({ mysqlId: mysqlCompany.business_sector_mysql_id })
+          : null;
+        const identificationTypeItem = mysqlCompany.identification_type_mysql_id 
+          ? await Item.findOne({ mysqlId: mysqlCompany.identification_type_mysql_id })
+          : null;
+        const lrIdentificationTypeItem = mysqlCompany.lr_identification_type_mysql_id 
+          ? await Item.findOne({ mysqlId: mysqlCompany.lr_identification_type_mysql_id })
+          : null;
+        const resourcesTypeItem = mysqlCompany.resources_type_mysql_id 
+          ? await Item.findOne({ mysqlId: mysqlCompany.resources_type_mysql_id })
+          : null;
+        
+        // Verificar relaciones encontradas (debug)
+        if (mysqlCompany.size_mysql_id && !sizeItem) {
+          console.log(`   ⚠️  Advertencia: No se encontró Item con mysqlId=${mysqlCompany.size_mysql_id} para size`);
+        }
+        if (mysqlCompany.sector_mysql_id && !sectorItem) {
+          console.log(`   ⚠️  Advertencia: No se encontró Item con mysqlId=${mysqlCompany.sector_mysql_id} para sector`);
+        }
+        if (mysqlCompany.arl_mysql_id && !arlItem) {
+          console.log(`   ⚠️  Advertencia: No se encontró Item con mysqlId=${mysqlCompany.arl_mysql_id} para arl`);
+        }
+        
+        // Ubicaciones - todas las relaciones con country, state y city
+        const countryMongo = mysqlCompany.country_mysql_id 
+          ? await Country.findOne({ mysqlId: mysqlCompany.country_mysql_id })
+          : null;
+        const cityMongo = mysqlCompany.city_mysql_id 
+          ? await City.findOne({ mysqlId: mysqlCompany.city_mysql_id })
+          : null;
+        // Obtener state desde city si existe
+        let stateMongo = null;
+        if (cityMongo && cityMongo.state) {
+          stateMongo = await State.findById(cityMongo.state);
+        } else if (mysqlCompany.state_mysql_id) {
+          stateMongo = await State.findOne({ mysqlId: mysqlCompany.state_mysql_id });
+        }
+        
+        // Verificar ubicaciones encontradas (debug)
+        if (mysqlCompany.country_mysql_id && !countryMongo) {
+          console.log(`   ⚠️  Advertencia: No se encontró Country con mysqlId=${mysqlCompany.country_mysql_id}`);
+        }
+        if (mysqlCompany.city_mysql_id && !cityMongo) {
+          console.log(`   ⚠️  Advertencia: No se encontró City con mysqlId=${mysqlCompany.city_mysql_id}`);
+        }
+        
         // Consultar oficinas (branches)
         const officesSql = `
           SELECT 
@@ -144,9 +219,12 @@ const migrateCompaniesFromMySQL = async () => {
             co.address,
             co.phone,
             co.dominio,
+            co.country AS country_mysql_id,
+            co.city AS city_mysql_id,
             country.name AS country_name,
             country.sortname AS country_code,
             city.name AS city_name,
+            state.id AS state_mysql_id,
             state.name AS state_name,
             state.dian_code AS state_code
           FROM company_office co
@@ -169,10 +247,13 @@ const migrateCompaniesFromMySQL = async () => {
             cu.cmp_alternate_email,
             cu.address,
             cu.is_tutor,
-            country.id AS country_mysql_id,
+            cu.country AS country_mysql_id,
+            cu.city AS city_mysql_id,
+            state.id AS state_mysql_id,
             country.name AS country_name,
-            city.id AS city_mysql_id,
             city.name AS city_name,
+            state.name AS state_name,
+            state.dian_code AS state_code,
             u.name AS user_name,
             u.last_name AS user_last_name,
             u.user_name AS user_email,
@@ -183,23 +264,10 @@ const migrateCompaniesFromMySQL = async () => {
           LEFT JOIN user u ON cu.company_user_id = u.id
           LEFT JOIN country ON cu.country = country.id
           LEFT JOIN city ON cu.city = city.id
+          LEFT JOIN state ON city.state_id = state.id
           WHERE cu.company_id = ?
         `;
         const users = await query(usersSql, [mysqlCompany.mysql_id]);
-        
-        // Crear mapa de mysqlCountryId y mysqlCityId a ObjectId de MongoDB
-        const countryMongoMap = new Map();
-        const cityMongoMap = new Map();
-        
-        if (mysqlCompany.country) {
-          const countryMongo = await Country.findOne({ mysqlId: mysqlCompany.country });
-          if (countryMongo) countryMongoMap.set(mysqlCompany.country, countryMongo._id);
-        }
-        
-        if (mysqlCompany.city) {
-          const cityMongo = await City.findOne({ mysqlId: mysqlCompany.city });
-          if (cityMongo) cityMongoMap.set(mysqlCompany.city, cityMongo._id);
-        }
         
         // Construir objeto para MongoDB
         const mongoCompany = {
@@ -210,25 +278,30 @@ const migrateCompaniesFromMySQL = async () => {
           name: mysqlCompany.business_name || mysqlCompany.trade_name || '',
           legalName: mysqlCompany.business_name || null,
           commercialName: mysqlCompany.trade_name || null,
-          idType: mapIdType(mysqlCompany.identification_type_value),
+          idType: identificationTypeItem?.value 
+            ? mapIdType(identificationTypeItem.value) 
+            : mapIdType(mysqlCompany.identification_type_value),
           idNumber: mysqlCompany.identification_number || '',
           nit: mysqlCompany.identification_number || null,
           
-          // Clasificaciones
-          sector: mysqlCompany.sector_value || null,
-          sectorMineSnies: mysqlCompany.snies_sector_value || null,
-          economicSector: mysqlCompany.business_sector_value || null,
+          // Clasificaciones - usar valores de los items encontrados en MongoDB usando mysqlId
+          sector: sectorItem?.value || mysqlCompany.sector_value || null,
+          sectorMineSnies: sniesSectorItem?.value || mysqlCompany.snies_sector_value || null,
+          economicSector: businessSectorItem?.value || mysqlCompany.business_sector_value || null,
           ciiuCode: mysqlCompany.ciiu_code || null,
-          size: mapSize(mysqlCompany.size_value),
-          arl: mysqlCompany.arl_value || null,
+          // Size: buscar en MongoDB usando mysqlId, luego mapear el valor encontrado
+          size: sizeItem?.value 
+            ? mapSize(sizeItem.value) 
+            : (mysqlCompany.size_value ? mapSize(mysqlCompany.size_value) : 'mediana'),
+          arl: arlItem?.value || mysqlCompany.arl_value || null,
           
-          // Contacto y ubicación - usar ObjectId de MongoDB para country y city
+          // Contacto y ubicación - usar nombres de las entidades encontradas en MongoDB
           address: mysqlCompany.address || null,
-          city: mysqlCompany.city_name || null, // Mantener nombre para referencia
-          country: mysqlCompany.country_name || 'Colombia', // Mantener nombre para referencia
-          countryCode: mysqlCompany.country_code || null,
-          state: mysqlCompany.state_name || null,
-          stateCode: mysqlCompany.state_code || null,
+          city: cityMongo?.name || mysqlCompany.city_name || null,
+          country: countryMongo?.name || mysqlCompany.country_name || 'Colombia',
+          countryCode: countryMongo?.sortname || mysqlCompany.country_code || null,
+          state: stateMongo?.name || mysqlCompany.state_name || null,
+          stateCode: stateMongo?.dianCode || mysqlCompany.state_code || null,
           phone: mysqlCompany.phone_number || null,
           email: mysqlCompany.lr_email || null, // Email del representante legal
           website: mysqlCompany.web || null,
@@ -270,21 +343,35 @@ const migrateCompaniesFromMySQL = async () => {
             firstName: mysqlCompany.lr_firstname || null,
             lastName: mysqlCompany.lr_lastname || null,
             email: mysqlCompany.lr_email || null,
-            idType: mapIdType(mysqlCompany.lr_identification_type_value),
+            idType: lrIdentificationTypeItem?.value 
+              ? mapIdType(lrIdentificationTypeItem.value) 
+              : mapIdType(mysqlCompany.lr_identification_type_value),
             idNumber: mysqlCompany.lr_identification || null
           },
           
-          // Branches (oficinas)
-          branches: offices.map(office => ({
-            name: office.name || '',
-            address: office.address || '',
-            phone: office.phone || '',
-            country: office.country_name || null, // Mantener nombre para referencia
-            countryCode: office.country_code || null,
-            state: office.state_name || null,
-            stateCode: office.state_code || null,
-            city: office.city_name || null, // Mantener nombre para referencia
-            domain: office.dominio || null
+          // Branches (oficinas) - buscar relaciones en MongoDB
+          branches: await Promise.all(offices.map(async (office) => {
+            const officeCountryMongo = office.country_mysql_id 
+              ? await Country.findOne({ mysqlId: office.country_mysql_id })
+              : null;
+            const officeCityMongo = office.city_mysql_id 
+              ? await City.findOne({ mysqlId: office.city_mysql_id })
+              : null;
+            const officeStateMongo = office.state_mysql_id 
+              ? await State.findOne({ mysqlId: office.state_mysql_id })
+              : null;
+            
+            return {
+              name: office.name || '',
+              address: office.address || '',
+              phone: office.phone || '',
+              country: officeCountryMongo?.name || office.country_name || null,
+              countryCode: officeCountryMongo?.sortname || office.country_code || null,
+              state: officeStateMongo?.name || office.state_name || null,
+              stateCode: officeStateMongo?.dianCode || office.state_code || null,
+              city: officeCityMongo?.name || office.city_name || null,
+              domain: office.dominio || null
+            };
           })),
           
           // Contacts (usuarios de la empresa) - crear usuarios para cada contacto
@@ -293,6 +380,21 @@ const migrateCompaniesFromMySQL = async () => {
             const userName = user.user_name || '';
             const userLastName = user.user_last_name || '';
             const fullName = `${userName} ${userLastName}`.trim() || userEmail;
+            
+            // Buscar relaciones de ubicación en MongoDB usando mysqlId
+            const userCountryMongo = user.country_mysql_id 
+              ? await Country.findOne({ mysqlId: user.country_mysql_id })
+              : null;
+            const userCityMongo = user.city_mysql_id 
+              ? await City.findOne({ mysqlId: user.city_mysql_id })
+              : null;
+            // Obtener state desde city si existe
+            let userStateMongo = null;
+            if (userCityMongo && userCityMongo.state) {
+              userStateMongo = await State.findById(userCityMongo.state);
+            } else if (user.state_mysql_id) {
+              userStateMongo = await State.findOne({ mysqlId: user.state_mysql_id });
+            }
             
             // Crear o buscar usuario en MongoDB
             let mongoUser = await User.findOne({ email: userEmail.toLowerCase() });
@@ -323,8 +425,9 @@ const migrateCompaniesFromMySQL = async () => {
               firstName: userName || '',
               lastName: userLastName || '',
               alternateEmail: user.cmp_alternate_email || user.personal_email || null,
-              country: user.country_name || null,
-              city: user.city_name || null,
+              country: userCountryMongo?.name || user.country_name || null,
+              city: userCityMongo?.name || user.city_name || null,
+              state: userStateMongo?.name || user.state_name || null,
               address: user.address || null,
               phone: user.phone || null,
               extension: user.extent || null,

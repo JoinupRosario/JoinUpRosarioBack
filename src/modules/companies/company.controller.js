@@ -7,31 +7,71 @@ import { logHelper } from "../logs/log.service.js";
 // Obtener todas las empresas
 export const getCompanies = async (req, res) => {
   try {
-    const { page = 1, limit = 10, status, sector, search } = req.query;
+    const { 
+      page = 1, 
+      limit = 10, 
+      status, 
+      sector, 
+      city,
+      country,
+      size,
+      search 
+    } = req.query;
+    
     const filter = {};
     
+    // Filtros exactos
     if (status) filter.status = status;
-    if (sector) filter.sector = sector;
+    if (sector) filter.sector = { $regex: sector, $options: "i" };
+    if (city) filter.city = { $regex: city, $options: "i" };
+    if (country) filter.country = { $regex: country, $options: "i" };
+    if (size) filter.size = size;
+    
+    // Búsqueda por palabras clave (busca en múltiples campos)
     if (search) {
+      const searchRegex = { $regex: search, $options: "i" };
       filter.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { nit: { $regex: search, $options: "i" } }
+        { name: searchRegex },
+        { legalName: searchRegex },
+        { commercialName: searchRegex },
+        { nit: searchRegex },
+        { idNumber: searchRegex },
+        { sector: searchRegex },
+        { city: searchRegex },
+        { country: searchRegex },
+        { email: searchRegex },
+        { phone: searchRegex },
+        { description: searchRegex },
+        { 'contact.name': searchRegex },
+        { 'contact.email': searchRegex },
+        { 'legalRepresentative.firstName': searchRegex },
+        { 'legalRepresentative.lastName': searchRegex },
+        { 'legalRepresentative.email': searchRegex }
       ];
     }
 
-    const companies = await Company.find(filter)
-      .populate("approvedBy", "name email")
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
-      .sort({ createdAt: -1 });
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
 
-    const total = await Company.countDocuments(filter);
+    const [companies, total] = await Promise.all([
+      Company.find(filter)
+        .populate("approvedBy", "name email")
+        .limit(limitNum)
+        .skip(skip)
+        .sort({ createdAt: -1 })
+        .lean(),
+      Company.countDocuments(filter)
+    ]);
 
     res.json({
-      companies,
-      totalPages: Math.ceil(total / limit),
-      currentPage: page,
-      total
+      data: companies,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum)
+      }
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
