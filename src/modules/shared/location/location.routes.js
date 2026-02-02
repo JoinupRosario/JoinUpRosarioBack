@@ -7,6 +7,27 @@ import {
   deleteItem,
   getAvailableListIds
 } from "./controllers/item.controller.js";
+import {
+  getCountries,
+  getCountryById,
+  createCountry,
+  updateCountry,
+  deleteCountry
+} from "./controllers/country.controller.js";
+import {
+  getStates,
+  getStateById,
+  createState,
+  updateState,
+  deleteState
+} from "./controllers/state.controller.js";
+import {
+  getCities,
+  getCityById,
+  createCity,
+  updateCity,
+  deleteCity
+} from "./controllers/city.controller.js";
 
 const router = express.Router();
 
@@ -28,5 +49,26 @@ router.delete("/items/:id", deleteItem);
 
 // Obtener listIds disponibles: GET /api/location/list-ids
 router.get("/list-ids", getAvailableListIds);
+
+// ==================== COUNTRIES (CRUD) ====================
+router.get("/countries", getCountries);
+router.get("/countries/:id", getCountryById);
+router.post("/countries", createCountry);
+router.put("/countries/:id", updateCountry);
+router.delete("/countries/:id", deleteCountry);
+
+// ==================== STATES (CRUD) ====================
+router.get("/states", getStates);
+router.get("/states/:id", getStateById);
+router.post("/states", createState);
+router.put("/states/:id", updateState);
+router.delete("/states/:id", deleteState);
+
+// ==================== CITIES (CRUD) ====================
+router.get("/cities", getCities);
+router.get("/cities/:id", getCityById);
+router.post("/cities", createCity);
+router.put("/cities/:id", updateCity);
+router.delete("/cities/:id", deleteCity);
 
 export default router;

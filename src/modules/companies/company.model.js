@@ -151,7 +151,15 @@ const companySchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User"
     },
-    approvedAt: { type: Date }
+    approvedAt: { type: Date },
+    
+    // ID original de MySQL (para referencia durante migración)
+    mysqlId: {
+      type: Number,
+      unique: true,
+      sparse: true,
+      index: true
+    }
   },
   { timestamps: true }
 );

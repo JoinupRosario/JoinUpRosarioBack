@@ -15,7 +15,12 @@
     "migrate:items": "node src/seeders/migrateItemsFromMySQL.js",
     "migrate:items-by-listid": "node src/seeders/migrateItemsByListId.js",
     "analyze:listids": "node src/seeders/analyzeListIds.js",
-    "query:dynamic-list": "node src/seeders/queryDynamicList.js"
+    "query:dynamic-list": "node src/seeders/queryDynamicList.js",
+    "query:company": "node src/seeders/queryCompanyData.js",
+    "migrate:countries": "node src/seeders/migrateCountriesFromMySQL.js",
+    "migrate:states": "node src/seeders/migrateStatesFromMySQL.js",
+    "migrate:cities": "node src/seeders/migrateCitiesFromMySQL.js",
+    "migrate:companies": "node src/seeders/migrateCompaniesFromMySQL.js"
   },
   "keywords": [],
   "author": "",

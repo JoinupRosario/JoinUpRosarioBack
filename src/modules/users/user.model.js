@@ -33,6 +33,10 @@ const userSchema = new mongoose.Schema({
     type: String,
     enum: ['administrativo', 'estudiante', 'entidades'],
     trim: true
+  },
+  debeCambiarPassword: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true,
