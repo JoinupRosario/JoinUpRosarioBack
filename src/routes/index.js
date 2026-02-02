@@ -13,6 +13,7 @@ import userAdministrativoRoutes from '../modules/usersAdministrativos/userAdmini
 import sucursalRoutes from '../modules/sucursales/sucursal.routes.js';
 import postulantRoutes from '../modules/postulants/routes/postulant.routes.js';
 import postulantLogRoutes from '../modules/postulants/routes/postulantLogs.routes.js';
+import locationRoutes from '../modules/shared/location/location.routes.js';
 
 const router = express.Router();
 
@@ -30,5 +31,6 @@ router.use("/users-administrativos", userAdministrativoRoutes);
 router.use("/sucursales", sucursalRoutes);
 router.use("/postulants", postulantRoutes);
 router.use("/postulant-logs", postulantLogRoutes);
+router.use("/locations", locationRoutes);
 
 export default router;

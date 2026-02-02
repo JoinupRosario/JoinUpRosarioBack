@@ -7,6 +7,7 @@ import compression from "compression";
 import path from "path";
 import { fileURLToPath } from "url";
 import connectDB from "./config/db.js";
+import connectMySQL from "./config/mysql.js";
 import routes from "./routes/index.js";
 import { handleUploadError } from "./middlewares/upload.js";
 
@@ -16,7 +17,14 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 const app = express();
+
+// Conectar a MongoDB
 connectDB();
+
+// Conectar a MySQL
+connectMySQL().catch(err => {
+  console.error('⚠️  No se pudo conectar a MySQL:', err.message);
+});
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
