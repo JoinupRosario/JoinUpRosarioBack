@@ -6,7 +6,7 @@ import Program from "../modules/program/model/program.model.js";
 import ProgramFaculty from "../modules/program/model/programFaculty.model.js";
 import Item from "../modules/shared/reference-data/models/item.schema.js";
 import City from "../modules/shared/location/models/city.schema.js";
-import Branch from "../modules/shared/location/models/branch.schema.js";
+import Sucursal from "../modules/sucursales/sucursal.model.js";
 import ProgramsTypePractice from "../modules/program/model/programsTypePractices.model.js";
 
 dotenv.config();
@@ -33,7 +33,7 @@ const CLEAR_COLLECTIONS_BEFORE_MIGRATE = process.env.CLEAR_COLLECTIONS_BEFORE_MI
  *   2) migrateStatesFromMySQL.js
  *   3) migrateCitiesFromMySQL.js
  *   4) migrateItemsFromMySQL.js
- *   5) migrateBranchesFromMySQL.js   (sedes)
+ *   5) migrateSucursalesFromMySQL.js o sucursales ya cargadas (sedes)
  *   6) migrateFacultiesAndProgramsFromMySQL.js (esta)
  */
 const migrateFacultiesAndProgramsFromMySQL = async () => {
@@ -66,6 +66,18 @@ const migrateFacultiesAndProgramsFromMySQL = async () => {
 
     // --- 1. Facultades (tabla faculty - tenant-1.sql) ---
     try {
+      // Mapa branch_id → code para resolver sucursal por código (sucursales = sedes, mismo concepto que branch)
+      let branchCodeById = new Map();
+      try {
+        const branchRows = await query("SELECT branch_id, code FROM `branch`");
+        branchRows.forEach((b) => {
+          const id = b.branch_id != null ? Number(b.branch_id) : null;
+          if (id != null) branchCodeById.set(id, b.code != null ? String(b.code).trim().toUpperCase() : null);
+        });
+      } catch (_) {
+        // Tabla branch puede no existir si ya se migró todo a sucursales
+      }
+
       const rows = await query(
         "SELECT faculty_id, code, name, authorized_signer, identification_type_signer, identification_signer, identification_from_signer, position_signer, mail_signer, academic_signer, position_academic_signer, mail_academic_signer, branch_id, date_creation, user_creater, date_update, user_update, status FROM `faculty` ORDER BY faculty_id"
       );
@@ -80,8 +92,9 @@ const migrateFacultiesAndProgramsFromMySQL = async () => {
           }
           const identificationFromSigner = r.identification_from_signer != null
             ? (await City.findOne({ mysqlId: r.identification_from_signer }))?._id : null;
-          const branchId = r.branch_id != null
-            ? (await Branch.findOne({ $or: [{ mysqlId: r.branch_id }, { branchId: r.branch_id }] }))?._id : null;
+          const branchCode = r.branch_id != null ? branchCodeById.get(r.branch_id) : null;
+          const sucursalId = branchCode != null
+            ? (await Sucursal.findOne({ codigo: branchCode }))?._id : null;
           const identificationTypeSigner = r.identification_type_signer != null
             ? (await Item.findOne({ mysqlId: r.identification_type_signer }))?._id : null;
           await Faculty.create({
@@ -98,7 +111,7 @@ const migrateFacultiesAndProgramsFromMySQL = async () => {
             academicSigner: r.academic_signer ?? null,
             positionAcademicSigner: r.position_academic_signer ?? null,
             mailAcademicSigner: r.mail_academic_signer ?? null,
-            branchId,
+            sucursalId,
             dateCreation: r.date_creation ?? null,
             userCreator: r.user_creater ?? null,
             dateUpdate: r.date_update ?? null,

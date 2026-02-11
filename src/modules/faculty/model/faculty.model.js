@@ -4,7 +4,7 @@ import mongoose from "mongoose";
  * Modelo de dominio: Facultad.
  * RQ02_HU003: Código Facultad (alfanumérico), Nombre Facultad texto 255, Estado.
  * mysqlId: PK de la tabla MySQL `faculty` (faculty_id), para referencias en migraciones.
- * FKs MySQL: identification_from_signer → city.id, branch_id → branch.branch_id, identification_type_signer → item.id.
+ * FKs MySQL: identification_from_signer → city.id, branch_id → sucursal (sedes), identification_type_signer → item.id.
  */
 const facultySchema = new mongoose.Schema(
   {
@@ -62,10 +62,10 @@ const facultySchema = new mongoose.Schema(
     mailAcademicSigner: { 
       type: String
     },
-    /** Ref a la sede. */
-    branchId: { 
+    /** Ref a la sucursal (sede). */
+    sucursalId: { 
       type: mongoose.Schema.Types.ObjectId, 
-      ref: "Branch"
+      ref: "Sucursal"
     },
     dateCreation: { 
       type: Date
@@ -91,5 +91,6 @@ facultySchema.index({ code: 1 });
 facultySchema.index({ name: 1 });
 facultySchema.index({ status: 1 });
 facultySchema.index({ mysqlId: 1 });
+facultySchema.index({ sucursalId: 1 });
 
 export default mongoose.model("Faculty", facultySchema, "faculties");
