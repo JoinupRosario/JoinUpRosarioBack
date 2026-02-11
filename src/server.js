@@ -134,4 +134,11 @@ app.use((error, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+
+// Solo hacer listen si no estamos en Vercel
+if (process.env.VERCEL !== "1") {
+  app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+}
+
+// Exportar para Vercel
+export default app;
