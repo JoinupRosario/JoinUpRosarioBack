@@ -15,6 +15,12 @@ const sucursalSchema = new mongoose.Schema(
       trim: true,
       uppercase: true
     },
+    /** Id de la sede en MySQL (tabla branch). Para buscar sucursal por branch_id en migraciones o datos legacy. */
+    branchId: {
+      type: Number,
+      sparse: true,
+      index: true,
+    },
     direccion: { 
       type: String,
       trim: true
@@ -84,6 +90,7 @@ const sucursalSchema = new mongoose.Schema(
 sucursalSchema.index({ codigo: 1 });
 sucursalSchema.index({ nombre: 1 });
 sucursalSchema.index({ estado: 1 });
+sucursalSchema.index({ branchId: 1 });
 
 const Sucursal = mongoose.model("Sucursal", sucursalSchema);
 

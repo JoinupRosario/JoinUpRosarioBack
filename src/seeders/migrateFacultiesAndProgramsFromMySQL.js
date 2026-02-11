@@ -66,16 +66,16 @@ const migrateFacultiesAndProgramsFromMySQL = async () => {
 
     // --- 1. Facultades (tabla faculty - tenant-1.sql) ---
     try {
-      // Mapa branch_id → code para resolver sucursal por código (sucursales = sedes, mismo concepto que branch)
-      let branchCodeById = new Map();
+      // Mapa id sede en MySQL → código, para resolver Sucursal en MongoDB por codigo (sucursales = sedes)
+      let sucursalCodigoByMysqlSedeId = new Map();
       try {
-        const branchRows = await query("SELECT branch_id, code FROM `branch`");
-        branchRows.forEach((b) => {
-          const id = b.branch_id != null ? Number(b.branch_id) : null;
-          if (id != null) branchCodeById.set(id, b.code != null ? String(b.code).trim().toUpperCase() : null);
+        const rowsSedes = await query("SELECT branch_id, code FROM `branch`");
+        rowsSedes.forEach((s) => {
+          const id = s.branch_id != null ? Number(s.branch_id) : null;
+          if (id != null) sucursalCodigoByMysqlSedeId.set(id, s.code != null ? String(s.code).trim().toUpperCase() : null);
         });
       } catch (_) {
-        // Tabla branch puede no existir si ya se migró todo a sucursales
+        // Tabla de sedes en MySQL puede no existir si ya se migró todo a sucursales
       }
 
       const rows = await query(
@@ -87,14 +87,32 @@ const migrateFacultiesAndProgramsFromMySQL = async () => {
           const pk = r.faculty_id != null ? Number(r.faculty_id) : null;
           const existing = await Faculty.findOne({ $or: [{ mysqlId: pk }, { facultyId: r.faculty_id }] });
           if (existing) {
+            // Si la facultad ya existe pero no tiene sede: buscar sucursal por branchId o por codigo
+            let sucursalIdExist = null;
+            if (r.branch_id != null) {
+              sucursalIdExist = (await Sucursal.findOne({ branchId: r.branch_id }))?._id ?? null;
+              if (!sucursalIdExist) {
+                const codigoSucursalExist = sucursalCodigoByMysqlSedeId.get(r.branch_id);
+                if (codigoSucursalExist) sucursalIdExist = (await Sucursal.findOne({ codigo: codigoSucursalExist }))?._id ?? null;
+              }
+            }
+            if (sucursalIdExist && !existing.sucursalId) {
+              await Faculty.updateOne({ _id: existing._id }, { $set: { sucursalId: sucursalIdExist } });
+            }
             stats.faculty.skipped++;
             continue;
           }
           const identificationFromSigner = r.identification_from_signer != null
             ? (await City.findOne({ mysqlId: r.identification_from_signer }))?._id : null;
-          const branchCode = r.branch_id != null ? branchCodeById.get(r.branch_id) : null;
-          const sucursalId = branchCode != null
-            ? (await Sucursal.findOne({ codigo: branchCode }))?._id : null;
+          // Resolver sucursal: primero por branchId (tabla sucursales), si no por codigo (mapeo MySQL branch)
+          let sucursalId = null;
+          if (r.branch_id != null) {
+            sucursalId = (await Sucursal.findOne({ branchId: r.branch_id }))?._id ?? null;
+            if (!sucursalId) {
+              const codigoSucursal = sucursalCodigoByMysqlSedeId.get(r.branch_id);
+              if (codigoSucursal) sucursalId = (await Sucursal.findOne({ codigo: codigoSucursal }))?._id ?? null;
+            }
+          }
           const identificationTypeSigner = r.identification_type_signer != null
             ? (await Item.findOne({ mysqlId: r.identification_type_signer }))?._id : null;
           await Faculty.create({
@@ -121,6 +139,21 @@ const migrateFacultiesAndProgramsFromMySQL = async () => {
           stats.faculty.migrated++;
         }
         console.log(`   ✅ Facultades migradas: ${stats.faculty.migrated}, omitidas: ${stats.faculty.skipped}\n`);
+
+        // Asignar sucursal por defecto a facultades que siguen sin sede (p. ej. migración sin sucursales o códigos no coincidentes)
+        const facultadesSinSede = await Faculty.find({ sucursalId: { $in: [null, undefined] } }).limit(5000);
+        if (facultadesSinSede.length > 0) {
+          const sucursalPorDefecto = await Sucursal.findOne({ codigo: "ROSARIO_PRINCIPAL" }) ?? await Sucursal.findOne();
+          if (sucursalPorDefecto) {
+            const result = await Faculty.updateMany(
+              { sucursalId: { $in: [null, undefined] } },
+              { $set: { sucursalId: sucursalPorDefecto._id } }
+            );
+            if (result.modifiedCount > 0) {
+              console.log(`   🔗 Sucursal por defecto asignada a ${result.modifiedCount} facultad(es) sin sede.\n`);
+            }
+          }
+        }
       } else {
         console.log("⚠️  No hay registros en `faculty`\n");
       }

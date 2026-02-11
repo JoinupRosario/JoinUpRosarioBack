@@ -71,7 +71,7 @@ export const getFaculties = async (req, res) => {
     const skip = (pageNum - 1) * limitNum;
 
     const [data, total] = await Promise.all([
-      Faculty.find(filter).sort({ name: 1 }).skip(skip).limit(limitNum).lean(),
+      Faculty.find(filter).sort({ name: 1 }).skip(skip).limit(limitNum).populate("sucursalId", "nombre codigo").lean(),
       Faculty.countDocuments(filter),
     ]);
 
@@ -104,7 +104,9 @@ export const getFacultiesActiveList = async (req, res) => {
 
 export const getFacultyById = async (req, res) => {
   try {
-    const faculty = await Faculty.findById(req.params.id);
+    const faculty = await Faculty.findById(req.params.id)
+      .populate("sucursalId", "nombre codigo")
+      .lean();
     if (!faculty) {
       return res.status(404).json({ message: "Facultad no encontrada" });
     }
@@ -116,7 +118,9 @@ export const getFacultyById = async (req, res) => {
 
 export const getFacultyByFacultyId = async (req, res) => {
   try {
-    const faculty = await Faculty.findOne({ facultyId: parseInt(req.params.facultyId, 10) });
+    const faculty = await Faculty.findOne({ facultyId: parseInt(req.params.facultyId, 10) })
+      .populate("sucursalId", "nombre codigo")
+      .lean();
     if (!faculty) {
       return res.status(404).json({ message: "Facultad no encontrada" });
     }
@@ -141,7 +145,9 @@ export const updateFaculty = async (req, res) => {
       req.params.id,
       req.body,
       { new: true, runValidators: true }
-    );
+    )
+      .populate("sucursalId", "nombre codigo")
+      .lean();
     if (!faculty) {
       return res.status(404).json({ message: "Facultad no encontrada" });
     }
