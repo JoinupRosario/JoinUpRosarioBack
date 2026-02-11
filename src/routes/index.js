@@ -37,6 +37,6 @@ router.use("/postulant-logs", postulantLogRoutes);
 router.use("/locations", locationRoutes);
 router.use("/faculties", facultyRoutes);
 router.use("/programs", programRoutes);
-router.use("/programfaculties", programFacultyRoutes);
+router.use("/program-faculties", programFacultyRoutes);
 
 export default router;
