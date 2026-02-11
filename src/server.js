@@ -6,6 +6,7 @@ import helmet from "helmet";
 import compression from "compression";
 import path from "path";
 import { fileURLToPath } from "url";
+import mongoose from "mongoose";
 import connectDB from "./config/db.js";
 import routes from "./routes/index.js";
 import { handleUploadError } from "./middlewares/upload.js";
@@ -16,7 +17,27 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 const app = express();
-connectDB();
+
+// Conectar a la base de datos
+// En Vercel, la conexión se mantiene entre invocaciones si está configurado correctamente
+if (process.env.VERCEL !== "1") {
+  connectDB();
+} else {
+  // En Vercel, conectar de forma lazy en el primer request
+  let dbConnecting = false;
+  app.use(async (req, res, next) => {
+    if (mongoose.connection.readyState === 0 && !dbConnecting) {
+      dbConnecting = true;
+      try {
+        await connectDB();
+      } catch (error) {
+        console.error("Error conectando a DB en Vercel:", error);
+        dbConnecting = false;
+      }
+    }
+    next();
+  });
+}
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -28,6 +49,8 @@ app.use(
       const allowedOrigins = [
         "https://app.rosario.mozartia.com",
         "https://app.rosario.mozartia.com/",
+        "https://join-up-rosario-front.vercel.app",
+        "https://join-up-rosario-front.vercel.app/",
         "http://localhost:5173",
         "http://localhost:5174",
       ];
@@ -70,6 +93,7 @@ app.use((req, res, next) => {
     const allowedOrigins = [
       "https://app.rosario.mozartia.com",
       "https://app.rosario.mozartia.com/",
+      "https://join-up-rosario-front.vercel.app/",
       "http://localhost:5173",
       "http://localhost:5174",
     ];
@@ -96,6 +120,11 @@ app.use("/api", (req, res, next) => {
 // Servir archivos estáticos de uploads
 // Los archivos se guardan en src/uploads/, __dirname es src/
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+// Ruta de prueba para verificar que el servidor funciona
+app.get("/", (req, res) => {
+  res.json({ message: "Servidor funcionando correctamente", timestamp: new Date().toISOString() });
+});
 
 // Rutas principales
 app.use("/api", routes);
@@ -134,4 +163,16 @@ app.use((error, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+
+// Solo hacer listen si no estamos en Vercel
+if (process.env.VERCEL !== "1") {
+  app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+}
+
+// Exportar para Vercel - debe ser una función handler
+// Vercel pasa (req, res) directamente al handler
+const handler = (req, res) => {
+  return app(req, res);
+};
+
+export default handler;
