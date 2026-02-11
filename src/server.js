@@ -6,6 +6,7 @@ import helmet from "helmet";
 import compression from "compression";
 import path from "path";
 import { fileURLToPath } from "url";
+import mongoose from "mongoose";
 import connectDB from "./config/db.js";
 import routes from "./routes/index.js";
 import { handleUploadError } from "./middlewares/upload.js";
@@ -16,7 +17,27 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 const app = express();
-connectDB();
+
+// Conectar a la base de datos
+// En Vercel, la conexión se mantiene entre invocaciones si está configurado correctamente
+if (process.env.VERCEL !== "1") {
+  connectDB();
+} else {
+  // En Vercel, conectar de forma lazy en el primer request
+  let dbConnecting = false;
+  app.use(async (req, res, next) => {
+    if (mongoose.connection.readyState === 0 && !dbConnecting) {
+      dbConnecting = true;
+      try {
+        await connectDB();
+      } catch (error) {
+        console.error("Error conectando a DB en Vercel:", error);
+        dbConnecting = false;
+      }
+    }
+    next();
+  });
+}
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -140,5 +161,7 @@ if (process.env.VERCEL !== "1") {
   app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
 }
 
-// Exportar para Vercel
-export default app;
+// Exportar para Vercel - debe ser una función handler
+export default (req, res) => {
+  return app(req, res);
+};
