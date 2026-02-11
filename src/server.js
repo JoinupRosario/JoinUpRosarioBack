@@ -6,7 +6,6 @@ import helmet from "helmet";
 import compression from "compression";
 import path from "path";
 import { fileURLToPath } from "url";
-import mongoose from "mongoose";
 import connectDB from "./config/db.js";
 import routes from "./routes/index.js";
 import { handleUploadError } from "./middlewares/upload.js";
@@ -17,60 +16,23 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 const app = express();
-
-// Conectar a la base de datos
-// En Vercel, la conexión se mantiene entre invocaciones si está configurado correctamente
-if (process.env.VERCEL !== "1") {
-  connectDB();
-} else {
-  // En Vercel, conectar de forma lazy en el primer request
-  let dbConnecting = false;
-  app.use(async (req, res, next) => {
-    if (mongoose.connection.readyState === 0 && !dbConnecting) {
-      dbConnecting = true;
-      try {
-        await connectDB();
-      } catch (error) {
-        console.error("Error conectando a DB en Vercel:", error);
-        dbConnecting = false;
-      }
-    }
-    next();
-  });
-}
+connectDB();
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// Orígenes permitidos: el navegador SIEMPRE envía Origin SIN barra final
-const ALLOWED_ORIGINS = [
-  "https://app.rosario.mozartia.com",
-  "https://join-up-rosario-front.vercel.app",
-  "http://localhost:5173",
-  "http://localhost:5174",
-];
-
-// 1) Preflight OPTIONS primero: si no devuelve Access-Control-Allow-Origin, el navegador bloquea
-app.use((req, res, next) => {
-  if (req.method === "OPTIONS") {
-    const origin = req.headers.origin;
-    if (origin && ALLOWED_ORIGINS.includes(origin)) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
-    }
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin");
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader("Access-Control-Max-Age", "86400");
-    return res.sendStatus(204);
-  }
-  next();
-});
-
-// 2) CORS para el resto de peticiones
+// Configuración de CORS antes de otros middlewares
 app.use(
   cors({
     origin: function (origin, callback) {
-      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      const allowedOrigins = [
+        "https://app.rosario.mozartia.com",
+        "https://app.rosario.mozartia.com/",
+        "http://localhost:5173",
+        "http://localhost:5174",
+      ];
+      // Permitir requests sin origin (mobile apps, Postman, etc.)
+      if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
         callback(new Error("No permitido por CORS"));
@@ -78,14 +40,21 @@ app.use(
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "Accept",
+      "Origin",
+    ],
     exposedHeaders: ["Authorization"],
-    optionsSuccessStatus: 200,
+    optionsSuccessStatus: 200, // Para navegadores legacy
   })
 );
 
 app.use(morgan("dev"));
 
+// Configurar Helmet para no interferir con CORS
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
@@ -94,6 +63,29 @@ app.use(
 );
 
 app.use(compression());
+
+// Manejar preflight requests explícitamente (antes de las rutas)
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") {
+    const allowedOrigins = [
+      "https://app.rosario.mozartia.com",
+      "https://app.rosario.mozartia.com/",
+      "http://localhost:5173",
+      "http://localhost:5174",
+    ];
+    const origin = req.headers.origin;
+    
+    if (origin && allowedOrigins.includes(origin)) {
+      res.header("Access-Control-Allow-Origin", origin);
+    }
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin");
+    res.header("Access-Control-Allow-Credentials", "true");
+    res.header("Access-Control-Max-Age", "86400"); // 24 horas
+    return res.sendStatus(200);
+  }
+  next();
+});
 
 // Middleware de debugging antes de rutas
 app.use("/api", (req, res, next) => {
@@ -104,11 +96,6 @@ app.use("/api", (req, res, next) => {
 // Servir archivos estáticos de uploads
 // Los archivos se guardan en src/uploads/, __dirname es src/
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
-// Ruta de prueba para verificar que el servidor funciona
-app.get("/", (req, res) => {
-  res.json({ message: "Servidor funcionando correctamente", timestamp: new Date().toISOString() });
-});
 
 // Rutas principales
 app.use("/api", routes);
@@ -147,16 +134,5 @@ app.use((error, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
-
-// Solo hacer listen si no estamos en Vercel
-if (process.env.VERCEL !== "1") {
-  app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
-}
-
-// Exportar para Vercel - debe ser una función handler
-// Vercel pasa (req, res) directamente al handler
-const handler = (req, res) => {
-  return app(req, res);
-};
-
-export default handler;
+app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+ndler;
