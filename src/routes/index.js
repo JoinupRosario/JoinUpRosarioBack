@@ -17,6 +17,7 @@ import locationRoutes from '../modules/shared/location/location.routes.js';
 import facultyRoutes from '../modules/faculty/faculty.routes.js';
 import programRoutes from '../modules/program/program.routes.js';
 import programFacultyRoutes from '../modules/program/programFaculty.routes.js';
+import periodoRoutes from '../modules/periodos/periodo.routes.js';
 
 const router = express.Router();
 
@@ -37,6 +38,7 @@ router.use("/postulant-logs", postulantLogRoutes);
 router.use("/locations", locationRoutes);
 router.use("/faculties", facultyRoutes);
 router.use("/programs", programRoutes);
-router.use("/program-faculties", programFacultyRoutes);
+router.use("/programfaculties", programFacultyRoutes);
+router.use("/periodos", periodoRoutes);
 
 export default router;
