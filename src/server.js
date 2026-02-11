@@ -97,17 +97,14 @@ app.use("/api", (req, res, next) => {
 // Los archivos se guardan en src/uploads/, __dirname es src/
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// Rutas principales con prefijo /api
+// Rutas principales
 app.use("/api", routes);
-// Respaldo sin prefijo: por si el proxy reenvía sin /api (así la ruta sigue encontrándose)
-app.use("/", routes);
 
 // Middleware para manejo de errores de multer
 app.use(handleUploadError);
 
-// Error 404 (registrar qué ruta llegó para depurar en servidor)
+// Error 404
 app.use((req, res) => {
-  console.log(`⚠️ [404] Ruta no encontrada: ${req.method} ${req.originalUrl}`);
   res.status(404).json({ message: "Ruta no encontrada" });
 });
 

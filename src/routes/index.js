@@ -38,5 +38,7 @@ router.use("/locations", locationRoutes);
 router.use("/faculties", facultyRoutes);
 router.use("/programs", programRoutes);
 router.use("/program-faculties", programFacultyRoutes);
+// Alias sin guión: por si proxy/WAF bloquea paths con guión en el servidor
+router.use("/programfaculties", programFacultyRoutes);
 
 export default router;
