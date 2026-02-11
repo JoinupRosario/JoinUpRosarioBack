@@ -92,6 +92,7 @@ app.use((req, res, next) => {
     const allowedOrigins = [
       "https://app.rosario.mozartia.com",
       "https://app.rosario.mozartia.com/",
+      "https://join-up-rosario-front.vercel.app/",
       "http://localhost:5173",
       "http://localhost:5174",
     ];
