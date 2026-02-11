@@ -7,7 +7,6 @@ import compression from "compression";
 import path from "path";
 import { fileURLToPath } from "url";
 import connectDB from "./config/db.js";
-import connectMySQL from "./config/mysql.js";
 import routes from "./routes/index.js";
 import { handleUploadError } from "./middlewares/upload.js";
 
@@ -17,14 +16,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 const app = express();
-
-// Conectar a MongoDB
 connectDB();
-
-// Conectar a MySQL
-connectMySQL().catch(err => {
-  console.error('⚠️  No se pudo conectar a MySQL:', err.message);
-});
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -95,20 +87,15 @@ app.use((req, res, next) => {
   next();
 });
 
-// Ruta de healthcheck para Docker/ECS
-app.get("/ping", (req, res) => {
-  res.status(200).send("pong");
-});
-
-// Servir archivos estáticos de uploads (ANTES de las rutas de API)
-// Los archivos se guardan en src/uploads/, __dirname es src/
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
 // Middleware de debugging antes de rutas
 app.use("/api", (req, res, next) => {
   console.log(`🚀 [SERVER] Petición recibida: ${req.method} ${req.originalUrl}`);
   next();
 });
+
+// Servir archivos estáticos de uploads
+// Los archivos se guardan en src/uploads/, __dirname es src/
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Rutas principales
 app.use("/api", routes);

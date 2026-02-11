@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 import connectDB from "../config/db.js";
 import connectMySQL, { query } from "../config/mysql.js";
-import Item from "../modules/shared/location/models/item.schema.js";
+import Item from "../modules/shared/reference-data/models/item.schema.js";
 
 dotenv.config();
 

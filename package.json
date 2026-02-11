@@ -20,7 +20,8 @@
     "migrate:countries": "node src/seeders/migrateCountriesFromMySQL.js",
     "migrate:states": "node src/seeders/migrateStatesFromMySQL.js",
     "migrate:cities": "node src/seeders/migrateCitiesFromMySQL.js",
-    "migrate:companies": "node src/seeders/migrateCompaniesFromMySQL.js"
+    "migrate:companies": "node src/seeders/migrateCompaniesFromMySQL.js",
+    "migrate:faculties-programs": "node src/seeders/migrateFacultiesAndProgramsFromMySQL.js"
   },
   "keywords": [],
   "author": "",

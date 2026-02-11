@@ -6,7 +6,7 @@ import User from "../modules/users/user.model.js";
 import Country from "../modules/shared/location/models/country.schema.js";
 import State from "../modules/shared/location/models/state.schema.js";
 import City from "../modules/shared/location/models/city.schema.js";
-import Item from "../modules/shared/location/models/item.schema.js";
+import Item from "../modules/shared/reference-data/models/item.schema.js";
 import bcrypt from "bcryptjs";
 
 dotenv.config();

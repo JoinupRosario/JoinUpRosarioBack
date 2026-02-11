@@ -1,4 +1,4 @@
-import Item from "../models/item.schema.js";
+import Item from "../../reference-data/models/item.schema.js";
 
 // CRUD genérico para Items filtrados por listId
 export const getItemsByListId = async (req, res) => {
