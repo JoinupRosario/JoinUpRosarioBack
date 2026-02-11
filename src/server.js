@@ -118,6 +118,11 @@ app.use("/api", (req, res, next) => {
 // Los archivos se guardan en src/uploads/, __dirname es src/
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
+// Ruta de prueba para verificar que el servidor funciona
+app.get("/", (req, res) => {
+  res.json({ message: "Servidor funcionando correctamente", timestamp: new Date().toISOString() });
+});
+
 // Rutas principales
 app.use("/api", routes);
 
@@ -162,6 +167,9 @@ if (process.env.VERCEL !== "1") {
 }
 
 // Exportar para Vercel - debe ser una función handler
-export default (req, res) => {
+// Vercel pasa (req, res) directamente al handler
+const handler = (req, res) => {
   return app(req, res);
 };
+
+export default handler;
