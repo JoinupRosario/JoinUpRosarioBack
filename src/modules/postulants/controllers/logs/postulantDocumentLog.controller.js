@@ -6,24 +6,25 @@ export const getPostulantDocumentLogs = async (req, res) => {
       .populate({
         path: "postulant",
         populate: {
-          path: "user",
-          select: "name email"
+          path: "postulantId",
+          select: "name email code"
         }
       })
       .sort({ createdAt: -1 })
       .lean();
 
     const formattedDocuments = documents.map(doc => {
-      const userName = doc.postulant?.user?.name || '';
-      const userLastname = doc.postulant?.user?.lastname || '';
+      const user = doc.postulant?.postulantId;
+      const userName = user?.name || '';
+      const userLastname = user?.lastname || '';
       const fullName = userLastname 
         ? `${userName} ${userLastname}`.trim()
         : userName;
 
       return {
         full_name: fullName,
-        identification: doc.postulant?.identity_postulant || '-',
-        email: doc.postulant?.user?.email || '-',
+        identification: user?.code ?? doc.postulant?.identity_postulant ?? '-',
+        email: user?.email || '-',
         document_type: doc.document_type || '-',
         content: doc.content || doc.file_url || '-',
         observation: doc.observations || '-',

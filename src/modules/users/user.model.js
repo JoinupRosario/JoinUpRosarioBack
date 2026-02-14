@@ -1,6 +1,13 @@
 import mongoose from 'mongoose';
 
 const userSchema = new mongoose.Schema({
+  /** ID en MySQL (user.id) para migración y mapeo postulant_id → User. */
+  mysqlId: {
+    type: Number,
+    unique: true,
+    sparse: true,
+    index: true,
+  },
   name: {
     type: String,
     required: [true, 'El nombre es obligatorio'],

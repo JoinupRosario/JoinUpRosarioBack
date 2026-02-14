@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 const postulant_academicSchema = new mongoose.Schema({
    postulant: {
     type: mongoose.Types.ObjectId,
-    ref: "postulant",
+    ref: "Postulant",
     required: true
   },
 

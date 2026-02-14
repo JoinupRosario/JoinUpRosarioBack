@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 const postulantLogStatusSchema = new mongoose.Schema({
   postulant: {
     type: mongoose.Types.ObjectId,
-    ref: "postulants",
+    ref: "Postulant",
     required: true
   },
 

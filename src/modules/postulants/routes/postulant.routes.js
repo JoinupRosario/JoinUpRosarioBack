@@ -1,7 +1,8 @@
 import express from "express";
-import { 
-  getPostulants, 
+import {
+  getPostulants,
   getPostulantById,
+  getPostulantProfileData,
   updatePostulant,
   createPostulant,
   uploadProfilePicture,
@@ -20,6 +21,7 @@ router.put("/update/:id", updatePostulant);
 
 // Rutas generales después
 router.get("/", getPostulants);
+router.get("/:id/profile-data", getPostulantProfileData);
 router.get("/:id", getPostulantById);
 
 // Subir foto de perfil

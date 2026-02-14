@@ -6,8 +6,8 @@ export const getPostulantStatusLogs = async (req, res) => {
       .populate({
         path: "postulant",
         populate: {
-          path: "user",
-          select: "name"
+          path: "postulantId",
+          select: "name email"
         }
       })
       .populate("changed_by", "name email")
@@ -15,8 +15,9 @@ export const getPostulantStatusLogs = async (req, res) => {
       .lean();
 
     const formattedLogs = logs.map(log => {
-      const userName = log.postulant?.user?.name || '';
-      const userLastname = log.postulant?.user?.lastname || '';
+      const user = log.postulant?.postulantId;
+      const userName = user?.name || '';
+      const userLastname = user?.lastname || '';
       const fullName = userLastname 
         ? `${userName} ${userLastname}`.trim()
         : userName;

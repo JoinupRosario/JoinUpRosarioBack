@@ -1,46 +1,81 @@
 import mongoose from "mongoose";
 
-const postulantsSchema = new mongoose.Schema({
-  user: {
-    type: mongoose.Types.ObjectId,
-    ref: "User",
-    required: true
+/**
+ * Postulante (estudiante habilitado para prácticas y pasantías).
+ * Estructura según tenant-1.sql tabla `postulant` (CREATE TABLE líneas ~2016-2037).
+ *
+ * Columnas SQL → este schema:
+ *   type_of_identification (bigint→item), gender (bigint→item), dateBirth, country_birth_id,
+ *   state_birth_id, city_birth_id, phone, address, country_residence_id, state_residence_id,
+ *   city_residence_id, alternate_email, linkedin_link, instagram, twitter, personal_website,
+ *   photo_id (→attachment), filling_percentage, filled, postulant_id (PK, FK→user.id).
+ *
+ * 7 FK: city_birth_id→city, city_residence_id→city, country_birth_id→country,
+ * country_residence_id→country, state_birth_id→state, state_residence_id→state, postulant_id→user.
+ */
+const postulantsSchema = new mongoose.Schema(
+  {
+    /** PK en MySQL; además FK a user(id). Ref al usuario en MongoDB. */
+    postulantId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+    /** ID en MySQL (postulant_id) para migración y referencias legacy. */
+    mysqlId: {
+      type: Number,
+      unique: true,
+      sparse: true,
+    },
+    /** Tipo de documento (item.id en MySQL). */
+    typeOfIdentification: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "items",
+    },
+    /** Género (item.id en MySQL). */
+    gender: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "items",
+    },
+    dateBirth: { type: Date },
+    phone: { type: String, maxlength: 20 },
+    address: { type: String, maxlength: 150 },
+    alternateEmail: { type: String, required: true, maxlength: 100 },
+    linkedinLink: { type: String, maxlength: 100 },
+    instagram: { type: String, maxlength: 250 },
+    twitter: { type: String, maxlength: 100 },
+    personalWebsite: { type: String, maxlength: 100 },
+    /** Ref a attachment (photo) o ruta del archivo. */
+    photoId: { type: mongoose.Schema.Types.Mixed },
+    fillingPercentage: { type: Number, default: 0 },
+    filled: { type: Boolean, default: false },
+    /** Estado para la práctica (RQ03_HU001): Autorizado | No autorizado | En Revisión. No existe en MySQL; uso en app. */
+    estatePostulant: { type: String, trim: true },
+
+    /** FK_postulant_country → country(id) */
+    countryBirthId: { type: mongoose.Schema.Types.ObjectId, ref: "Country" },
+    /** FK_postulant_state → state(id) */
+    stateBirthId: { type: mongoose.Schema.Types.ObjectId, ref: "State" },
+    /** FK_postulant_city → city(id) */
+    cityBirthId: { type: mongoose.Schema.Types.ObjectId, ref: "City" },
+    /** FK_postulant_country_2 → country(id) */
+    countryResidenceId: { type: mongoose.Schema.Types.ObjectId, ref: "Country" },
+    /** FK_postulant_state_2 → state(id) */
+    stateResidenceId: { type: mongoose.Schema.Types.ObjectId, ref: "State" },
+    /** FK_postulant_city_2 → city(id) */
+    cityResidenceId: { type: mongoose.Schema.Types.ObjectId, ref: "City" },
   },
-  identity_postulant: {type:  String, required: true },
-  type_doc_postulant: {type:  String },
-  gender_postulant: {type:  String },
-  date_nac_postulant: {type:  Date },
+  { timestamps: true }
+);
 
-  
-  nac_country: { type: mongoose.Types.ObjectId, ref: "countries" },
-  nac_department: { type: mongoose.Types.ObjectId, ref: "departments" },
-  nac_city: { type: mongoose.Types.ObjectId, ref: "cities" },
+postulantsSchema.index({ postulantId: 1 });
+postulantsSchema.index({ mysqlId: 1 });
+postulantsSchema.index({ countryBirthId: 1 });
+postulantsSchema.index({ stateBirthId: 1 });
+postulantsSchema.index({ cityBirthId: 1 });
+postulantsSchema.index({ countryResidenceId: 1 });
+postulantsSchema.index({ stateResidenceId: 1 });
+postulantsSchema.index({ cityResidenceId: 1 });
 
-  residence_country: { type: mongoose.Types.ObjectId, ref: "countries" },
-  residence_department: { type: mongoose.Types.ObjectId, ref: "departments" },
-  residence_city: { type: mongoose.Types.ObjectId, ref: "cities" },
-
-  full_profile: {type:  Boolean, default: false, required: true },
-  acept_terms: {type:  Boolean, default: false, required: true },
-  years_exp: {type:  String },
-  time_total_exp: {type:  Number },
-
-  wage_aspiration_min: {type:  Number },
-  wage_aspiration_max: {type:  Number },
-
-  estate_postulant: {type:  String, required: true },
-
-  phone_number: { type: String },
-  mobile_number: { type: String },
-  linkedin_url: { type: String },
-  instagram_url: { type: String },
-  twitter_url: { type: String },
-  website_url: { type: String },
-  profile_picture: { type: String },
-  address: { type: String },
-
-  date_register: {type:  Date },
-
-}, { timestamps: true });
-
-export default mongoose.model("postulants", postulantsSchema);
+export default mongoose.model("Postulant", postulantsSchema, "postulants");
