@@ -4,6 +4,20 @@ import User from "../users/user.model.js";
 import bcrypt from "bcryptjs";
 import { logHelper } from "../logs/log.service.js";
 
+/** Validar NIT Colombia: 10 dígitos (9 base + 1 dígito de verificación), algoritmo módulo 11 DIAN */
+function validarNitColombia(nit) {
+  const str = String(nit || '').replace(/\D/g, '');
+  if (str.length !== 10) return false;
+  const weights = [41, 37, 29, 23, 19, 17, 13, 7, 3];
+  let sum = 0;
+  for (let i = 0; i < 9; i++) {
+    sum += parseInt(str[i], 10) * weights[i];
+  }
+  let digito = sum % 11;
+  if (digito > 1) digito = 11 - digito;
+  return parseInt(str[9], 10) === digito;
+}
+
 // Obtener todas las empresas
 export const getCompanies = async (req, res) => {
   try {
@@ -111,8 +125,9 @@ export const createCompany = async (req, res) => {
       // Clasificaciones
       sector: req.body.sector || '',
       sectorMineSnies: req.body.sectorMineSnies || '',
-      economicSector: req.body.economicSector || '',
-      ciiuCode: req.body.ciiuCode || '',
+      economicSector: req.body.economicSector || (Array.isArray(req.body.ciiuCodes) && req.body.ciiuCodes[0] ? req.body.ciiuCodes[0] : ''),
+      ciiuCode: req.body.ciiuCode || (Array.isArray(req.body.ciiuCodes) && req.body.ciiuCodes[0] ? req.body.ciiuCodes[0] : ''),
+      ciiuCodes: Array.isArray(req.body.ciiuCodes) ? req.body.ciiuCodes.slice(0, 3) : [],
       size: req.body.size || 'mediana',
       arl: req.body.arl || '',
       
@@ -126,7 +141,8 @@ export const createCompany = async (req, res) => {
       phone: req.body.phone || '',
       email: req.body.email || '',
       website: req.body.website || '',
-      domain: req.body.domain || '',
+      domain: req.body.domain || (Array.isArray(req.body.domains) && req.body.domains[0] ? req.body.domains[0] : ''),
+      domains: Array.isArray(req.body.domains) ? req.body.domains.filter(Boolean) : [],
       linkedinUrl: req.body.linkedinUrl || '',
       
       // Contenidos
@@ -171,12 +187,42 @@ export const createCompany = async (req, res) => {
       branches: req.body.branches || []
     };
 
-    // Validar que existan los datos del representante legal (que es el contacto)
+    // Validar que existan los datos del representante legal (mínimo 1 contacto obligatorio)
     if (!companyData.contact?.email || !companyData.contact?.name) {
       return res.status(400).json({ 
         success: false,
-        message: 'El email y nombre del representante legal son obligatorios para crear la empresa' 
+        message: 'El escenario de práctica debe tener al menos un contacto (representante legal). Complete nombre y correo del representante legal.' 
       });
+    }
+
+    // Validar que el correo del representante legal pertenezca a un dominio de la entidad (si se envían dominios)
+    const createDomains = Array.isArray(req.body.domains) ? req.body.domains.filter(Boolean).map(d => String(d).replace(/^@/, '').toLowerCase().trim()) : [];
+    if (createDomains.length > 0) {
+      const repDomain = (companyData.contact.email || '').split('@')[1]?.toLowerCase();
+      if (!repDomain || !createDomains.includes(repDomain)) {
+        return res.status(400).json({
+          success: false,
+          message: `El correo del representante legal debe pertenecer a uno de los dominios de la entidad: ${createDomains.join(', ')}`
+        });
+      }
+    }
+
+    // Validar NIT Colombia (10 dígitos + dígito de verificación) cuando el tipo es NIT
+    const tipoNit = (req.body.idType || '').toUpperCase();
+    if (tipoNit === 'NIT' && companyData.nit) {
+      if (!/^\d{10}$/.test(String(companyData.nit).replace(/\s/g, ''))) {
+        return res.status(400).json({
+          success: false,
+          message: 'El NIT debe tener exactamente 10 dígitos numéricos (9 dígitos base + 1 dígito de verificación).'
+        });
+      }
+      const nitLimpio = String(companyData.nit).replace(/\D/g, '');
+      if (!validarNitColombia(nitLimpio)) {
+        return res.status(400).json({
+          success: false,
+          message: 'El dígito de verificación del NIT no es válido según el algoritmo de la DIAN (Colombia).'
+        });
+      }
     }
 
     // Verificar si ya existe un usuario con ese email antes de crear la empresa
@@ -203,9 +249,11 @@ export const createCompany = async (req, res) => {
     let nuevoUser;
     try {
       const usuarioActivo = companyData.status === 'active';
+      const emailLower = companyData.contact.email.toLowerCase();
       nuevoUser = new User({
         name: companyData.contact.name,
-        email: companyData.contact.email.toLowerCase(),
+        email: emailLower,
+        code: emailLower,
         password: await bcrypt.hash(password, 10),
         modulo: 'entidades',
         estado: usuarioActivo
@@ -334,6 +382,26 @@ export const updateCompany = async (req, res) => {
       return res.status(404).json({ message: "Empresa no encontrada" });
     }
 
+    // Validar NIT Colombia si se está actualizando el NIT y el tipo es NIT
+    const idTypeUpdate = req.body.idType !== undefined ? req.body.idType : empresaAnterior.idType;
+    const nitUpdate = req.body.nit !== undefined ? req.body.nit : req.body.idNumber;
+    const tipoNit = String(idTypeUpdate || '').toUpperCase();
+    if (tipoNit === 'NIT' && nitUpdate) {
+      const nitStr = String(nitUpdate).replace(/\D/g, '');
+      if (nitStr.length !== 10) {
+        return res.status(400).json({
+          success: false,
+          message: 'El NIT debe tener exactamente 10 dígitos numéricos (9 base + 1 dígito de verificación).'
+        });
+      }
+      if (!validarNitColombia(nitStr)) {
+        return res.status(400).json({
+          success: false,
+          message: 'El dígito de verificación del NIT no es válido según el algoritmo de la DIAN (Colombia).'
+        });
+      }
+    }
+
     // Preparar datos para actualizar
     const updateData = {
       // Identificación y nombres
@@ -349,6 +417,7 @@ export const updateCompany = async (req, res) => {
       ...(req.body.sectorMineSnies !== undefined && { sectorMineSnies: req.body.sectorMineSnies }),
       ...(req.body.economicSector !== undefined && { economicSector: req.body.economicSector }),
       ...(req.body.ciiuCode !== undefined && { ciiuCode: req.body.ciiuCode }),
+      ...(req.body.ciiuCodes !== undefined && { ciiuCodes: Array.isArray(req.body.ciiuCodes) ? req.body.ciiuCodes.slice(0, 3) : [] }),
       ...(req.body.size !== undefined && { size: req.body.size }),
       ...(req.body.arl !== undefined && { arl: req.body.arl }),
       
@@ -363,6 +432,7 @@ export const updateCompany = async (req, res) => {
       ...(req.body.email !== undefined && { email: req.body.email }),
       ...(req.body.website !== undefined && { website: req.body.website }),
       ...(req.body.domain !== undefined && { domain: req.body.domain }),
+      ...(req.body.domains !== undefined && { domains: Array.isArray(req.body.domains) ? req.body.domains.filter(Boolean) : [] }),
       ...(req.body.linkedinUrl !== undefined && { linkedinUrl: req.body.linkedinUrl }),
       
       // Contenidos
@@ -389,10 +459,10 @@ export const updateCompany = async (req, res) => {
         contact: {
           name: (req.body.legalRepresentative?.firstName && req.body.legalRepresentative?.lastName
                   ? `${req.body.legalRepresentative.firstName} ${req.body.legalRepresentative.lastName}`.trim()
-                  : req.body.contact?.name || companyFound.contact?.name || ''),
-          position: req.body.contact?.position || companyFound.contact?.position || '',
-          phone: req.body.contact?.phone || req.body.phone || companyFound.contact?.phone || '',
-          email: req.body.legalRepresentative?.email || req.body.contact?.email || companyFound.contact?.email || ''
+                  : req.body.contact?.name || empresaAnterior.contact?.name || ''),
+          position: req.body.contact?.position || empresaAnterior.contact?.position || '',
+          phone: req.body.contact?.phone || req.body.phone || empresaAnterior.contact?.phone || '',
+          email: req.body.legalRepresentative?.email || req.body.contact?.email || empresaAnterior.contact?.email || ''
         }
       }),
       
@@ -413,6 +483,21 @@ export const updateCompany = async (req, res) => {
       // Estado
       ...(req.body.status !== undefined && { status: req.body.status })
     };
+
+    // Validar correo del representante legal contra dominios de la entidad (si hay dominios y se actualiza email)
+    const effectiveDomains = (updateData.domains !== undefined ? updateData.domains : (empresaAnterior.domains || [])).map(d => String(d).replace(/^@/, '').toLowerCase().trim()).filter(Boolean);
+    if (effectiveDomains.length > 0) {
+      const newEmail = updateData.legalRepresentative?.email ?? updateData.contact?.email;
+      if (newEmail) {
+        const emailDom = newEmail.split('@')[1]?.toLowerCase();
+        if (!emailDom || !effectiveDomains.includes(emailDom)) {
+          return res.status(400).json({
+            success: false,
+            message: `El correo del representante legal debe pertenecer a uno de los dominios de la entidad: ${effectiveDomains.join(', ')}`
+          });
+        }
+      }
+    }
 
     const company = await Company.findByIdAndUpdate(
       req.params.id,
@@ -605,6 +690,13 @@ export const addContact = async (req, res) => {
       });
     }
 
+    // Máximo 8 contactos por escenario (representante legal + hasta 7 adicionales)
+    if (company.contacts.length >= 8) {
+      return res.status(400).json({ 
+        message: "Máximo 8 contactos por escenario de práctica (incluye representante legal)." 
+      });
+    }
+
     // Verificar si ya existe un contacto con ese email
     const contactoExistente = company.contacts.find(
       c => c.userEmail.toLowerCase() === userEmail.toLowerCase()
@@ -613,6 +705,17 @@ export const addContact = async (req, res) => {
       return res.status(400).json({ 
         message: "Ya existe un contacto con ese email de usuario" 
       });
+    }
+
+    // Validar que el correo del contacto pertenezca a uno de los dominios de la entidad (si hay dominios configurados)
+    const allowedDomains = (company.domains || []).map(d => String(d).replace(/^@/, '').toLowerCase().trim()).filter(Boolean);
+    if (allowedDomains.length > 0) {
+      const emailDomain = (userEmail || '').split('@')[1]?.toLowerCase();
+      if (!emailDomain || !allowedDomains.includes(emailDomain)) {
+        return res.status(400).json({
+          message: `El correo del contacto debe pertenecer a uno de los dominios registrados para la entidad: ${allowedDomains.join(', ')}`
+        });
+      }
     }
 
     // Buscar o crear usuario
@@ -630,12 +733,14 @@ export const addContact = async (req, res) => {
         });
       }
 
+      const emailLower = userEmail.toLowerCase();
       usuario = new User({
         name: `${firstName} ${lastName}`,
-        email: userEmail.toLowerCase(),
+        email: emailLower,
+        code: emailLower,
         password: await bcrypt.hash(password, 10),
         modulo: 'entidades',
-        estado: company.status === 'active' // El estado depende del estado de la empresa
+        estado: company.status === 'active'
       });
       await usuario.save();
     }

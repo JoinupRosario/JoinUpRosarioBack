@@ -6,30 +6,17 @@ const companySchema = new mongoose.Schema(
     name: { type: String, required: true }, // Razón Social (compatibilidad hacia atrás)
     legalName: { type: String }, // Alias explícito de razón social
     commercialName: { type: String },
-    idType: {
-      type: String,
-      enum: [
-        "NIT",
-        "CC",
-        "CE",
-        "PASAPORTE",
-        "OTRO"
-      ],
-      default: "NIT"
-    },
+    idType: { type: String }, // Valor del ítem parametrizado (L_IDENTIFICATIONTYPE_COMPANY)
     idNumber: { type: String },
-    nit: { type: String, unique: true, sparse: true }, // puede coincidir con idNumber
+    nit: { type: String }, // 10 dígitos (9 base + 1 verificación Colombia)
 
     // Clasificaciones
     sector: { type: String }, // Sector general mostrado en la lista
     sectorMineSnies: { type: String },
-    economicSector: { type: String },
-    ciiuCode: { type: String },
-    size: {
-      type: String,
-      enum: ["micro", "pequeña", "mediana", "grande"],
-      default: "mediana"
-    },
+    economicSector: { type: String }, // Compatibilidad: primer CIIU o descripción
+    ciiuCode: { type: String }, // Compatibilidad: primer código
+    ciiuCodes: [{ type: String }], // Hasta 3 códigos CIIU (5 dígitos DANE)
+    size: { type: String },
     arl: { type: String },
 
     // Contacto y ubicación
@@ -42,7 +29,8 @@ const companySchema = new mongoose.Schema(
     phone: { type: String },
     email: { type: String },
     website: { type: String },
-    domain: { type: String },
+    domain: { type: String }, // Compatibilidad: primer dominio
+    domains: [{ type: String }], // Múltiples dominios permitidos para correos de contactos
     linkedinUrl: { type: String },
 
     // Contenidos
@@ -78,11 +66,7 @@ const companySchema = new mongoose.Schema(
       firstName: { type: String },
       lastName: { type: String },
       email: { type: String },
-      idType: {
-        type: String,
-        enum: ["CC", "CE", "PASAPORTE", "NIT", "OTRO"],
-        default: "CC"
-      },
+      idType: { type: String }, // Valor del ítem parametrizado (L_IDENTIFICATIONTYPE)
       idNumber: { type: String }
     },
 
@@ -120,11 +104,7 @@ const companySchema = new mongoose.Schema(
       extension: { type: String },
       mobile: { type: String },
       // Identificación
-      idType: {
-        type: String,
-        enum: ["CC", "CE", "PASAPORTE", "NIT", "OTRO"],
-        default: "CC"
-      },
+      idType: { type: String }, // Valor del ítem parametrizado (L_IDENTIFICATIONTYPE)
       identification: { type: String },
       // Usuario en el sistema
       userEmail: { type: String, required: true }, // Email del usuario en User
@@ -133,20 +113,12 @@ const companySchema = new mongoose.Schema(
       isPrincipal: { type: Boolean, default: false }, // ¿Es usuario principal?
       position: { type: String }, // Cargo dentro de la empresa
       isPracticeTutor: { type: Boolean, default: false }, // Es tutor de práctica académica
-      // Estado
-      status: {
-        type: String,
-        enum: ["active", "inactive"],
-        default: "active"
-      }
+      // Estado (valores vienen de ítems/uso: active, inactive)
+      status: { type: String, default: "active" }
     }],
 
-    // Flujo de aprobación/estado
-    status: {
-      type: String,
-      enum: ["active", "inactive", "pending_approval"],
-      default: "pending_approval"
-    },
+    // Flujo de aprobación/estado (valores: active, inactive, pending_approval)
+    status: { type: String, default: "pending_approval" },
     approvedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User"
@@ -167,7 +139,7 @@ const companySchema = new mongoose.Schema(
 // Índices útiles para búsqueda
 companySchema.index({ name: 1 });
 companySchema.index({ commercialName: 1 });
-companySchema.index({ nit: 1 }, { unique: true, sparse: true });
+companySchema.index({ nit: 1 });
 companySchema.index({ sector: 1, city: 1 });
 
 export default mongoose.model("Company", companySchema);

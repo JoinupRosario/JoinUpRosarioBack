@@ -2,8 +2,22 @@ import UserAdministrativo from './userAdministrativo.model.js';
 import User from '../users/user.model.js';
 import Rol from '../roles/roles.model.js';
 import Sucursal from '../sucursales/sucursal.model.js';
+import Program from '../program/model/program.model.js';
 import bcrypt from 'bcryptjs';
 import { logHelper } from '../logs/log.service.js';
+
+/** Obtiene el email del usuario autenticado (req.user.id) para userCreator/userUpdater */
+const getCurrentUserEmail = async (req) => {
+  try {
+    if (req.user?.id) {
+      const u = await User.findById(req.user.id).select('email').lean();
+      return (u?.email ?? '').toString().trim() || undefined;
+    }
+  } catch (err) {
+    console.warn('getCurrentUserEmail:', err.message);
+  }
+  return undefined;
+};
 
 // Crear usuario administrativo (parte actualizada)
 export const crearUserAdministrativo = async (req, res) => {
@@ -11,13 +25,11 @@ export const crearUserAdministrativo = async (req, res) => {
     const {
       nombres,
       apellidos,
-      cargo,
+      tipoIdentificacion,
       identificacion,
-      telefono,
-      extension,
-      movil,
+      phone,
       email,
-      password,
+      directorioActivo,
       roles,
       estado
     } = req.body;
@@ -40,36 +52,50 @@ export const crearUserAdministrativo = async (req, res) => {
       });
     }
 
-    // Crear usuario base primero
-    const nuevoUser = new User({
+    // Crear usuario base: sin password si es Directorio Activo (Office 365)
+    const userData = {
       name: `${nombres} ${apellidos}`,
       email,
-      password: await bcrypt.hash(password, 10),
-      modulo: 'administrativo'
-    });
+      code: email,
+      modulo: 'administrativo',
+      directorioActivo: !!directorioActivo
+    };
+    if (!userData.directorioActivo) {
+      const password = req.body.password;
+      if (!password || password.length < 6) {
+        return res.status(400).json({
+          success: false,
+          message: 'La contraseña es obligatoria y debe tener al menos 6 caracteres cuando no es Directorio Activo'
+        });
+      }
+      userData.password = await bcrypt.hash(password, 10);
+    }
+    const nuevoUser = new User(userData);
     await nuevoUser.save();
+
+    const userCreatorEmail = await getCurrentUserEmail(req);
 
     // Crear usuario administrativo
     const nuevoUserAdministrativo = new UserAdministrativo({
       user: nuevoUser._id,
       nombres,
       apellidos,
-      cargo,
+      tipoIdentificacion: tipoIdentificacion || undefined,
       identificacion,
-      telefono,
-      extension,
-      movil,
+      phone: phone || undefined,
       roles: roles || [],
-      estado: estado || 'Inscrito'
+      estado: estado !== undefined ? estado : true,
+      userCreator: userCreatorEmail
     });
 
     await nuevoUserAdministrativo.save();
 
     // Populate para devolver datos completos
     const userAdminCompleto = await UserAdministrativo.findById(nuevoUserAdministrativo._id)
-      .populate('user', 'name email estado modulo')
+      .populate('user', 'name email estado modulo directorioActivo')
       .populate('roles.rol', 'nombre estado')
-      .populate('sucursal', 'nombre codigo');
+      .populate('sucursal', 'nombre codigo')
+      .populate('tipoIdentificacion', 'value description');
 
     // Registrar log de creación
     await logHelper.crear(
@@ -84,7 +110,7 @@ export const crearUserAdministrativo = async (req, res) => {
         apellidos,
         identificacion,
         email,
-        cargo,
+        directorioActivo: !!directorioActivo,
         rolesCount: roles?.length || 0
       },
       {
@@ -119,9 +145,9 @@ export const crearUserAdministrativo = async (req, res) => {
 export const actualizarUserAdministrativo = async (req, res) => {
   try {
     const { id } = req.params;
-    const { nombres, apellidos, cargo, telefono, extension, movil, estado } = req.body;
+    const { nombres, apellidos, tipoIdentificacion, phone, directorioActivo, password, estado } = req.body;
 
-    const userAdministrativo = await UserAdministrativo.findById(id);
+    const userAdministrativo = await UserAdministrativo.findById(id).populate('user');
     if (!userAdministrativo) {
       return res.status(404).json({
         success: false,
@@ -133,26 +159,42 @@ export const actualizarUserAdministrativo = async (req, res) => {
     const datosAntes = {
       nombres: userAdministrativo.nombres,
       apellidos: userAdministrativo.apellidos,
-      cargo: userAdministrativo.cargo,
-      telefono: userAdministrativo.telefono,
+      phone: userAdministrativo.phone,
       estado: userAdministrativo.estado
     };
 
-    // Actualizar campos
+    // Actualizar campos UserAdministrativo
     if (nombres) userAdministrativo.nombres = nombres;
     if (apellidos) userAdministrativo.apellidos = apellidos;
-    if (cargo !== undefined) userAdministrativo.cargo = cargo;
-    if (telefono !== undefined) userAdministrativo.telefono = telefono;
-    if (extension !== undefined) userAdministrativo.extension = extension;
-    if (movil !== undefined) userAdministrativo.movil = movil;
-    if (estado) userAdministrativo.estado = estado;
+    if (tipoIdentificacion !== undefined) userAdministrativo.tipoIdentificacion = tipoIdentificacion || null;
+    if (phone !== undefined) userAdministrativo.phone = phone;
+    if (estado !== undefined) userAdministrativo.estado = estado;
+
+    const userUpdaterEmail = await getCurrentUserEmail(req);
+    if (userUpdaterEmail) userAdministrativo.userUpdater = userUpdaterEmail;
+
+    // Actualizar User (nombre, directorioActivo y opcionalmente password)
+    if (userAdministrativo.user) {
+      const userUpdate = {};
+      if (nombres || apellidos) {
+        userUpdate.name = [nombres || userAdministrativo.nombres, apellidos || userAdministrativo.apellidos].filter(Boolean).join(' ');
+      }
+      if (directorioActivo !== undefined) userUpdate.directorioActivo = !!directorioActivo;
+      if (!directorioActivo && password && password.length >= 6) {
+        userUpdate.password = await bcrypt.hash(password, 10);
+      }
+      if (Object.keys(userUpdate).length) {
+        await User.findByIdAndUpdate(userAdministrativo.user._id, userUpdate);
+      }
+    }
 
     await userAdministrativo.save();
 
     const userActualizado = await UserAdministrativo.findById(id)
-      .populate('user', 'name email estado modulo')
+      .populate('user', 'name email estado modulo directorioActivo')
       .populate('roles.rol', 'nombre estado')
-      .populate('sucursal', 'nombre codigo');
+      .populate('sucursal', 'nombre codigo')
+      .populate('tipoIdentificacion', 'value description');
 
     // Registrar log de actualización
     await logHelper.crear(
@@ -165,8 +207,7 @@ export const actualizarUserAdministrativo = async (req, res) => {
       {
         nombres: userAdministrativo.nombres,
         apellidos: userAdministrativo.apellidos,
-        cargo: userAdministrativo.cargo,
-        telefono: userAdministrativo.telefono,
+        phone: userAdministrativo.phone,
         estado: userAdministrativo.estado
       }
     );
@@ -207,9 +248,11 @@ export const obtenerUsersAdministrativos = async (req, res) => {
     }
 
     const usersAdministrativos = await UserAdministrativo.find(filtro)
-      .populate('user', 'name email estado modulo')
+      .populate('user', 'name email estado modulo directorioActivo')
       .populate('roles.rol', 'nombre estado')
       .populate('sucursal', 'nombre codigo')
+      .populate('tipoIdentificacion', 'value description')
+      .populate('programas.program', 'name code level')
       .sort({ createdAt: -1 });
 
     res.json({
@@ -234,9 +277,11 @@ export const obtenerUserAdministrativoPorId = async (req, res) => {
     const { id } = req.params;
 
     const userAdministrativo = await UserAdministrativo.findById(id)
-      .populate('user', 'name email estado modulo')
+      .populate('user', 'name email estado modulo directorioActivo')
       .populate('roles.rol', 'nombre estado')
-      .populate('sucursal', 'nombre codigo');
+      .populate('sucursal', 'nombre codigo')
+      .populate('tipoIdentificacion', 'value description')
+      .populate('programas.program', 'name code level');
 
     if (!userAdministrativo) {
       return res.status(404).json({
@@ -335,12 +380,15 @@ export const agregarRolUserAdministrativo = async (req, res) => {
       });
     }
 
+    const userUpdaterEmail = await getCurrentUserEmail(req);
+    if (userUpdaterEmail) userAdministrativo.userUpdater = userUpdaterEmail;
     await userAdministrativo.agregarRol(rolId);
 
     const userActualizado = await UserAdministrativo.findById(id)
-      .populate('user', 'name email estado modulo')
+      .populate('user', 'name email estado modulo directorioActivo')
       .populate('roles.rol', 'nombre estado')
-      .populate('sucursal', 'nombre codigo');
+      .populate('sucursal', 'nombre codigo')
+      .populate('tipoIdentificacion', 'value description');
 
     // Registrar log
     await logHelper.crear(
@@ -387,12 +435,15 @@ export const removerRolUserAdministrativo = async (req, res) => {
     // Obtener info del rol antes de remover
     const rol = await Rol.findById(rolId);
 
+    const userUpdaterEmail = await getCurrentUserEmail(req);
+    if (userUpdaterEmail) userAdministrativo.userUpdater = userUpdaterEmail;
     await userAdministrativo.removerRol(rolId);
 
     const userActualizado = await UserAdministrativo.findById(id)
-      .populate('user', 'name email estado modulo')
+      .populate('user', 'name email estado modulo directorioActivo')
       .populate('roles.rol', 'nombre estado')
-      .populate('sucursal', 'nombre codigo');
+      .populate('sucursal', 'nombre codigo')
+      .populate('tipoIdentificacion', 'value description');
 
     // Registrar log
     await logHelper.crear(
@@ -440,12 +491,15 @@ export const cambiarEstadoRolUserAdministrativo = async (req, res) => {
     const rolUsuario = userAdministrativo.roles.find(r => r.rol.toString() === rolId);
     const estadoAnterior = rolUsuario?.estado;
 
+    const userUpdaterEmail = await getCurrentUserEmail(req);
+    if (userUpdaterEmail) userAdministrativo.userUpdater = userUpdaterEmail;
     await userAdministrativo.cambiarEstadoRol(rolId, estado);
 
     const userActualizado = await UserAdministrativo.findById(id)
-      .populate('user', 'name email estado modulo')
+      .populate('user', 'name email estado modulo directorioActivo')
       .populate('roles.rol', 'nombre estado')
-      .populate('sucursal', 'nombre codigo');
+      .populate('sucursal', 'nombre codigo')
+      .populate('tipoIdentificacion', 'value description');
 
     const rol = await Rol.findById(rolId);
 
@@ -495,12 +549,15 @@ export const asociarSedeUserAdministrativo = async (req, res) => {
     if (!sucursalId) {
       const sedeAnterior = userAdministrativo.sucursal;
       userAdministrativo.sucursal = null;
+      const userUpdaterEmail = await getCurrentUserEmail(req);
+      if (userUpdaterEmail) userAdministrativo.userUpdater = userUpdaterEmail;
       await userAdministrativo.save();
 
       const userActualizado = await UserAdministrativo.findById(id)
-        .populate('user', 'name email estado modulo')
+        .populate('user', 'name email estado modulo directorioActivo')
         .populate('roles.rol', 'nombre estado')
-        .populate('sucursal', 'nombre codigo');
+        .populate('sucursal', 'nombre codigo')
+        .populate('tipoIdentificacion', 'value description');
 
       await logHelper.crear(
         req,
@@ -531,12 +588,15 @@ export const asociarSedeUserAdministrativo = async (req, res) => {
 
     const sedeAnterior = userAdministrativo.sucursal;
     userAdministrativo.sucursal = sucursalId;
+    const userUpdaterEmail = await getCurrentUserEmail(req);
+    if (userUpdaterEmail) userAdministrativo.userUpdater = userUpdaterEmail;
     await userAdministrativo.save();
 
     const userActualizado = await UserAdministrativo.findById(id)
-      .populate('user', 'name email estado modulo')
+      .populate('user', 'name email estado modulo directorioActivo')
       .populate('roles.rol', 'nombre estado')
-      .populate('sucursal', 'nombre codigo');
+      .populate('sucursal', 'nombre codigo')
+      .populate('tipoIdentificacion', 'value description');
 
     // Registrar log
     await logHelper.crear(
@@ -581,7 +641,8 @@ export const cambiarEstadoUserAdministrativo = async (req, res) => {
 
     const estadoAnterior = userAdministrativo.estado;
 
-    // Actualizar estado en el modelo UserAdministrativo
+    const userUpdaterEmail = await getCurrentUserEmail(req);
+    if (userUpdaterEmail) userAdministrativo.userUpdater = userUpdaterEmail;
     userAdministrativo.estado = estado;
     await userAdministrativo.save();
 
@@ -590,9 +651,10 @@ export const cambiarEstadoUserAdministrativo = async (req, res) => {
 
     // Obtener el usuario actualizado con populate
     const userActualizado = await UserAdministrativo.findById(id)
-      .populate('user', 'name email estado modulo')
+      .populate('user', 'name email estado modulo directorioActivo')
       .populate('roles.rol', 'nombre estado')
-      .populate('sucursal', 'nombre codigo');
+      .populate('sucursal', 'nombre codigo')
+      .populate('tipoIdentificacion', 'value description');
 
     // Registrar log
     await logHelper.crear(
@@ -617,6 +679,72 @@ export const cambiarEstadoUserAdministrativo = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+};
+
+// Asociar programas a usuario administrativo (reemplaza la lista de programas).
+// Optimizado para miles de programas: distinct + updateOne sin cargar el documento.
+export const asociarProgramasUserAdministrativo = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { programIds, asociarTodosActivos } = req.body || {};
+
+    const userUpdaterEmail = await getCurrentUserEmail(req);
+
+    // Solo cargamos nombres para existencia y log (evitamos cargar el array programas)
+    const userAdminRef = await UserAdministrativo.findById(id).select('nombres apellidos').lean();
+    if (!userAdminRef) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario administrativo no encontrado'
+      });
+    }
+
+    let ids = [];
+    if (asociarTodosActivos === true) {
+      // Una sola operación en MongoDB: devuelve solo array de _id (índice status ya existe)
+      ids = await Program.distinct('_id', { status: 'ACTIVE' });
+    } else {
+      ids = Array.isArray(programIds) ? programIds.filter(Boolean) : [];
+    }
+
+    const programasPayload = ids.map(programId => ({ program: programId, estado: true }));
+    const updateDoc = { programas: programasPayload };
+    if (userUpdaterEmail) updateDoc.userUpdater = userUpdaterEmail;
+
+    // Un solo update en BD, sin cargar ni re-guardar el documento
+    await UserAdministrativo.updateOne({ _id: id }, { $set: updateDoc });
+
+    const userActualizado = await UserAdministrativo.findById(id)
+      .populate('user', 'name email estado modulo directorioActivo')
+      .populate('roles.rol', 'nombre estado')
+      .populate('sucursal', 'nombre codigo')
+      .populate('tipoIdentificacion', 'value description')
+      .populate('programas.program', 'name code level');
+
+    await logHelper.crear(
+      req,
+      'UPDATE',
+      'usersAdministrativos',
+      `Programas actualizados para: ${userAdminRef.nombres} ${userAdminRef.apellidos}`,
+      id,
+      null,
+      { programIds: ids.length, asociarTodosActivos: !!asociarTodosActivos },
+      { accion: 'asociar_programas' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Programas actualizados correctamente',
+      data: userActualizado
+    });
+  } catch (error) {
+    console.error('Error al asociar programas:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al asociar programas',
       error: error.message
     });
   }

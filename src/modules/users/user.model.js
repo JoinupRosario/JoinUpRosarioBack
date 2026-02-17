@@ -29,8 +29,12 @@ const userSchema = new mongoose.Schema({
   },
   password: {
     type: String,
-    required: [true, 'La contraseña es obligatoria'],
+    required: false,
     minlength: [6, 'La contraseña debe tener al menos 6 caracteres']
+  },
+  directorioActivo: {
+    type: Boolean,
+    default: false
   },
   estado: {
     type: Boolean,
