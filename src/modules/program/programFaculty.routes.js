@@ -9,6 +9,8 @@ import {
   updateProgramFaculty,
   deleteProgramFaculty,
   syncPlansFromUXXI,
+  compareProgramsWithUniversitas,
+  createProgramsFromUniversitas,
 } from "./controller/programFaculty.controller.js";
 import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
 
@@ -16,6 +18,10 @@ const router = express.Router();
 
 router.use(verifyToken);
 
+/** Comparar programas y relaciones con OSB Consulta_programas (modal en front) */
+router.get("/compare-universitas", authorizeRoles("admin", "superadmin"), compareProgramsWithUniversitas);
+/** Crear programas y relaciones desde Universitas (tras confirmar en modal) */
+router.post("/create-from-universitas", authorizeRoles("admin", "superadmin"), createProgramsFromUniversitas);
 /** RQ02_HU003: Botón ejecutar integración-actualización planes (UXXI getInfoProgramas) */
 router.post("/sync", authorizeRoles("admin", "superadmin"), syncPlansFromUXXI);
 router.get("/", getProgramFaculties);
