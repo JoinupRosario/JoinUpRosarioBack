@@ -87,6 +87,13 @@ export const getInfoProgramas = async () => {
   }
 };
 
+/** Credenciales OSB: USS_URJOB/PASS_URJOB o, si no están, OSB_USER/OSB_PASSWORD. */
+function getOSBCredentials() {
+  const user = (process.env.USS_URJOB ?? process.env.OSB_USER ?? "").trim();
+  const pass = process.env.PASS_URJOB ?? process.env.OSB_PASSWORD;
+  return user && pass !== undefined && pass !== "" ? { user, pass } : null;
+}
+
 /**
  * Obtiene facultades desde OSB Proxy Consulta_facultades (Basic auth).
  * Respuesta esperada: { items: [ { resultSet: { items: [ { cod_facultad, nombre_facultad } ] } } ] }
@@ -94,17 +101,17 @@ export const getInfoProgramas = async () => {
  */
 export const getFacultadesFromOSB = async () => {
   const baseUrl = process.env.URL_OSB;
-  const username = process.env.USS_URJOB;
-  const password = process.env.PASS_URJOB;
+  const creds = getOSBCredentials();
   if (!baseUrl) throw new Error("URL_OSB no configurada en .env");
+  if (!creds) throw new Error("Credenciales OSB no configuradas. Definir USS_URJOB y PASS_URJOB (o OSB_USER y OSB_PASSWORD) en .env");
   const url = `${baseUrl.replace(/\/$/, "")}/uxxi-URO/Proxy/Consulta_facultades`;
-  const credentials = username && password ? Buffer.from(`${username}:${password}`).toString("base64") : null;
+  const credentials = Buffer.from(`${creds.user}:${creds.pass}`).toString("base64");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), getTimeout());
-  const headers = { Accept: "application/json" };
-  if (credentials) headers.Authorization = `Basic ${credentials}`;
+  const headers = { Accept: "application/json", Authorization: `Basic ${credentials}` };
   const res = await fetch(url, { method: "GET", headers, signal: controller.signal });
   clearTimeout(timeout);
+  if (res.status === 401) throw new Error("OSB Consulta_facultades: 401 — Usuario o contraseña incorrectos (revisar USS_URJOB/PASS_URJOB o OSB_USER/OSB_PASSWORD).");
   if (!res.ok) throw new Error(`OSB Consulta_facultades: ${res.status}`);
   const data = await res.json();
   const firstItem = data?.items?.[0];
@@ -122,17 +129,17 @@ export const getFacultadesFromOSB = async () => {
  */
 export const getProgramasFromOSB = async () => {
   const baseUrl = process.env.URL_OSB;
-  const username = process.env.USS_URJOB;
-  const password = process.env.PASS_URJOB;
+  const creds = getOSBCredentials();
   if (!baseUrl) throw new Error("URL_OSB no configurada en .env");
+  if (!creds) throw new Error("Credenciales OSB no configuradas. Definir USS_URJOB y PASS_URJOB (o OSB_USER y OSB_PASSWORD) en .env");
   const url = `${baseUrl.replace(/\/$/, "")}/uxxi-URO/Proxy/Consulta_programas`;
-  const credentials = username && password ? Buffer.from(`${username}:${password}`).toString("base64") : null;
+  const credentials = Buffer.from(`${creds.user}:${creds.pass}`).toString("base64");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), getTimeout());
-  const headers = { Accept: "application/json" };
-  if (credentials) headers.Authorization = `Basic ${credentials}`;
+  const headers = { Accept: "application/json", Authorization: `Basic ${credentials}` };
   const res = await fetch(url, { method: "GET", headers, signal: controller.signal });
   clearTimeout(timeout);
+  if (res.status === 401) throw new Error("OSB Consulta_programas: 401 — Usuario o contraseña incorrectos (revisar USS_URJOB/PASS_URJOB o OSB_USER/OSB_PASSWORD).");
   if (!res.ok) throw new Error(`OSB Consulta_programas: ${res.status}`);
   const data = await res.json();
   const firstItem = data?.items?.[0];
