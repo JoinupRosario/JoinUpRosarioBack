@@ -9,7 +9,8 @@ import {
   removerRolUserAdministrativo,
   cambiarEstadoRolUserAdministrativo,
   cambiarEstadoUserAdministrativo,
-  asociarSedeUserAdministrativo
+  asociarSedeUserAdministrativo,
+  asociarProgramasUserAdministrativo
 } from './userAdministrativo.controller.js';
 import { verifyToken, authorizeRoles } from '../../middlewares/auth.js';
 
@@ -33,5 +34,7 @@ router.patch('/:id/estado', cambiarEstadoUserAdministrativo);
 
 // Rutas para gestión de sedes en usuarios administrativos
 router.put('/:id/sede', asociarSedeUserAdministrativo);
+// Rutas para gestión de programas en usuarios administrativos
+router.put('/:id/programas', asociarProgramasUserAdministrativo);
 
 export default router;

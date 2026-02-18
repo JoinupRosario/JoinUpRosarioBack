@@ -1,7 +1,10 @@
 import ProgramFaculty from "../model/programFaculty.model.js";
 import Program from "../model/program.model.js";
 import Faculty from "../../faculty/model/faculty.model.js";
-import { getInfoProgramas } from "../../../services/uxxiIntegration.service.js";
+import User from "../../users/user.model.js";
+import { getInfoProgramas, getProgramasFromOSB } from "../../../services/uxxiIntegration.service.js";
+
+const normalizeCode = (c) => String(c ?? "").trim();
 
 /** RQ02_HU003: Sincronizar planes (programas por facultad) desde UXXI (getInfoProgramas). Botón de integración. */
 export const syncPlansFromUXXI = async (req, res) => {
@@ -75,13 +78,225 @@ export const syncPlansFromUXXI = async (req, res) => {
   }
 };
 
+/**
+ * GET /program-faculties/compare-universitas
+ * Llama OSB Consulta_programas; compara programas por code (planestudio) y relaciones (programId+facultyId).
+ * Devuelve conteos y listas de programas y relaciones a crear.
+ */
+export const compareProgramsWithUniversitas = async (req, res) => {
+  try {
+    let apiRows;
+    try {
+      apiRows = await getProgramasFromOSB();
+    } catch (err) {
+      return res.status(502).json({
+        success: false,
+        message: "Error al conectar con OSB (Consulta_programas). Revisar URL_OSB, USS_URJOB y PASS_URJOB.",
+        error: process.env.NODE_ENV === "development" ? err.message : undefined,
+      });
+    }
+
+    const programCodesFromApi = new Map();
+    for (const row of apiRows) {
+      const code = normalizeCode(row.planestudio);
+      if (!code) continue;
+      if (!programCodesFromApi.has(code)) {
+        programCodesFromApi.set(code, row.nombre_programa);
+      }
+    }
+
+    const dbPrograms = await Program.find({}).select("code").lean();
+    const dbProgramCodesSet = new Set(dbPrograms.map((p) => normalizeCode(p.code)));
+    const newPrograms = [];
+    for (const [code, name] of programCodesFromApi) {
+      if (!dbProgramCodesSet.has(code)) {
+        newPrograms.push({ planestudio: code, nombre_programa: name || code });
+      }
+    }
+
+    const dbFaculties = await Faculty.find({}).select("code").lean();
+    const facultyCodeToId = new Map(dbFaculties.map((f) => [normalizeCode(f.code), f._id.toString()]));
+    const dbProgramsByCode = await Program.find({}).select("code").lean();
+    const programCodeToId = new Map(dbProgramsByCode.map((p) => [normalizeCode(p.code), p._id.toString()]));
+    const existingRelations = await ProgramFaculty.find({}).select("programId facultyId").lean();
+    const relationKeySet = new Set(
+      existingRelations.map((r) => `${r.programId.toString()}|${r.facultyId.toString()}`)
+    );
+
+    const newRelations = [];
+    for (const row of apiRows) {
+      const planestudio = normalizeCode(row.planestudio);
+      const codFacultad = normalizeCode(row.cod_facultad);
+      if (!planestudio || !codFacultad) continue;
+      const facultyId = facultyCodeToId.get(codFacultad);
+      if (!facultyId) continue;
+      const programId = programCodeToId.get(planestudio);
+      if (!programId) {
+        if (programCodesFromApi.has(planestudio)) {
+          newRelations.push({
+            planestudio,
+            cod_facultad: row.cod_facultad,
+            nombre_programa: row.nombre_programa,
+            nombre_facultad: row.nombre_facultad,
+            activo: row.activo || "SI",
+          });
+        }
+        continue;
+      }
+      const key = `${programId}|${facultyId}`;
+      if (!relationKeySet.has(key)) {
+        newRelations.push({
+          planestudio,
+          cod_facultad: row.cod_facultad,
+          nombre_programa: row.nombre_programa,
+          nombre_facultad: row.nombre_facultad,
+          activo: row.activo || "SI",
+        });
+      }
+    }
+
+    const dbProgramsCount = await Program.countDocuments({});
+    const dbRelationsCount = await ProgramFaculty.countDocuments({});
+    const apiProgramsCount = programCodesFromApi.size;
+    const apiRelationsCount = apiRows.length;
+
+    return res.json({
+      success: true,
+      dbProgramsCount,
+      apiProgramsCount,
+      newProgramsCount: newPrograms.length,
+      newPrograms,
+      dbRelationsCount,
+      apiRelationsCount,
+      newRelationsCount: newRelations.length,
+      newRelations,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * POST /program-faculties/create-from-universitas
+ * Body: { newPrograms: [...], newRelations: [...] }
+ * Crea programas faltantes y luego relaciones programa-facultad; userCreator con email del usuario.
+ * No hace throw: procesa todos los ítems, recoge errores y siempre responde 200 con resumen (created + errors).
+ */
+export const createProgramsFromUniversitas = async (req, res) => {
+  const errors = [];
+  let userCreatorEmail = "";
+  try {
+    if (req.user?.id) {
+      const currentUser = await User.findById(req.user.id).select("email").lean();
+      userCreatorEmail = (currentUser?.email ?? "").toString().trim();
+    }
+  } catch (err) {
+    errors.push({ message: err.message, context: "userCreator" });
+  }
+
+  const { newPrograms = [], newRelations = [] } = req.body || {};
+  const createdPrograms = [];
+  let programCodeToId;
+  try {
+    programCodeToId = new Map(
+      (await Program.find({}).select("code").lean()).map((p) => [normalizeCode(p.code), p._id.toString()])
+    );
+  } catch (err) {
+    errors.push({ message: err.message, context: "load programs" });
+    programCodeToId = new Map();
+  }
+
+  for (const p of newPrograms) {
+    try {
+      const code = normalizeCode(p.planestudio ?? p.code);
+      const name = (p.nombre_programa ?? p.name ?? "").toString().trim().substring(0, 255);
+      if (!code || !name) continue;
+      if (programCodeToId.has(code)) continue;
+      const program = await Program.create({
+        code,
+        name,
+        status: "ACTIVE",
+        userCreator: userCreatorEmail || undefined,
+        dateCreation: new Date(),
+      });
+      programCodeToId.set(code, program._id.toString());
+      createdPrograms.push({ _id: program._id, code: program.code, name: program.name });
+    } catch (err) {
+      errors.push({
+        message: err.message,
+        item: `programa ${(p.planestudio ?? p.code ?? "").toString().trim()} - ${(p.nombre_programa ?? p.name ?? "").toString().trim().substring(0, 80)}`,
+      });
+    }
+  }
+
+  let facultyCodeToId;
+  try {
+    facultyCodeToId = new Map(
+      (await Faculty.find({}).select("code").lean()).map((f) => [normalizeCode(f.code), f._id.toString()])
+    );
+  } catch (err) {
+    errors.push({ message: err.message, context: "load faculties" });
+    facultyCodeToId = new Map();
+  }
+
+  const createdRelationsDetail = [];
+  for (const r of newRelations) {
+    try {
+      const planestudio = normalizeCode(r.planestudio);
+      const codFacultad = normalizeCode(r.cod_facultad);
+      if (!planestudio || !codFacultad) continue;
+      const programId = programCodeToId.get(planestudio);
+      const facultyId = facultyCodeToId.get(codFacultad);
+      if (!programId || !facultyId) {
+        errors.push({
+          message: programId ? "Facultad no encontrada" : "Programa no encontrado",
+          item: `relación ${planestudio} + ${codFacultad}`,
+        });
+        continue;
+      }
+      const exists = await ProgramFaculty.findOne({ programId, facultyId });
+      if (exists) continue;
+      const rel = await ProgramFaculty.create({
+        programId,
+        facultyId,
+        code: planestudio,
+        status: "ACTIVE",
+        activo: r.activo === "NO" ? "NO" : "SI",
+        userCreator: userCreatorEmail || undefined,
+        dateCreation: new Date(),
+      });
+      createdRelationsDetail.push({ _id: rel._id, programId, facultyId });
+    } catch (err) {
+      errors.push({
+        message: err.message,
+        item: `relación ${(r.planestudio ?? "").toString().trim()} + ${(r.cod_facultad ?? "").toString().trim()}`,
+      });
+    }
+  }
+
+  const createdRelations = createdRelationsDetail.length;
+  const message =
+    errors.length === 0
+      ? `Se crearon ${createdPrograms.length} programa(s) y ${createdRelations} relación(es) programa-facultad.`
+      : `Proceso completado con observaciones: ${createdPrograms.length} programa(s), ${createdRelations} relación(es) creados; ${errors.length} error(es).`;
+
+  return res.status(200).json({
+    success: true,
+    message,
+    createdPrograms,
+    createdRelations: createdRelationsDetail,
+    errors: errors.length ? errors : undefined,
+  });
+};
+
 export const getProgramFaculties = async (req, res) => {
   try {
-    const { page = 1, limit = 10, programId, facultyId } = req.query;
+    const { page = 1, limit = 10, programId, facultyId, status } = req.query;
     const filter = {};
 
     if (programId) filter.programId = programId;
     if (facultyId) filter.facultyId = facultyId;
+    if (status) filter.status = String(status).toUpperCase() === "INACTIVE" ? "INACTIVE" : "ACTIVE";
 
     const pageNum = parseInt(page, 10);
     const limitNum = parseInt(limit, 10);

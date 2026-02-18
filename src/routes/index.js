@@ -20,6 +20,7 @@ import facultyRoutes from '../modules/faculty/faculty.routes.js';
 import programRoutes from '../modules/program/program.routes.js';
 import programFacultyRoutes from '../modules/program/programFaculty.routes.js';
 import periodoRoutes from '../modules/periodos/periodo.routes.js';
+import dashboardRoutes from '../modules/dashboard/dashboard.routes.js';
 
 const router = express.Router();
 
@@ -44,5 +45,6 @@ router.use("/faculties", facultyRoutes);
 router.use("/programs", programRoutes);
 router.use("/program-faculties", programFacultyRoutes);
 router.use("/periodos", periodoRoutes);
+router.use("/dashboard", dashboardRoutes);
 
 export default router;

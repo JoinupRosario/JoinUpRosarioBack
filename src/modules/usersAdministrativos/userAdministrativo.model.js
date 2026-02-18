@@ -16,9 +16,10 @@ const userAdministrativoSchema = new mongoose.Schema({
     required: [true, 'Los apellidos son obligatorios'],
     trim: true
   },
-  cargo: {
-    type: String,
-    trim: true
+  tipoIdentificacion: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'items',
+    default: null
   },
   identificacion: {
     type: String,
@@ -26,15 +27,7 @@ const userAdministrativoSchema = new mongoose.Schema({
     unique: true,
     trim: true
   },
-  telefono: {
-    type: String,
-    trim: true
-  },
-  extension: {
-    type: String,
-    trim: true
-  },
-  movil: {
+  phone: {
     type: String,
     trim: true
   },
@@ -53,9 +46,28 @@ const userAdministrativoSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Sucursal'
   },
+  programas: [{
+    program: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Program',
+      required: true
+    },
+    estado: {
+      type: Boolean,
+      default: true
+    }
+  }],
   estado: {
     type: Boolean,
     default: true
+  },
+  userCreator: {
+    type: String,
+    trim: true
+  },
+  userUpdater: {
+    type: String,
+    trim: true
   }
 }, {
   timestamps: true,
@@ -67,6 +79,7 @@ userAdministrativoSchema.index({ identificacion: 1 });
 userAdministrativoSchema.index({ user: 1 });
 userAdministrativoSchema.index({ estado: 1 });
 userAdministrativoSchema.index({ 'roles.rol': 1 });
+userAdministrativoSchema.index({ 'programas.program': 1 });
 userAdministrativoSchema.index({ sucursal: 1 });
 
 // Método para agregar rol
@@ -101,6 +114,25 @@ userAdministrativoSchema.methods.cambiarEstadoRol = function(rolId, estado) {
   if (rol) {
     rol.estado = estado;
   }
+  return this.save();
+};
+
+// Método para agregar programa
+userAdministrativoSchema.methods.agregarPrograma = function(programId, estado = true) {
+  const existente = this.programas.find(p => 
+    p.program && p.program.toString() === programId.toString()
+  );
+  if (!existente) {
+    this.programas.push({ program: programId, estado });
+  }
+  return this.save();
+};
+
+// Método para remover programa
+userAdministrativoSchema.methods.removerPrograma = function(programId) {
+  this.programas = this.programas.filter(p => 
+    p.program && p.program.toString() !== programId.toString()
+  );
   return this.save();
 };
 

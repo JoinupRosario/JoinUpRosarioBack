@@ -34,6 +34,17 @@ export const loginUser = async (req, res) => {
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ message: "Usuario no encontrado" });
 
+    // Usuarios con Directorio Activo (Office 365) no pueden ingresar por login normal
+    if (user.directorioActivo) {
+      return res.status(403).json({
+        message: "No está autorizado para ingresar por este medio. Debe acceder con su cuenta institucional (Office 365)."
+      });
+    }
+
+    if (!user.password) {
+      return res.status(400).json({ message: "Contraseña no configurada. Contacte al administrador." });
+    }
+
     const validPass = await bcrypt.compare(password, user.password);
     if (!validPass) return res.status(400).json({ message: "Contraseña incorrecta" });
 

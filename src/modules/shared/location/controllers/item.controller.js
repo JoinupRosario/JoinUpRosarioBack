@@ -17,15 +17,17 @@ export const getItemsByListId = async (req, res) => {
       filter.isActive = isActive === 'true';
     }
     
-    // Búsqueda por texto
+    // Búsqueda por todos los campos relevantes del ítem (HU: búsqueda por cada campo del parámetro)
     if (search) {
+      const searchRegex = { $regex: search, $options: 'i' };
       filter.$or = [
-        { value: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } },
-        { valueForReports: { $regex: search, $options: 'i' } },
-        { valueForCalculations: { $regex: search, $options: 'i' } }
+        { value: searchRegex },
+        { description: searchRegex },
+        { valueForReports: searchRegex },
+        { valueForCalculations: searchRegex },
+        { status: searchRegex },
+        { filters: searchRegex }
       ];
-      
       // Para L_CIIU, buscar también por los primeros 3 dígitos del código
       if (listId === 'L_CIIU' && /^\d{1,3}$/.test(search)) {
         filter.$or.push({ value: { $regex: `^${search}`, $options: 'i' } });
