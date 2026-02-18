@@ -1,5 +1,5 @@
 import Postulant from "../models/postulants.schema.js";
-import PostulantProfile from "../models/postulant_profile.schema.js";
+import PostulantProfile from "../models/profile/profile.schema.js";
 import User from "../../users/user.model.js";
 import PostulantStatusHistory from "../models/logs/postulantLogStatus.schema.js";
 import {
@@ -13,10 +13,22 @@ import {
   ProfileReference,
   ProfileOtherStudy,
   ProfileInterestArea,
+  ProfileCv,
+  ProfileSupport,
+  ProfileInfoPermission,
+  ProfileProfileVersion,
 } from "../models/profile/index.js";
 import "../../faculty/model/faculty.model.js"; // Registra modelo Faculty para populate programFacultyId.facultyId
+import { MAX_PROFILES_PER_POSTULANT } from "./postulantProfile.controller.js";
+import { consultaInfEstudiante, consultaInfAcademica } from "../../../services/uxxiIntegration.service.js";
+import Program from "../../program/model/program.model.js";
+import Item from "../../shared/reference-data/models/item.schema.js";
+import Attachment from "../../shared/attachment/attachment.schema.js";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export const getPostulants = async (req, res) => {
   try {
@@ -53,6 +65,16 @@ export const getPostulants = async (req, res) => {
       Postulant.countDocuments(postulantFilter),
     ]);
 
+    const postulantIds = postulants.map((p) => p._id);
+    const profileCounts =
+      postulantIds.length > 0
+        ? await PostulantProfile.aggregate([
+            { $match: { postulantId: { $in: postulantIds } } },
+            { $group: { _id: "$postulantId", count: { $sum: 1 } } },
+          ])
+        : [];
+    const countByPostulantId = new Map(profileCounts.map((c) => [c._id.toString(), c.count]));
+
     const data = postulants.map((p) => ({
       _id: p._id,
       identity_postulant: p.postulantId?.code ?? null,
@@ -60,6 +82,8 @@ export const getPostulants = async (req, res) => {
       full_profile: p.filled ?? false,
       filling_percentage: p.fillingPercentage ?? calculateCompleteness(p),
       updatedAt: p.updatedAt,
+      profileCount: countByPostulantId.get(p._id.toString()) ?? 0,
+      maxProfilesAllowed: MAX_PROFILES_PER_POSTULANT,
       user: p.postulantId
         ? {
             _id: p.postulantId._id,
@@ -176,23 +200,500 @@ export const getPostulantById = async (req, res) => {
   }
 };
 
-/** GET /postulants/:id/profile-data — Datos migrados del perfil (PostulantProfile + profile_*) */
+const UNIVERSITAS_FIELD_LABELS = {
+  nombre_completo: "Nombre completo",
+  tipo_documento: "Tipo de documento",
+  sexo: "Sexo",
+  telefono: "Teléfono",
+  celular: "Celular",
+  direccion: "Dirección",
+  correo_personal: "Correo (personal)",
+  correo_institucional: "Correo institucional",
+};
+const LIST_ID_TYPE_DOC = "L_IDENTIFICATIONTYPE";
+const LIST_ID_GENDER = "L_GENDER";
+
+function normalizeStr(v) {
+  if (v == null || v === "") return "";
+  return String(v).trim();
+}
+
+/**
+ * Compara datos del postulante (BD) con datos de Universitas. currentAcademicUser = academicUser del PostulantProfile.
+ */
+function comparePostulantWithUniversitas(postulant, uni, currentAcademicUser = "") {
+  const changes = [];
+  const nombreCompletoUni = [uni.nombre, uni.primer_apellido, uni.segundo_apellido].filter(Boolean).join(" ").trim();
+  const currentNombre = normalizeStr(postulant.postulantId?.name);
+  if (nombreCompletoUni && nombreCompletoUni !== currentNombre) {
+    changes.push({ label: UNIVERSITAS_FIELD_LABELS.nombre_completo, valorActual: currentNombre || "—", valorNuevo: nombreCompletoUni });
+  }
+  const currentType = normalizeStr(postulant.typeOfIdentification?.value ?? postulant.typeOfIdentification?.name);
+  const tipoDocUni = normalizeStr(uni.tipo_documento);
+  if (tipoDocUni && tipoDocUni !== currentType) {
+    changes.push({ label: UNIVERSITAS_FIELD_LABELS.tipo_documento, valorActual: currentType || "—", valorNuevo: tipoDocUni });
+  }
+  const currentPhone = normalizeStr(postulant.phone);
+  const telefonoUni = normalizeStr(uni.telefono);
+  const celularUni = normalizeStr(uni.celular);
+  const phoneUni = telefonoUni || celularUni;
+  if (phoneUni && phoneUni !== currentPhone) {
+    changes.push({ label: UNIVERSITAS_FIELD_LABELS.telefono, valorActual: currentPhone || "—", valorNuevo: phoneUni });
+  }
+  if (celularUni && celularUni !== currentPhone && celularUni !== telefonoUni) {
+    changes.push({ label: UNIVERSITAS_FIELD_LABELS.celular, valorActual: currentPhone || "—", valorNuevo: celularUni });
+  }
+  const direccionUni = normalizeStr(uni.direccion);
+  const currentAddress = normalizeStr(postulant.address);
+  if (direccionUni !== currentAddress) {
+    changes.push({ label: UNIVERSITAS_FIELD_LABELS.direccion, valorActual: currentAddress || "—", valorNuevo: direccionUni });
+  }
+  const currentSexo = normalizeStr(postulant.gender?.value ?? postulant.gender?.name);
+  const sexoUni = normalizeStr(uni.sexo);
+  if (sexoUni && sexoUni !== currentSexo) {
+    changes.push({ label: UNIVERSITAS_FIELD_LABELS.sexo, valorActual: currentSexo || "—", valorNuevo: sexoUni });
+  }
+  const correoPersonalUni = normalizeStr(uni.correo_personal);
+  const currentEmail = normalizeStr(postulant.postulantId?.email);
+  if (correoPersonalUni && correoPersonalUni !== currentEmail) {
+    changes.push({ label: UNIVERSITAS_FIELD_LABELS.correo_personal, valorActual: currentEmail || "—", valorNuevo: correoPersonalUni });
+  }
+  const correoInstUni = normalizeStr(uni.correo_institucioinal);
+  const currentAcademic = normalizeStr(currentAcademicUser);
+  if (correoInstUni !== currentAcademic) {
+    changes.push({ label: UNIVERSITAS_FIELD_LABELS.correo_institucional, valorActual: currentAcademic || "—", valorNuevo: correoInstUni });
+  }
+  return changes;
+}
+
+/**
+ * GET test: prueba la API OSB Consulta_inf_estudiante con un documento.
+ * Query: documento= (ej. studentCode). Útil para probar desde Postman/curl.
+ */
+export const testConsultaUniversitas = async (req, res) => {
+  try {
+    const documento = (req.query.documento || req.body?.documento || "").toString().trim();
+    if (!documento) return res.status(400).json({ message: "Query documento es requerido (ej. ?documento=80196661)." });
+    const data = await consultaInfEstudiante(documento);
+    if (!data) return res.status(404).json({ message: "No se encontró información del estudiante en Universitas.", documento });
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET test: prueba la API OSB Consulta_inf_academica con un documento.
+ * Query: documento= (ej. 1107524684). Sin auth. Útil para verificar que la petición a Universitas funciona.
+ */
+export const testConsultaAcademicaUniversitas = async (req, res) => {
+  try {
+    const documento = (req.query.documento || req.body?.documento || "").toString().trim();
+    if (!documento) return res.status(400).json({ message: "Query documento es requerido (ej. ?documento=1107524684)." });
+    const items = await consultaInfAcademica(documento);
+    if (!items || items.length === 0) {
+      return res.status(404).json({
+        message: "No se encontró información académica del estudiante en Universitas.",
+        documento,
+      });
+    }
+    res.json({ documento, count: items.length, items });
+  } catch (error) {
+    res.status(502).json({
+      message: error.message || "Error al conectar con Universitas (Consulta_inf_academica).",
+      documento: (req.query.documento || req.body?.documento || "").toString().trim(),
+    });
+  }
+};
+
+/**
+ * Resuelve el documento para consultar Universitas: solo studentCode del PostulantProfile (es el que solicita la API).
+ * Usa String() por si studentCode viene como número desde BD; prefiere un perfil que tenga studentCode no vacío.
+ */
+async function getDocumentoForUniversitas(postulantId) {
+  const profiles = await PostulantProfile.find({ postulantId }).select("studentCode").lean();
+  for (const p of profiles) {
+    const doc = (p?.studentCode != null && p.studentCode !== "") ? String(p.studentCode).trim() : "";
+    if (doc) return doc;
+  }
+  return null;
+}
+
+/**
+ * GET consulta información del estudiante en Universitas (OSB) y compara con el postulante en BD.
+ * Documento = studentCode de PostulantProfile del postulante (requerido).
+ * Devuelve { changes, universitasData }.
+ */
+export const consultaInfEstudianteUniversitas = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const postulant = await Postulant.findById(id)
+      .populate("postulantId", "name email code")
+      .populate("typeOfIdentification", "name value")
+      .populate("gender", "name value")
+      .lean();
+    if (!postulant) return res.status(404).json({ message: "postulant not found" });
+    const documento = await getDocumentoForUniversitas(id);
+    if (!documento) return res.status(400).json({ message: "El postulante debe tener un perfil con studentCode para consultar Universitas." });
+    const universitasData = await consultaInfEstudiante(documento);
+    if (!universitasData) return res.status(404).json({ message: "No se encontró información del estudiante en Universitas." });
+    const profile = await PostulantProfile.findOne({ postulantId: id }).select("academicUser").lean();
+    const currentAcademicUser = profile?.academicUser ?? "";
+    const changes = comparePostulantWithUniversitas(postulant, universitasData, currentAcademicUser);
+    res.json({ changes, universitasData });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+/** Busca un ítem por listId y value (case-insensitive). Opcionalmente coincide también con description. */
+async function findItemByValue(listId, value, alsoDescription = false) {
+  if (!value || !listId) return null;
+  const v = String(value).trim();
+  const listIdNorm = String(listId).trim();
+  const valueRegex = new RegExp(`^${escapeRegex(v)}$`, "i");
+  const filter = {
+    listId: { $regex: new RegExp(`^${escapeRegex(listIdNorm)}$`, "i") },
+  };
+  if (alsoDescription) {
+    filter.$or = [
+      { value: { $regex: valueRegex } },
+      { description: { $regex: valueRegex } },
+    ];
+  } else {
+    filter.value = { $regex: valueRegex };
+  }
+  const doc = await Item.findOne(filter).select("_id").lean();
+  return doc;
+}
+/** Busca ítem en L_IDENTIFICATIONTYPE por value (CC, CE, CEX, PA, CA, ID, DNI, etc.) o description. */
+async function findItemTypeDoc(value) {
+  if (!value) return null;
+  const v = String(value).trim().toUpperCase();
+  const valuesToTry = [v];
+  if (v === "CEX") valuesToTry.push("CE");
+  if (v === "CE") valuesToTry.push("CEX");
+  for (const val of valuesToTry) {
+    let found = await findItemByValue(LIST_ID_TYPE_DOC, val);
+    if (!found) found = await findItemByValue(LIST_ID_TYPE_DOC, val, true);
+    if (found) return found;
+  }
+  return null;
+}
+/**
+ * Busca ítem en L_GENDER. En BD suele ser value "M" (Masculino) y "F" (Femenino).
+ * Universitas envía "H" (hombre) → buscar value "M"; "M" (mujer) → buscar value "F".
+ */
+async function findItemGender(value) {
+  if (!value) return null;
+  const v = String(value).trim().toUpperCase();
+  let valuesToTry = [v];
+  if (v === "H" || v === "HOMBRE" || v === "MASCULINO") {
+    valuesToTry = ["M", "H", "Hombre", "Masculino"];
+  } else if (v === "M" || v === "MUJER" || v === "FEMENINO") {
+    valuesToTry = ["F", "Mujer", "Femenino"];
+  }
+  for (const val of valuesToTry) {
+    const found = await findItemByValue(LIST_ID_GENDER, val);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * PUT aplica la información de Universitas: User (name, email), Postulant (phone, address, typeOfIdentification, gender), PostulantProfile (academicUser).
+ * Documento = studentCode de PostulantProfile (requerido).
+ */
+export const aplicarInfoUniversitas = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const postulantDoc = await Postulant.findById(id).populate("postulantId", "code name email");
+    if (!postulantDoc) return res.status(404).json({ message: "postulant not found" });
+    const documento = await getDocumentoForUniversitas(id);
+    if (!documento) return res.status(400).json({ message: "El postulante debe tener un perfil con studentCode para consultar Universitas." });
+    const universitasData = await consultaInfEstudiante(documento);
+    if (!universitasData) return res.status(404).json({ message: "No se encontró información del estudiante en Universitas." });
+
+    const uni = universitasData;
+    const userId = postulantDoc.postulantId?._id;
+    if (userId) {
+      const nameUni = [uni.nombre, uni.primer_apellido, uni.segundo_apellido].filter(Boolean).join(" ").trim();
+      const emailUni = normalizeStr(uni.correo_personal);
+      const updateUser = {};
+      if (nameUni) updateUser.name = nameUni;
+      if (emailUni) updateUser.email = emailUni;
+      if (Object.keys(updateUser).length) await User.findByIdAndUpdate(userId, updateUser);
+    }
+
+    const phoneUni = normalizeStr(uni.telefono || uni.celular);
+    const addressUni = normalizeStr(uni.direccion);
+    const tipoDocUni = normalizeStr(uni.tipo_documento);
+    const sexoUni = normalizeStr(uni.sexo);
+
+    const updatePostulant = {
+      phone: phoneUni || null,
+      address: addressUni || null,
+    };
+    if (tipoDocUni) {
+      const itemType = await findItemTypeDoc(tipoDocUni);
+      if (itemType) updatePostulant.typeOfIdentification = itemType._id;
+    }
+    if (sexoUni) {
+      const itemGender = await findItemGender(sexoUni);
+      if (itemGender) updatePostulant.gender = itemGender._id;
+    }
+
+    const postulantForCompleteness = await Postulant.findById(id).lean();
+    const merged = { ...postulantForCompleteness, ...updatePostulant };
+    updatePostulant.fillingPercentage = calculateCompleteness(merged);
+
+    await Postulant.findByIdAndUpdate(id, { $set: updatePostulant }, { runValidators: true });
+
+    const correoInstUni = normalizeStr(uni.correo_institucioinal);
+    if (correoInstUni !== undefined) {
+      await PostulantProfile.updateMany({ postulantId: id }, { $set: { academicUser: correoInstUni || null } });
+    }
+    const updated = await Postulant.findById(id)
+      .populate("postulantId", "name email code")
+      .populate("countryBirthId", "name")
+      .populate("stateBirthId", "name")
+      .populate({ path: "cityBirthId", select: "name", populate: { path: "state", select: "name" } })
+      .populate("countryResidenceId", "name")
+      .populate("stateResidenceId", "name")
+      .populate({ path: "cityResidenceId", select: "name", populate: { path: "state", select: "name" } })
+      .populate("typeOfIdentification", "name value")
+      .populate("gender", "name value")
+      .lean();
+    res.json(formatPostulantProfileResponse(updated));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** Busca programa por codigoprograma o nombreprograma; si no existe, lo crea. */
+async function findOrCreateProgram(codigoprograma, nombreprograma, tipoEstudio) {
+  const code = (codigoprograma || "").toString().trim();
+  const name = (nombreprograma || "").toString().trim();
+  if (!name) return null;
+  let program = await Program.findOne({
+    $or: [
+      ...(code ? [{ code }] : []),
+      { name: { $regex: new RegExp(`^${escapeRegex(name)}$`, "i") } },
+    ],
+  }).lean();
+  if (!program) {
+    const level = (tipoEstudio || "").toUpperCase() === "MOF" ? "Maestría" : "Pregrado";
+    const created = await Program.create({
+      code: code || undefined,
+      name,
+      level,
+      status: "active",
+    });
+    program = created.toObject();
+  }
+  return program;
+}
+
+/**
+ * Compara programas actuales del perfil (enrolled + graduate) con los ítems académicos de Universitas.
+ * Devuelve array de { label, valorActual, valorNuevo } para mostrar en el modal.
+ */
+function comparePostulantAcademicWithUniversitas(enrolledPrograms, graduatePrograms, universitasItems) {
+  const changes = [];
+  const enrolledNames = (enrolledPrograms || [])
+    .map((e) => e.programId?.name || e.programId?.code)
+    .filter(Boolean);
+  const graduateNames = (graduatePrograms || [])
+    .map((g) => g.programId?.name || g.programId?.code)
+    .filter(Boolean);
+  const uniEnrolled = (universitasItems || []).filter((i) => (i.egresado || "").toString().toUpperCase() === "N");
+  const uniGraduate = (universitasItems || []).filter((i) => (i.egresado || "").toString().toUpperCase() === "S");
+  const uniEnrolledNames = uniEnrolled.map((i) => i.nombreprograma || i.nombreplan || "—").filter(Boolean);
+  const uniGraduateNames = uniGraduate.map((i) => i.nombreprograma || i.nombreplan || "—").filter(Boolean);
+  const actualEnrolled = [...new Set(enrolledNames)].join(", ") || "—";
+  const nuevoEnrolled = [...new Set(uniEnrolledNames)].join(", ") || "—";
+  const actualGraduate = [...new Set(graduateNames)].join(", ") || "—";
+  const nuevoGraduate = [...new Set(uniGraduateNames)].join(", ") || "—";
+  if (actualEnrolled !== nuevoEnrolled) {
+    changes.push({ label: "Programas en curso", valorActual: actualEnrolled, valorNuevo: nuevoEnrolled });
+  }
+  if (actualGraduate !== nuevoGraduate) {
+    changes.push({ label: "Programas finalizados", valorActual: actualGraduate, valorNuevo: nuevoGraduate });
+  }
+  return changes;
+}
+
+/**
+ * GET consulta información académica en Universitas y compara con el perfil del postulante.
+ * Documento = studentCode del PostulantProfile (requerido).
+ * Devuelve { changes, universitasData } (universitasData = array de programas).
+ */
+export const consultaInfAcademicaUniversitas = async (req, res) => {
+  let documento = null;
+  try {
+    const { id } = req.params;
+    const postulant = await Postulant.findById(id).select("_id postulantId").lean();
+    if (!postulant) return res.status(404).json({ message: "postulant not found" });
+    documento = await getDocumentoForUniversitas(id);
+    if (!documento) return res.status(400).json({ message: "El postulante debe tener un perfil con studentCode para consultar Universitas." });
+
+    let universitasItems;
+    try {
+      universitasItems = await consultaInfAcademica(documento);
+    } catch (err) {
+      return res.status(502).json({
+        message: err.message || "Error al conectar con Universitas (Consulta_inf_academica).",
+        documento,
+      });
+    }
+
+    if (!universitasItems || universitasItems.length === 0) {
+      return res.status(404).json({
+        message: "No se encontró información académica del estudiante en Universitas.",
+        documento,
+      });
+    }
+    const profileFilter = postulant.postulantId
+      ? { $or: [{ postulantId: id }, { postulantId: postulant.postulantId }] }
+      : { postulantId: id };
+    const profile = await PostulantProfile.findOne(profileFilter).select("_id").lean();
+    let enrolledPrograms = [];
+    let graduatePrograms = [];
+    if (profile) {
+      [enrolledPrograms, graduatePrograms] = await Promise.all([
+        ProfileEnrolledProgram.find({ profileId: profile._id }).populate("programId", "name code").lean(),
+        ProfileGraduateProgram.find({ profileId: profile._id }).populate("programId", "name code").lean(),
+      ]);
+    }
+    const changes = comparePostulantAcademicWithUniversitas(enrolledPrograms, graduatePrograms, universitasItems);
+    res.json({ changes, universitasData: universitasItems });
+  } catch (error) {
+    res.status(500).json({
+      message: error.message,
+      ...(documento != null && { documento }),
+    });
+  }
+};
+
+/**
+ * PUT aplica la información académica de Universitas al perfil del postulante.
+ * Crea/asegura ProfileEnrolledProgram (egresado N) y ProfileGraduateProgram (egresado S) por cada ítem de Universitas.
+ */
+export const aplicarInfoAcademicaUniversitas = async (req, res) => {
+  let documento = null;
+  try {
+    const { id } = req.params;
+    const postulant = await Postulant.findById(id).select("_id postulantId").lean();
+    if (!postulant) return res.status(404).json({ message: "postulant not found" });
+    documento = await getDocumentoForUniversitas(id);
+    if (!documento) return res.status(400).json({ message: "El postulante debe tener un perfil con studentCode para consultar Universitas." });
+
+    let universitasItems;
+    try {
+      universitasItems = await consultaInfAcademica(documento);
+    } catch (err) {
+      return res.status(502).json({
+        message: err.message || "Error al conectar con Universitas (Consulta_inf_academica).",
+        documento,
+      });
+    }
+    if (!universitasItems || universitasItems.length === 0) {
+      return res.status(404).json({
+        message: "No se encontró información académica del estudiante en Universitas.",
+        documento,
+      });
+    }
+    const profileFilter = postulant.postulantId
+      ? { $or: [{ postulantId: id }, { postulantId: postulant.postulantId }] }
+      : { postulantId: id };
+    let profile = await PostulantProfile.findOne(profileFilter);
+    if (!profile) {
+      profile = new PostulantProfile({
+        postulantId: id,
+        studentCode: documento,
+        dateCreation: new Date(),
+        userCreator: req.user?.name || req.user?.email || "api",
+      });
+      await profile.save();
+    }
+    const userLabel = req.user?.name || req.user?.email || "api";
+    for (const item of universitasItems) {
+      const egresado = (item.egresado || "").toString().toUpperCase() === "S";
+      const program = await findOrCreateProgram(item.codigoprograma, item.nombreprograma || item.nombreplan, item.tipo_estudio);
+      if (!program) continue;
+      if (egresado) {
+        const exists = await ProfileGraduateProgram.findOne({ profileId: profile._id, programId: program._id });
+        if (!exists) {
+          await ProfileGraduateProgram.create({
+            profileId: profile._id,
+            programId: program._id,
+            programFacultyId: null,
+          });
+        }
+      } else {
+        const exists = await ProfileEnrolledProgram.findOne({ profileId: profile._id, programId: program._id });
+        if (!exists) {
+          await ProfileEnrolledProgram.create({
+            profileId: profile._id,
+            programId: program._id,
+            programFacultyId: null,
+            dateCreation: new Date(),
+            userCreator: userLabel,
+          });
+        }
+      }
+    }
+    const [enrolledPrograms, graduatePrograms] = await Promise.all([
+      ProfileEnrolledProgram.find({ profileId: profile._id }).populate("programId", "name code").lean(),
+      ProfileGraduateProgram.find({ profileId: profile._id }).populate("programId", "name code").lean(),
+    ]);
+    res.json({
+      message: "Información académica aplicada.",
+      enrolledPrograms,
+      graduatePrograms,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** GET /postulants/:id/profile-data — Datos migrados del perfil (PostulantProfile + profile_*). Query opcionales: profileId (perfil base), versionId (versión de profile_profile_version para mostrar nombre/texto). */
 export const getPostulantProfileData = async (req, res) => {
   try {
     const { id } = req.params;
-    let postulant = await Postulant.findById(id).select("_id").lean();
+    const { profileId: queryProfileId, versionId: queryVersionId } = req.query;
+    let postulant = await Postulant.findById(id).select("_id postulantId").lean();
     if (!postulant) {
-      postulant = await Postulant.findOne({ postulantId: id }).select("_id").lean();
+      postulant = await Postulant.findOne({ postulantId: id }).select("_id postulantId").lean();
     }
     if (!postulant) {
       return res.status(404).json({ message: "Postulante no encontrado" });
     }
     const postulantDocId = postulant._id;
+    const userId = postulant.postulantId ?? null;
+    const profileFilter = userId
+      ? { $or: [{ postulantId: postulantDocId }, { postulantId: userId }] }
+      : { postulantId: postulantDocId };
 
-    const postulantProfile = await PostulantProfile.findOne({ postulantId: postulantDocId })
-      .populate("levelJob", "value name")
-      .populate("companySector", "value name")
-      .lean();
+    let postulantProfile;
+    if (queryProfileId) {
+      postulantProfile = await PostulantProfile.findOne({
+        _id: queryProfileId,
+        ...profileFilter,
+      })
+        .populate("levelJob", "value name")
+        .populate("companySector", "value name")
+        .lean();
+    } else {
+      postulantProfile = await PostulantProfile.findOne(profileFilter)
+        .populate("levelJob", "value name")
+        .populate("companySector", "value name")
+        .sort({ createdAt: -1 })
+        .lean();
+    }
     if (!postulantProfile) {
       return res.json({
         postulantProfile: null,
@@ -206,10 +707,17 @@ export const getPostulantProfileData = async (req, res) => {
         references: [],
         otherStudies: [],
         interestAreas: [],
+        profileCvs: [],
+        profileSupports: [],
+        profileInfoPermissions: [],
+        profileProfileVersions: [],
       });
     }
 
     const profileId = postulantProfile._id;
+    const allBaseProfiles = await PostulantProfile.find(profileFilter).select("_id").lean();
+    const allProfileIds = allBaseProfiles.map((p) => p._id);
+
     const [
       enrolledPrograms,
       graduatePrograms,
@@ -220,10 +728,15 @@ export const getPostulantProfileData = async (req, res) => {
       references,
       otherStudies,
       interestAreas,
+      profileCvs,
+      profileSupports,
+      profileInfoPermissions,
+      profileProfileVersions,
     ] = await Promise.all([
       ProfileEnrolledProgram.find({ profileId })
         .populate("programId", "name code")
         .populate({ path: "programFacultyId", select: "code facultyId", populate: { path: "facultyId", select: "name" } })
+        .populate("university", "value description")
         .populate("countryId", "name")
         .populate("stateId", "name")
         .populate("cityId", "name")
@@ -231,25 +744,34 @@ export const getPostulantProfileData = async (req, res) => {
       ProfileGraduateProgram.find({ profileId })
         .populate("programId", "name code")
         .populate({ path: "programFacultyId", select: "code facultyId", populate: { path: "facultyId", select: "name" } })
+        .populate("university", "value description")
         .populate("countryId", "name")
         .populate("stateId", "name")
         .populate("cityId", "name")
         .lean(),
-      ProfileWorkExperience.find({ profileId })
+      ProfileWorkExperience.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId })
         .populate("companySector", "value name")
         .populate("countryId", "name")
         .populate("stateId", "name")
         .populate("cityId", "name")
+        .sort({ startDate: -1 })
         .lean(),
       ProfileSkill.find({ profileId }).populate("skillId", "name").lean(),
       ProfileLanguage.find({ profileId })
         .populate("language", "value name")
         .populate("level", "value name")
         .lean(),
-      ProfileAward.find({ profileId }).populate("awardType", "value name").lean(),
-      ProfileReference.find({ profileId }).lean(),
+      ProfileAward.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId })
+        .populate("awardType", "value name")
+        .sort({ awardDate: -1, dateCreation: -1 })
+        .lean(),
+      ProfileReference.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId }).lean(),
       ProfileOtherStudy.find({ profileId }).lean(),
       ProfileInterestArea.find({ profileId }).populate("area", "value name").lean(),
+      ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").lean(),
+      ProfileSupport.find({ profileId }).populate("attachmentId", "name filepath contentType").lean(),
+      ProfileInfoPermission.find({ profileId }).lean(),
+      ProfileProfileVersion.find({ profileId }).lean(),
     ]);
 
     const enrolledIds = enrolledPrograms.map((e) => e._id);
@@ -258,8 +780,18 @@ export const getPostulantProfileData = async (req, res) => {
         ? await ProfileProgramExtraInfo.find({ enrolledProgramId: { $in: enrolledIds } }).lean()
         : [];
 
+    let selectedProfileVersion = null;
+    if (queryVersionId && profileId) {
+      const versionDoc = await ProfileProfileVersion.findOne({
+        _id: queryVersionId,
+        profileId,
+      }).lean();
+      if (versionDoc) selectedProfileVersion = versionDoc;
+    }
+
     res.json({
       postulantProfile,
+      selectedProfileVersion,
       enrolledPrograms,
       graduatePrograms,
       programExtraInfo: programExtraInfoFiltered,
@@ -270,9 +802,59 @@ export const getPostulantProfileData = async (req, res) => {
       references,
       otherStudies,
       interestAreas,
+      profileCvs,
+      profileSupports,
+      profileInfoPermissions,
+      profileProfileVersions,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+/** GET /postulants/:id/attachments/:attachmentId/download — Descarga un CV o documento soporte del postulante. */
+export const downloadAttachment = async (req, res) => {
+  try {
+    const { id, attachmentId } = req.params;
+    let postulant = await Postulant.findById(id).select("_id postulantId").lean();
+    if (!postulant) {
+      postulant = await Postulant.findOne({ postulantId: id }).select("_id postulantId").lean();
+    }
+    if (!postulant) {
+      return res.status(404).json({ message: "Postulante no encontrado" });
+    }
+    const postulantDocId = postulant._id;
+    const userId = postulant.postulantId ?? null;
+    const profileFilter = userId
+      ? { $or: [{ postulantId: postulantDocId }, { postulantId: userId }] }
+      : { postulantId: postulantDocId };
+
+    const profiles = await PostulantProfile.find(profileFilter).select("_id").lean();
+    const profileIds = profiles.map((p) => p._id);
+
+    const [cvLink, supportLink] = await Promise.all([
+      ProfileCv.findOne({ attachmentId, profileId: { $in: profileIds } }).lean(),
+      ProfileSupport.findOne({ attachmentId, profileId: { $in: profileIds } }).lean(),
+    ]);
+    if (!cvLink && !supportLink) {
+      return res.status(404).json({ message: "Documento no encontrado o no pertenece a este postulante" });
+    }
+
+    const attachment = await Attachment.findById(attachmentId).lean();
+    if (!attachment || !attachment.filepath) {
+      return res.status(404).json({ message: "Archivo no encontrado" });
+    }
+
+    const uploadsDir = path.join(__dirname, "..", "..", "..", "uploads");
+    const fullPath = path.join(uploadsDir, attachment.filepath);
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ message: "Archivo no encontrado en el servidor" });
+    }
+
+    const downloadName = attachment.name || path.basename(attachment.filepath);
+    res.download(fullPath, downloadName);
+  } catch (error) {
+    res.status(500).json({ message: error.message || "Error al descargar" });
   }
 };
 

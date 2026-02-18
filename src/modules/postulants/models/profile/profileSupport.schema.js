@@ -2,6 +2,8 @@
  * Documento soporte del perfil (tabla puente). tenant-1.sql `profile_supports`. profile_id → postulant_profile(id), attachment_id → attachment(id).
  */
 import mongoose from "mongoose";
+// Registrar Attachment antes de usarlo en ref.
+import "../../../shared/attachment/attachment.schema.js";
 
 const schema = new mongoose.Schema(
   {

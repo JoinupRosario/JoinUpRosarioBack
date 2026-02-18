@@ -2,6 +2,8 @@
  * Habilidad del perfil. tenant-1.sql `profile_skill`. profile_id → postulant_profile(id), skill_id → skill(id).
  */
 import mongoose from "mongoose";
+// Registrar Skill antes de usarlo en ref (evita "Schema hasn't been registered for model 'Skill'").
+import "../../../shared/skill/skill.schema.js";
 
 const schema = new mongoose.Schema(
   {

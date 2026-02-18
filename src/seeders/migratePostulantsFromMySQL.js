@@ -1,20 +1,24 @@
 /**
  * Migración postulant + postulant_profile + profile_* desde MySQL (tenant-1) a MongoDB.
- * Idempotente: omite por mysqlId si ya existe. Si se interrumpe (Ctrl+C), puede volver a ejecutar
- * y continuará desde donde quedó sin duplicar datos.
- * Requiere previa migración: users, items, countries, states, cities, programs, program_faculty, attachments, skills.
  *
- * Optimizado para 50k+ registros: procesamiento por lotes (BATCH_SIZE), insertMany y cursor en MySQL.
+ * TRAZABILIDAD MySQL ↔ MongoDB:
+ * - El _id de MongoDB NO es el mismo que el id de MySQL. Para no mezclar sistemas se usa el campo mysqlId.
+ * - Cada documento migrado guarda en mysqlId el id (PK) que tenía en MySQL.
+ * - La idempotencia y los cruces entre colecciones se gestionan siempre por mysqlId:
+ *   · "ya existe" = existe un documento con ese mysqlId en Mongo.
+ *   · Mapas *ByMysqlId: clave = id MySQL → valor = _id MongoDB (para referencias entre colecciones).
+ * - Las referencias en Mongo (postulantId, profileId, etc.) son ObjectId (_id), pero la resolución
+ *   desde datos MySQL se hace mediante estos mapas (mysqlId → _id).
  *
+ * Tablas según tenant-1.sql: postulant (~2016), postulant_profile (~2045), profile_*.
  * Ejecutar: node src/seeders/migratePostulantsFromMySQL.js
- * No interrumpir con Ctrl+C hasta ver "Resumen migración postulantes".
  */
 
 import dotenv from "dotenv";
 import connectDB from "../config/db.js";
 import { connectMySQL, query, closePool } from "../config/mysql.js";
 import Postulant from "../modules/postulants/models/postulants.schema.js";
-import PostulantProfile from "../modules/postulants/models/postulant_profile.schema.js";
+import PostulantProfile from "../modules/postulants/models/profile/profile.schema.js";
 import User from "../modules/users/user.model.js";
 import Item from "../modules/shared/reference-data/models/item.schema.js";
 import Country from "../modules/shared/location/models/country.schema.js";
@@ -53,6 +57,9 @@ const runQuery = (sql, params = []) =>
     if (err.message?.includes("doesn't exist") || err.code === "ER_NO_SUCH_TABLE") return [];
     throw err;
   });
+
+/** Nombre de la tabla de perfiles en MySQL. Según tenant-1.sql línea 2045: CREATE TABLE `postulant_profile`. */
+const MYSQL_TABLE_POSTULANT_PROFILE = "postulant_profile";
 
 function num(v) {
   if (v == null) return null;
@@ -103,10 +110,13 @@ async function migrate() {
     profile_work_experiences: 0,
     skippedPostulantNoUser: 0,
     skippedPostulantAlreadyExists: 0,
+    skippedProfileNoPostulant: 0,
+    skippedProfileAlreadyExists: 0,
+    postulantCreatedForProfile: 0,
     skipped: {},
   };
 
-  // --- Mapas MongoDB ---
+  // --- Mapas MongoDB: clave = id MySQL (mysqlId), valor = _id Mongo. Trazabilidad y referencias. ---
   const items = await Item.find({}).select("mysqlId _id").lean();
   const itemByMysqlId = new Map(items.filter((i) => i.mysqlId != null).map((i) => [i.mysqlId, i._id]));
 
@@ -158,7 +168,7 @@ async function migrate() {
   }
   console.log(`   👤 Usuarios mapeados MySQL→Mongo: ${userByMysqlId.size} (por mysqlId: ${mongoUsersWithMysqlId.length}, por code/email: ${userByMysqlId.size - mongoUsersWithMysqlId.length})\n`);
 
-  // --- 1. Postulant (por lotes: cursor por postulant_id, insertMany) ---
+  // --- 1. Postulant (por lotes). Idempotencia por mysqlId: omitir si ya existe doc con ese mysqlId. ---
   let existingPostulantIds = new Set((await Postulant.find({}).select("mysqlId").lean()).map((p) => p.mysqlId).filter(Boolean));
   let lastPostulantId = 0;
   let totalPostulantRows = 0;
@@ -217,21 +227,68 @@ async function migrate() {
   console.log(`   ✅ Postulant: ${stats.postulant} creados (leídos ${totalPostulantRows} de MySQL)`);
   console.log(`   ⏭️  Omitidos: sin usuario: ${stats.skippedPostulantNoUser}, ya existían: ${stats.skippedPostulantAlreadyExists}\n`);
 
-  // Mapa postulant_id (MySQL) → Postulant._id (Mongo)
-  const postulants = await Postulant.find({ mysqlId: { $exists: true, $ne: null } }).select("mysqlId _id").lean();
-  const postulantByMysqlId = new Map(postulants.map((p) => [p.mysqlId, p._id]));
+  // Mapa id MySQL (postulant_id) → _id Mongo. Resolución por mysqlId para referencias desde postulant_profile.
+  const postulants = await Postulant.find({}).select("mysqlId _id postulantId").lean();
+  const postulantByMysqlId = new Map(postulants.filter((p) => p.mysqlId != null).map((p) => [p.mysqlId, p._id]));
+  const postulantByUserId = new Map(postulants.map((p) => [p.postulantId?.toString(), p._id]));
 
-  // --- 2. Postulant_profile (por lotes: cursor por id, insertMany) ---
+  const resolvePostulantIdForProfile = async (mysqlPostulantId) => {
+    const pid = num(mysqlPostulantId);
+    if (pid == null) return null;
+    let mongoId = postulantByMysqlId.get(pid);
+    if (mongoId) return mongoId;
+    const userId = userByMysqlId.get(pid);
+    if (userId) mongoId = postulantByUserId.get(userId.toString());
+    if (mongoId) {
+      const doc = await Postulant.findById(mongoId).select("mysqlId").lean();
+      if (doc && doc.mysqlId == null) {
+        await Postulant.updateOne({ _id: mongoId }, { $set: { mysqlId: pid } });
+        postulantByMysqlId.set(pid, mongoId);
+      }
+      return mongoId;
+    }
+    if (userId) {
+      const created = await Postulant.create({
+        postulantId: userId,
+        mysqlId: pid,
+        alternateEmail: "",
+      });
+      postulantByMysqlId.set(pid, created._id);
+      postulantByUserId.set(created.postulantId.toString(), created._id);
+      stats.postulantCreatedForProfile += 1;
+      return created._id;
+    }
+    return null;
+  };
+
+  // --- 2. Postulant_profile (por lotes). Tabla según tenant-1.sql línea 2045: `postulant_profile` ---
+  const countResultProfile = await runQuery(`SELECT COUNT(*) as c FROM \`${MYSQL_TABLE_POSTULANT_PROFILE}\``);
+  const totalProfileRowsMysql = countResultProfile?.[0]?.c != null ? Number(countResultProfile[0].c) : 0;
+  console.log(`   📋 Tabla MySQL: \`${MYSQL_TABLE_POSTULANT_PROFILE}\` (${totalProfileRowsMysql} filas)`);
+
+  // Idempotencia por mysqlId: no insertar si ya existe un perfil con ese mysqlId (id de MySQL).
+  const existingProfilesInMongo = await PostulantProfile.find({}).select("mysqlId").lean();
   const existingProfileMysqlIds = new Set(
-    (await PostulantProfile.find({}).select("mysqlId").lean()).map((p) => p.mysqlId).filter(Boolean)
+    existingProfilesInMongo.map((p) => p.mysqlId).filter((id) => id != null && id !== "")
   );
   const profileByMysqlId = new Map(
     (await PostulantProfile.find({ mysqlId: { $exists: true, $ne: null } }).select("mysqlId _id").lean()).map((p) => [p.mysqlId, p._id])
   );
+  console.log(`   📋 PostulantProfile en MongoDB (antes): ${existingProfilesInMongo.length} documentos (trazabilidad por mysqlIds: ${existingProfileMysqlIds.size})`);
+
+  const forceMigrateProfiles = process.env.FORCE_MIGRATE_PROFILES === "1" || process.env.FORCE_MIGRATE_PROFILES === "true";
+  if (forceMigrateProfiles && existingProfileMysqlIds.size > 0) {
+    console.log("   🔄 FORCE_MIGRATE_PROFILES=1: se eliminan perfiles existentes en MongoDB para re-migrar desde MySQL...");
+    const deleted = await PostulantProfile.deleteMany({});
+    console.log(`   🗑️  Eliminados: ${deleted.deletedCount} documentos de postulant_profiles`);
+    existingProfileMysqlIds.clear();
+    profileByMysqlId.clear();
+  }
+
   let lastProfileId = 0;
   while (true) {
     const profileRows = await runQuery(
-      `SELECT id, postulant_id, student_code, academic_user, academic_id, degree_option, emphasis, years_experience, filled, last_time_experience, total_time_experience, accept_terms, cv_video_link, profile_text, skills_technical_software, condition_discapacity, level_job, other_studies, possibility_fly, salary_range_min, salary_range_max, retired, employee, independent, have_business, company_name, company_sector, web_site_company, date_creation, user_creator, date_update, user_updater FROM \`postulant_profile\` WHERE id > ? ORDER BY id LIMIT ${BATCH_SIZE}`,
+      `SELECT id, postulant_id, student_code, academic_user, academic_id, degree_option, emphasis, years_experience, filled, last_time_experience, total_time_experience, accept_terms, cv_video_link, profile_text, skills_technical_software, condition_discapacity, level_job, other_studies, possibility_fly, salary_range_min, salary_range_max, retired, employee, independent, have_business, company_name, company_sector, web_site_company, date_creation, user_creator, date_update, user_updater FROM \`${MYSQL_TABLE_POSTULANT_PROFILE}\` WHERE id > ? ORDER BY id LIMIT ${BATCH_SIZE}`,
       [lastProfileId]
     );
     if (!profileRows || profileRows.length === 0) break;
@@ -239,9 +296,19 @@ async function migrate() {
     for (const r of profileRows) {
       const profileIdMysql = num(r.id);
       if (profileIdMysql != null) lastProfileId = profileIdMysql;
-      const postulantIdMongo = postulantByMysqlId.get(num(r.postulant_id));
-      if (!postulantIdMongo || profileIdMysql == null) continue;
-      if (existingProfileMysqlIds.has(profileIdMysql)) continue;
+      let postulantIdMongo = postulantByMysqlId.get(num(r.postulant_id));
+      if (!postulantIdMongo) {
+        postulantIdMongo = await resolvePostulantIdForProfile(r.postulant_id);
+      }
+      if (!postulantIdMongo) {
+        stats.skippedProfileNoPostulant += 1;
+        if (profileIdMysql != null) lastProfileId = profileIdMysql;
+        continue;
+      }
+      if (profileIdMysql == null || existingProfileMysqlIds.has(profileIdMysql)) {
+        if (existingProfileMysqlIds.has(profileIdMysql)) stats.skippedProfileAlreadyExists += 1;
+        continue;
+      }
       toInsert.push({
         postulantId: postulantIdMongo,
         mysqlId: profileIdMysql,
@@ -285,8 +352,17 @@ async function migrate() {
       console.log(`   📦 Postulant_profile: lote ${toInsert.length} (total: ${stats.postulant_profile})`);
     }
   }
+  if (stats.postulant_profile === 0 && totalProfileRowsMysql > 0) {
+    console.warn(`   ⚠️  Postulant_profile: 0 insertados pero MySQL tiene ${totalProfileRowsMysql} filas.`);
+    console.warn(`       Sin postulante en Mongo: ${stats.skippedProfileNoPostulant}, ya existían (mysqlId): ${stats.skippedProfileAlreadyExists}`);
+    console.warn(`       Si la colección postulant_profiles debe estar vacía, ejecuta: FORCE_MIGRATE_PROFILES=1 node src/seeders/migratePostulantsFromMySQL.js`);
+  }
+  if (stats.skippedProfileAlreadyExists > 0) {
+    console.log(`   ⏭️  Perfiles omitidos (ya en MongoDB): ${stats.skippedProfileAlreadyExists}`);
+  }
   console.log(`   ✅ Postulant_profile: ${stats.postulant_profile} creados\n`);
 
+  /** Resuelve id MySQL (profile.id) → _id MongoDB. Trazabilidad: profile_* usan profile_id MySQL, en Mongo guardamos ObjectId. */
   const toProfileId = (mysqlProfileId) => profileByMysqlId.get(num(mysqlProfileId)) ?? null;
 
   // --- 3. Profile_enrolled_program (por lotes, antes que profile_program_extra_info) ---
@@ -837,11 +913,20 @@ async function migrate() {
 
   console.log("\n🎉 Resumen migración postulantes:");
   console.log(`   postulant: ${stats.postulant} creados (omitidos sin usuario: ${stats.skippedPostulantNoUser}, ya existían: ${stats.skippedPostulantAlreadyExists})`);
+  if (stats.postulantCreatedForProfile > 0) {
+    console.log(`   postulant (creados por perfil): ${stats.postulantCreatedForProfile}`);
+  }
   console.log(`   postulant_profile: ${stats.postulant_profile}`);
+  if (stats.skippedProfileNoPostulant > 0 || stats.skippedProfileAlreadyExists > 0) {
+    console.log(`   ⏭️  Perfiles omitidos: sin postulante ${stats.skippedProfileNoPostulant}, ya en MongoDB ${stats.skippedProfileAlreadyExists}`);
+  }
   console.log(`   profile_*: ${stats.profile_awards + stats.profile_cv + stats.profile_enrolled_program + stats.profile_graduate_program + stats.profile_info_permissions + stats.profile_interest_areas + stats.profile_language + stats.profile_other_studies + stats.profile_profile_version + stats.profile_program_extra_info + stats.profile_references + stats.profile_skill + stats.profile_supports + stats.profile_work_experiences}`);
   if (stats.skippedPostulantNoUser > 0) {
     console.log("\n💡 Para migrar todos los postulantes, ejecuta primero: npm run migrate:users");
     console.log("   Eso rellenará User.mysqlId (y crea usuarios faltantes en Mongo) para que postulant_id coincida.");
+  }
+  if (stats.skippedProfileNoPostulant > 0) {
+    console.log("\n💡 Perfiles omitidos: el postulant_id en MySQL no tiene usuario en MongoDB. Ejecuta migrate:users y vuelve a ejecutar esta migración.");
   }
 
   await closePool();

@@ -78,6 +78,7 @@ postulantProfileSchema.index({ levelJob: 1 });
 postulantProfileSchema.index({ companySector: 1 });
 postulantProfileSchema.index({ mysqlId: 1 });
 
+// Colección en MongoDB: postulant_profiles (nombre con el que fue creada la colección)
 export default mongoose.model(
   "PostulantProfile",
   postulantProfileSchema,

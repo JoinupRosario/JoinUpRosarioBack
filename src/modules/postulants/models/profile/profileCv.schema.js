@@ -1,4 +1,6 @@
 import mongoose from "mongoose";
+// Registrar Attachment antes de usarlo en ref.
+import "../../../shared/attachment/attachment.schema.js";
 /** Tabla puente profile_cv: profile_id, attachment_id. tenant-1.sql */
 const schema = new mongoose.Schema({
   profileId: { type: mongoose.Schema.Types.ObjectId, ref: "PostulantProfile", required: true, index: true },
