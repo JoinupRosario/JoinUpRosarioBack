@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 import connectDB from "../config/db.js";
 import { connectMySQL, query, closePool } from "../config/mysql.js";
-import Periodo from "../modules/periodos/periodo.model.js";
+import Periodo, { TIPO_PERIODO } from "../modules/periodos/periodo.model.js";
 
 dotenv.config();
 
@@ -21,6 +21,10 @@ const CLEAR_COLLECTIONS_BEFORE_MIGRATE = process.env.CLEAR_COLLECTIONS_BEFORE_MI
  *   date_initial_approbation_practice / date_final_approbation_practice → fechaAutorizacion
  *   date_initial_legalization_practice / date_final_legalization_practice → fechaLegalizacion
  *   date_initial_publish_offer / date_final_publish_offer → fechaPublicarOfertas
+ *
+ * Tipo (practica|monitoria): se infiere por fechas. Si solo tienen valor
+ * date_initial_period_academic_system y date_final_period_academic_system y el resto es null → monitoria.
+ * Si alguna otra fecha tiene valor → practica.
  *
  * Ejecutar:
  *   node src/seeders/migratePeriodosFromMySQL.js
@@ -52,6 +56,22 @@ const migratePeriodosFromMySQL = async () => {
       return "Inactivo";
     };
 
+    /** Infiere tipo: si solo sistema académico tiene fechas y el resto es null → monitoria; si no → practica. */
+    const inferTipoFromRow = (r) => {
+      const hasSistema = r.date_initial_period_academic_system != null || r.date_final_period_academic_system != null;
+      const hasPractica =
+        r.date_initial_start_academic_practice != null ||
+        r.date_final_start_academic_practice != null ||
+        r.date_max_end_practice != null ||
+        r.date_initial_approbation_practice != null ||
+        r.date_final_approbation_practice != null ||
+        r.date_initial_legalization_practice != null ||
+        r.date_final_legalization_practice != null ||
+        r.date_initial_publish_offer != null ||
+        r.date_final_publish_offer != null;
+      return hasSistema && !hasPractica ? TIPO_PERIODO.MONITORIA : TIPO_PERIODO.PRACTICA;
+    };
+
     const rows = await query(
       `SELECT id, period, status,
         date_initial_period_academic_system, date_final_period_academic_system,
@@ -77,6 +97,7 @@ const migratePeriodosFromMySQL = async () => {
           continue;
         }
         await Periodo.create({
+          tipo: inferTipoFromRow(r),
           mysqlId,
           codigo: r.period != null ? String(r.period).trim() : "",
           estado: toEstado(r.status),
