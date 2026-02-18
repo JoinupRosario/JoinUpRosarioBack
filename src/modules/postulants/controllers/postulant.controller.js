@@ -41,17 +41,25 @@ export const getPostulants = async (req, res) => {
 
     if (search && String(search).trim()) {
       const term = String(search).trim();
-      const users = await User.find({
-        $or: [
-          { name: { $regex: term, $options: "i" } },
-          { email: { $regex: term, $options: "i" } },
-          { code: { $regex: term, $options: "i" } },
-        ],
-      })
-        .select("_id")
-        .lean();
+      const regexOpt = { $regex: term, $options: "i" };
+      const [users, profilesWithStudentCode] = await Promise.all([
+        User.find({
+          $or: [
+            { name: regexOpt },
+            { email: regexOpt },
+            { code: regexOpt },
+          ],
+        })
+          .select("_id")
+          .lean(),
+        PostulantProfile.find({ studentCode: regexOpt }).select("postulantId").lean(),
+      ]);
       const userIds = users.map((u) => u._id);
-      if (userIds.length) postulantFilter.postulantId = { $in: userIds };
+      const postulantDocIds = profilesWithStudentCode.map((p) => p.postulantId).filter(Boolean);
+      const orClause = [];
+      if (userIds.length) orClause.push({ postulantId: { $in: userIds } });
+      if (postulantDocIds.length) orClause.push({ _id: { $in: postulantDocIds } });
+      if (orClause.length) postulantFilter.$or = orClause;
       else postulantFilter.postulantId = { $in: [] };
     }
 
@@ -66,18 +74,30 @@ export const getPostulants = async (req, res) => {
     ]);
 
     const postulantIds = postulants.map((p) => p._id);
-    const profileCounts =
+    const [profileCounts, profileStudentCodes] = await Promise.all([
       postulantIds.length > 0
-        ? await PostulantProfile.aggregate([
+        ? PostulantProfile.aggregate([
             { $match: { postulantId: { $in: postulantIds } } },
             { $group: { _id: "$postulantId", count: { $sum: 1 } } },
           ])
-        : [];
+        : [],
+      postulantIds.length > 0
+        ? PostulantProfile.aggregate([
+            { $match: { postulantId: { $in: postulantIds } } },
+            { $sort: { createdAt: -1 } },
+            { $group: { _id: "$postulantId", studentCode: { $first: "$studentCode" } } },
+          ])
+        : [],
+    ]);
     const countByPostulantId = new Map(profileCounts.map((c) => [c._id.toString(), c.count]));
+    const studentCodeByPostulantId = new Map(
+      profileStudentCodes.map((s) => [s._id.toString(), s.studentCode != null && s.studentCode !== "" ? String(s.studentCode).trim() : null])
+    );
 
     const data = postulants.map((p) => ({
       _id: p._id,
       identity_postulant: p.postulantId?.code ?? null,
+      student_code: studentCodeByPostulantId.get(p._id.toString()) ?? null,
       estate_postulant: p.estatePostulant ?? null,
       full_profile: p.filled ?? false,
       filling_percentage: p.fillingPercentage ?? calculateCompleteness(p),

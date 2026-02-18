@@ -158,17 +158,16 @@ export const getProgramasFromOSB = async () => {
 /**
  * Consulta información básica del estudiante en Universitas (OSB).
  * URL = URL_OSB + /uxxi-URO/Proxy/Consulta_inf_estudiante (path en código).
- * POST body: { documento }. Opcional: Basic Auth con OSB_USER y OSB_PASSWORD.
+ * POST body: { documento }. Basic Auth con USS_URJOB y PASS_URJOB (o OSB_USER/OSB_PASSWORD).
  */
 export const consultaInfEstudiante = async (documento) => {
   const baseUrl = (process.env.URL_OSB || "").trim().replace(/\/$/, "");
-  const userName = (process.env.OSB_USER || "").trim();
-  const password = process.env.OSB_PASSWORD;
+  const creds = getOSBCredentials();
   if (!baseUrl || !documento) return null;
 
   const headers = { "Content-Type": "application/json", Accept: "application/json" };
-  if (userName && password !== undefined && password !== "") {
-    headers.Authorization = "Basic " + Buffer.from(`${userName}:${password}`).toString("base64");
+  if (creds) {
+    headers.Authorization = "Basic " + Buffer.from(`${creds.user}:${creds.pass}`).toString("base64");
   }
 
   try {
@@ -195,12 +194,11 @@ export const consultaInfEstudiante = async (documento) => {
 /**
  * Consulta información académica del estudiante en Universitas (OSB).
  * URL = URL_OSB + /uxxi-URO/Proxy/Consulta_inf_academica
- * POST body: { documento }. Devuelve el array de ítems (programas) de items[0].resultSet.items.
+ * POST body: { documento }. Basic Auth con USS_URJOB y PASS_URJOB (o OSB_USER/OSB_PASSWORD).
  */
 export const consultaInfAcademica = async (documento) => {
   const baseUrl = (process.env.URL_OSB || "").trim().replace(/\/$/, "");
-  const userName = (process.env.OSB_USER || "").trim();
-  const password = process.env.OSB_PASSWORD;
+  const creds = getOSBCredentials();
   const docStr = documento != null ? String(documento).trim() : "";
   if (!baseUrl) {
     const err = new Error("URL_OSB no está configurado en el servidor. No se puede llamar a Consulta_inf_academica.");
@@ -210,8 +208,8 @@ export const consultaInfAcademica = async (documento) => {
   if (!docStr) return null;
 
   const headers = { "Content-Type": "application/json", Accept: "application/json" };
-  if (userName && password !== undefined && password !== "") {
-    headers.Authorization = "Basic " + Buffer.from(`${userName}:${password}`).toString("base64");
+  if (creds) {
+    headers.Authorization = "Basic " + Buffer.from(`${creds.user}:${creds.pass}`).toString("base64");
   }
 
   const url = baseUrl + "/uxxi-URO/Proxy/Consulta_inf_academica";
