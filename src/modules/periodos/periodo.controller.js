@@ -56,7 +56,7 @@ const removeUndefined = (obj) => {
  */
 export const getPeriodos = async (req, res) => {
   try {
-    const { page = 1, limit = 20, search, tipo } = req.query;
+    const { page = 1, limit = 20, search, tipo, estado } = req.query;
     const filter = {};
     if (search && search.trim()) {
       filter.codigo = { $regex: search.trim(), $options: "i" };
@@ -65,6 +65,9 @@ export const getPeriodos = async (req, res) => {
       filter.tipo = "monitoria";
     } else if (tipo === "practica") {
       filter.$or = [{ tipo: "practica" }, { tipo: { $exists: false } }];
+    }
+    if (estado) {
+      filter.estado = estado;
     }
     const pageNum = Math.max(1, parseInt(page, 10));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10)));

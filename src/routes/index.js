@@ -22,6 +22,7 @@ import programFacultyRoutes from '../modules/program/programFaculty.routes.js';
 import periodoRoutes from '../modules/periodos/periodo.routes.js';
 import dashboardRoutes from '../modules/dashboard/dashboard.routes.js';
 import asignaturaRoutes from '../modules/asignaturas/asignatura.routes.js';
+import oportunidadesMTMRoutes from '../modules/oportunidadesMTM/oportunidadMTM.routes.js';
 
 const router = express.Router();
 
@@ -48,5 +49,6 @@ router.use("/program-faculties", programFacultyRoutes);
 router.use("/periodos", periodoRoutes);
 router.use("/dashboard", dashboardRoutes);
 router.use("/asignaturas", asignaturaRoutes);
+router.use("/oportunidades-mtm", oportunidadesMTMRoutes);
 
 export default router;
