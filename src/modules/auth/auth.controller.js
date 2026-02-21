@@ -34,9 +34,16 @@ export const loginUser = async (req, res) => {
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ message: "Usuario no encontrado" });
 
-    // Solo las entidades externas pueden ingresar por este formulario.
-    // Administrativos, estudiantes y postulantes deben usar el Directorio Activo (Office 365).
-    if (user.modulo !== "entidades") {
+    // Reglas de acceso por formulario:
+    // - 'entidades': siempre puede usar el formulario
+    // - 'administrativo' sin directorioActivo: puede usar el formulario
+    // - 'administrativo' con directorioActivo: debe usar SAML
+    // - 'estudiante' o sin módulo: siempre debe usar SAML
+    const puedeUsarFormulario =
+      user.modulo === "entidades" ||
+      (user.modulo === "administrativo" && !user.directorioActivo);
+
+    if (!puedeUsarFormulario) {
       return res.status(403).json({
         code: "USE_SAML",
         message: "Debe acceder con su cuenta institucional (Office 365). Use el botón 'Ingresar como Comunidad Universitaria'."
