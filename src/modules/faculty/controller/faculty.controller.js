@@ -1,6 +1,7 @@
 import Faculty from "../model/faculty.model.js";
 import User from "../../users/user.model.js";
 import { getInfoFacultades, getFacultadesFromOSB } from "../../../services/uxxiIntegration.service.js";
+import { buildSearchRegex } from "../../../utils/searchUtils.js";
 
 /**
  * GET /faculties/compare-universitas
@@ -22,16 +23,32 @@ export const compareFacultiesWithUniversitas = async (req, res) => {
         error: process.env.NODE_ENV === "development" ? err.message : undefined,
       });
     }
-    const dbCount = await Faculty.countDocuments({});
-    const dbCodes = await Faculty.find({}).select("code").lean();
+
     const normalizeCode = (c) => String(c ?? "").trim();
-    const codeSet = new Set(dbCodes.map((f) => normalizeCode(f.code)));
-    const newFaculties = universitasList.filter((f) => !codeSet.has(normalizeCode(f.cod_facultad)));
+
+    // Códigos que vienen de UXXI/Universitas
+    const uxxiCodeSet = new Set(universitasList.map((f) => normalizeCode(f.cod_facultad)));
+
+    // Todas las facultades en BD
+    const dbFaculties = await Faculty.find({}).select("code name status").lean();
+    const dbCount = dbFaculties.length;
+
+    // Las que están en UXXI pero no en BD → crear
+    const dbCodeSet = new Set(dbFaculties.map((f) => normalizeCode(f.code)));
+    const newFaculties = universitasList.filter((f) => !dbCodeSet.has(normalizeCode(f.cod_facultad)));
+
+    // Las que están ACTIVAS en BD pero NO vienen en UXXI → inactivar
+    const toDeactivate = dbFaculties.filter((f) => {
+      const isActive = ["ACTIVE", "active", "1"].includes(String(f.status ?? "").trim());
+      return isActive && !uxxiCodeSet.has(normalizeCode(f.code));
+    });
+
     return res.json({
       success: true,
       dbCount,
       universitasCount: universitasList.length,
       newFaculties: newFaculties.map((f) => ({ cod_facultad: f.cod_facultad, nombre_facultad: f.nombre_facultad })),
+      toDeactivate: toDeactivate.map((f) => ({ code: f.code, name: f.name })),
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -96,6 +113,50 @@ export const createFacultiesFromUniversitas = async (req, res) => {
   });
 };
 
+/**
+ * POST /faculties/deactivate-from-universitas
+ * Body: { codes: ["COD1", "COD2", ...] }
+ * Inactiva en BD todas las facultades cuyos códigos no vienen en UXXI/Universitas.
+ */
+export const deactivateFacultiesNotInUniversitas = async (req, res) => {
+  const { codes } = req.body || {};
+  if (!Array.isArray(codes) || codes.length === 0) {
+    return res.status(400).json({ success: false, message: "Se requiere body.codes (array no vacío)." });
+  }
+
+  let userUpdaterEmail = "";
+  try {
+    if (req.user?.id) {
+      const currentUser = await User.findById(req.user.id).select("email").lean();
+      userUpdaterEmail = (currentUser?.email ?? "").toString().trim();
+    }
+  } catch (_) {}
+
+  try {
+    const normalizeCode = (c) => String(c ?? "").trim();
+    const normalizedCodes = codes.map(normalizeCode).filter(Boolean);
+
+    const result = await Faculty.updateMany(
+      { code: { $in: normalizedCodes } },
+      {
+        $set: {
+          status: "inactive",
+          userUpdater: userUpdaterEmail || undefined,
+          dateUpdate: new Date(),
+        },
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `Se inactivaron ${result.modifiedCount} facultad(es).`,
+      deactivated: result.modifiedCount,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 /** RQ02_HU003: Sincronizar facultades desde UXXI (getInfoFacultades). Botón de integración. */
 export const syncFacultiesFromUXXI = async (req, res) => {
   try {
@@ -154,7 +215,7 @@ export const getFaculties = async (req, res) => {
 
     if (status) filter.status = status;
     if (search) {
-      const searchRegex = { $regex: search, $options: "i" };
+      const searchRegex = buildSearchRegex(search);
       filter.$or = [
         { name: searchRegex },
         { code: searchRegex },

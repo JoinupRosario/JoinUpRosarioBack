@@ -1,6 +1,6 @@
 import passport from "passport";
 import jwt from "jsonwebtoken";
-import { samlStrategy } from "../../config/saml.config.js";
+import { getSamlStrategy } from "../../config/saml.config.js";
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://rosario.mozartai.com.co";
 
@@ -60,7 +60,7 @@ export const samlCallback = (req, res, next) => {
  */
 export const samlMetadata = (req, res) => {
   try {
-    const metadata = samlStrategy.generateServiceProviderMetadata(null, null);
+    const metadata = getSamlStrategy().generateServiceProviderMetadata(null, null);
     res.type("application/xml");
     res.status(200).send(metadata);
   } catch (error) {

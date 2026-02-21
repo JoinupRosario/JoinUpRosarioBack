@@ -5,6 +5,14 @@ import User from "../../users/user.model.js";
 import { getInfoProgramas, getProgramasFromOSB } from "../../../services/uxxiIntegration.service.js";
 
 const normalizeCode = (c) => String(c ?? "").trim();
+const normalizeName = (s) => String(s ?? "").trim().toUpperCase();
+
+// Mapeo tipo_estudio → level y labelLevel
+const TIPO_ESTUDIO_MAP = {
+  MOF: { level: "MOF", labelLevel: "POSGRADO" },
+  PSC: { level: "PR",  labelLevel: "PREGRADO" },
+  TCL: { level: "DO",  labelLevel: "DOCTORADO" },
+};
 
 /** RQ02_HU003: Sincronizar planes (programas por facultad) desde UXXI (getInfoProgramas). Botón de integración. */
 export const syncPlansFromUXXI = async (req, res) => {
@@ -80,8 +88,10 @@ export const syncPlansFromUXXI = async (req, res) => {
 
 /**
  * GET /program-faculties/compare-universitas
- * Llama OSB Consulta_programas; compara programas por code (planestudio) y relaciones (programId+facultyId).
- * Devuelve conteos y listas de programas y relaciones a crear.
+ * Compara por NOMBRE de programa (no por código planestudio).
+ * - newPrograms: nombres que vienen de UXXI y NO existen en BD.
+ * - newRelations: filas de UXXI cuya combinación (facultyId + programId + planestudio) no existe en BD.
+ * - toDeactivateRelations: program_faculties ACTIVAS en BD que NO aparecen en UXXI.
  */
 export const compareProgramsWithUniversitas = async (req, res) => {
   try {
@@ -96,80 +106,144 @@ export const compareProgramsWithUniversitas = async (req, res) => {
       });
     }
 
-    const programCodesFromApi = new Map();
+    // ── 1. Programas únicos por nombre en la respuesta UXXI ─────────────────
+    const apiProgramsByName = new Map(); // nombreNorm → row
     for (const row of apiRows) {
-      const code = normalizeCode(row.planestudio);
-      if (!code) continue;
-      if (!programCodesFromApi.has(code)) {
-        programCodesFromApi.set(code, row.nombre_programa);
-      }
+      const key = normalizeName(row.nombre_programa);
+      if (key && !apiProgramsByName.has(key)) apiProgramsByName.set(key, row);
     }
 
-    const dbPrograms = await Program.find({}).select("code").lean();
-    const dbProgramCodesSet = new Set(dbPrograms.map((p) => normalizeCode(p.code)));
+    // ── 2. Programas nuevos (no existen en BD por nombre) ───────────────────
+    const dbPrograms = await Program.find({}).select("name _id").lean();
+    const dbProgramNamesSet = new Set(dbPrograms.map((p) => normalizeName(p.name)));
+    const programNameToId = new Map(dbPrograms.map((p) => [normalizeName(p.name), p._id.toString()]));
+
     const newPrograms = [];
-    for (const [code, name] of programCodesFromApi) {
-      if (!dbProgramCodesSet.has(code)) {
-        newPrograms.push({ planestudio: code, nombre_programa: name || code });
-      }
-    }
-
-    const dbFaculties = await Faculty.find({}).select("code").lean();
-    const facultyCodeToId = new Map(dbFaculties.map((f) => [normalizeCode(f.code), f._id.toString()]));
-    const dbProgramsByCode = await Program.find({}).select("code").lean();
-    const programCodeToId = new Map(dbProgramsByCode.map((p) => [normalizeCode(p.code), p._id.toString()]));
-    const existingRelations = await ProgramFaculty.find({}).select("programId facultyId").lean();
-    const relationKeySet = new Set(
-      existingRelations.map((r) => `${r.programId.toString()}|${r.facultyId.toString()}`)
-    );
-
-    const newRelations = [];
-    for (const row of apiRows) {
-      const planestudio = normalizeCode(row.planestudio);
-      const codFacultad = normalizeCode(row.cod_facultad);
-      if (!planestudio || !codFacultad) continue;
-      const facultyId = facultyCodeToId.get(codFacultad);
-      if (!facultyId) continue;
-      const programId = programCodeToId.get(planestudio);
-      if (!programId) {
-        if (programCodesFromApi.has(planestudio)) {
-          newRelations.push({
-            planestudio,
-            cod_facultad: row.cod_facultad,
-            nombre_programa: row.nombre_programa,
-            nombre_facultad: row.nombre_facultad,
-            activo: row.activo || "SI",
-          });
-        }
-        continue;
-      }
-      const key = `${programId}|${facultyId}`;
-      if (!relationKeySet.has(key)) {
-        newRelations.push({
-          planestudio,
-          cod_facultad: row.cod_facultad,
+    for (const [nameKey, row] of apiProgramsByName) {
+      if (!dbProgramNamesSet.has(nameKey)) {
+        newPrograms.push({
           nombre_programa: row.nombre_programa,
-          nombre_facultad: row.nombre_facultad,
-          activo: row.activo || "SI",
+          tipo_estudio: row.tipo_estudio,
+          activo: row.activo,
         });
       }
     }
 
-    const dbProgramsCount = await Program.countDocuments({});
-    const dbRelationsCount = await ProgramFaculty.countDocuments({});
-    const apiProgramsCount = programCodesFromApi.size;
-    const apiRelationsCount = apiRows.length;
+    // ── 3. Mapas de apoyo ────────────────────────────────────────────────────
+    const allFaculties = await Faculty.find({}).select("code _id").lean();
+    const facultyCodeToId = new Map(
+      allFaculties.map((f) => [normalizeCode(String(f.code)), f._id.toString()])
+    );
+
+    // Relaciones existentes indexadas por (programId|facultyId|code)
+    const existingPFs = await ProgramFaculty.find({}).select("programId facultyId code status").lean();
+    const existingPFKeySet = new Set(
+      existingPFs.map((pf) =>
+        `${pf.programId?.toString()}|${pf.facultyId?.toString()}|${normalizeCode(pf.code)}`
+      )
+    );
+
+    // ── 4. Relaciones nuevas ─────────────────────────────────────────────────
+    const newRelations = [];
+    for (const row of apiRows) {
+      const nameKey     = normalizeName(row.nombre_programa);
+      const codFacStr   = normalizeCode(String(row.cod_facultad));
+      const planestudio = normalizeCode(row.planestudio);
+      if (!nameKey || !codFacStr || !planestudio) continue;
+
+      const facultyId = facultyCodeToId.get(codFacStr);
+      if (!facultyId) continue;
+
+      // programId puede existir ya o estar en newPrograms (aún no creado)
+      const programId = programNameToId.get(nameKey);
+      const pfKey = programId
+        ? `${programId}|${facultyId}|${planestudio}`
+        : null;
+
+      if (!pfKey || !existingPFKeySet.has(pfKey)) {
+        newRelations.push({
+          nombre_programa: row.nombre_programa,
+          nombre_facultad: row.nombre_facultad,
+          cod_facultad: row.cod_facultad,
+          planestudio: row.planestudio,
+          tipo_estudio: row.tipo_estudio,
+          activo: row.activo,
+        });
+      }
+    }
+
+    // ── 5. Relaciones a inactivar (ACTIVAS en BD que no están en UXXI) ───────
+    const apiPFKeySet = new Set(
+      apiRows.map((row) =>
+        `${normalizeCode(String(row.cod_facultad))}|${normalizeName(row.nombre_programa)}|${normalizeCode(row.planestudio)}`
+      )
+    );
+
+    const activePFs = await ProgramFaculty.find({ status: "ACTIVE" })
+      .populate("facultyId", "code")
+      .populate("programId", "name")
+      .lean();
+
+    const toDeactivateRelations = [];
+    for (const pf of activePFs) {
+      const facCode  = normalizeCode(String(pf.facultyId?.code ?? ""));
+      const progName = normalizeName(pf.programId?.name ?? "");
+      const pfCode   = normalizeCode(pf.code ?? "");
+      if (!facCode || !progName || !pfCode) continue;
+      if (!apiPFKeySet.has(`${facCode}|${progName}|${pfCode}`)) {
+        toDeactivateRelations.push({
+          _id: pf._id.toString(),
+          programName: pf.programId?.name ?? "",
+          facultyCode: pf.facultyId?.code ?? "",
+          code: pf.code ?? "",
+        });
+      }
+    }
+
+    // ── 6. Programas ACTIVOS en BD que NO vienen en UXXI → inactivar ────────
+    const allDbPrograms = await Program.find({}).select("name _id status createdAt").lean();
+    const toDeactivatePrograms = allDbPrograms.filter((p) => {
+      const isActive = ["ACTIVE", "active", "1"].includes(String(p.status ?? "").trim());
+      return isActive && !apiProgramsByName.has(normalizeName(p.name));
+    }).map((p) => ({ _id: p._id.toString(), name: p.name }));
+
+    // ── 7. Programas duplicados por nombre en BD (solo ACTIVOS) ─────────────
+    // Solo se consideran duplicados los programas activos; los ya inactivos se ignoran
+    const activeDbPrograms = allDbPrograms.filter((p) =>
+      ["ACTIVE", "active", "1"].includes(String(p.status ?? "").trim())
+    );
+    const programsByName = new Map(); // nombreNorm → [doc, ...]
+    for (const p of activeDbPrograms) {
+      const key = normalizeName(p.name);
+      if (!key) continue;
+      if (!programsByName.has(key)) programsByName.set(key, []);
+      programsByName.get(key).push(p);
+    }
+
+    // Por cada grupo con >1 doc: conservar el más antiguo (menor _id = creado primero), marcar el resto
+    const duplicatePrograms = [];
+    for (const [, group] of programsByName) {
+      if (group.length <= 1) continue;
+      // Ordenar por _id ascendente → el primero es el más antiguo
+      const sorted = [...group].sort((a, b) => a._id.toString().localeCompare(b._id.toString()));
+      for (const dup of sorted.slice(1)) {
+        duplicatePrograms.push({ _id: dup._id.toString(), name: dup.name });
+      }
+    }
 
     return res.json({
       success: true,
-      dbProgramsCount,
-      apiProgramsCount,
+      dbProgramsCount: dbPrograms.length,
+      apiProgramsCount: apiProgramsByName.size,
       newProgramsCount: newPrograms.length,
       newPrograms,
-      dbRelationsCount,
-      apiRelationsCount,
+      dbRelationsCount: existingPFs.length,
+      apiRelationsCount: apiRows.length,
       newRelationsCount: newRelations.length,
       newRelations,
+      toDeactivateRelations,
+      toDeactivatePrograms,
+      duplicatePrograms,
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -178,9 +252,11 @@ export const compareProgramsWithUniversitas = async (req, res) => {
 
 /**
  * POST /program-faculties/create-from-universitas
- * Body: { newPrograms: [...], newRelations: [...] }
- * Crea programas faltantes y luego relaciones programa-facultad; userCreator con email del usuario.
- * No hace throw: procesa todos los ítems, recoge errores y siempre responde 200 con resumen (created + errors).
+ * Body: { newPrograms, newRelations, toDeactivateRelations }
+ *
+ * - newPrograms: programas a crear, únicos por nombre (sin code, con level/labelLevel desde tipo_estudio).
+ * - newRelations: relaciones a crear, verificadas por (programId + facultyId + planestudio).
+ * - toDeactivateRelations: array de { _id } de program_faculties a inactivar.
  */
 export const createProgramsFromUniversitas = async (req, res) => {
   const errors = [];
@@ -194,97 +270,172 @@ export const createProgramsFromUniversitas = async (req, res) => {
     errors.push({ message: err.message, context: "userCreator" });
   }
 
-  const { newPrograms = [], newRelations = [] } = req.body || {};
-  const createdPrograms = [];
-  let programCodeToId;
+  const {
+    newPrograms = [],
+    newRelations = [],
+    toDeactivateRelations = [],
+    toDeactivatePrograms = [],
+    duplicatePrograms = [],
+  } = req.body || {};
+
+  // ── 1. Crear programas nuevos (dedup por nombre) ──────────────────────────
+  // Cargar programas existentes por nombre para no duplicar
+  let programNameToId;
   try {
-    programCodeToId = new Map(
-      (await Program.find({}).select("code").lean()).map((p) => [normalizeCode(p.code), p._id.toString()])
+    programNameToId = new Map(
+      (await Program.find({}).select("name").lean()).map((p) => [normalizeName(p.name), p._id.toString()])
     );
   } catch (err) {
     errors.push({ message: err.message, context: "load programs" });
-    programCodeToId = new Map();
+    programNameToId = new Map();
   }
 
+  const createdPrograms = [];
   for (const p of newPrograms) {
     try {
-      const code = normalizeCode(p.planestudio ?? p.code);
-      const name = (p.nombre_programa ?? p.name ?? "").toString().trim().substring(0, 255);
-      if (!code || !name) continue;
-      if (programCodeToId.has(code)) continue;
+      const name    = (p.nombre_programa ?? p.name ?? "").toString().trim().substring(0, 255);
+      const nameKey = normalizeName(name);
+      if (!name || !nameKey) continue;
+      if (programNameToId.has(nameKey)) continue; // ya existe por nombre
+
+      const tipoEstudio = (p.tipo_estudio ?? "").toString().trim().toUpperCase();
+      const { level = "", labelLevel = "" } = TIPO_ESTUDIO_MAP[tipoEstudio] ?? {};
+      const status = String(p.activo ?? "S").trim().toUpperCase() === "S" ? "ACTIVE" : "INACTIVE";
+
       const program = await Program.create({
-        code,
         name,
-        status: "ACTIVE",
+        level,
+        labelLevel,
+        status,
         userCreator: userCreatorEmail || undefined,
         dateCreation: new Date(),
       });
-      programCodeToId.set(code, program._id.toString());
-      createdPrograms.push({ _id: program._id, code: program.code, name: program.name });
+      programNameToId.set(nameKey, program._id.toString());
+      createdPrograms.push({ _id: program._id, name: program.name, level: program.level, labelLevel: program.labelLevel });
     } catch (err) {
       errors.push({
         message: err.message,
-        item: `programa ${(p.planestudio ?? p.code ?? "").toString().trim()} - ${(p.nombre_programa ?? p.name ?? "").toString().trim().substring(0, 80)}`,
+        item: `programa "${(p.nombre_programa ?? "").toString().trim().substring(0, 80)}"`,
       });
     }
   }
 
+  // ── 2. Cargar facultades ──────────────────────────────────────────────────
   let facultyCodeToId;
   try {
     facultyCodeToId = new Map(
-      (await Faculty.find({}).select("code").lean()).map((f) => [normalizeCode(f.code), f._id.toString()])
+      (await Faculty.find({}).select("code").lean()).map((f) => [normalizeCode(String(f.code)), f._id.toString()])
     );
   } catch (err) {
     errors.push({ message: err.message, context: "load faculties" });
     facultyCodeToId = new Map();
   }
 
+  // ── 3. Crear relaciones nuevas (dedup por programId + facultyId + code) ───
   const createdRelationsDetail = [];
   for (const r of newRelations) {
     try {
       const planestudio = normalizeCode(r.planestudio);
-      const codFacultad = normalizeCode(r.cod_facultad);
-      if (!planestudio || !codFacultad) continue;
-      const programId = programCodeToId.get(planestudio);
+      const codFacultad = normalizeCode(String(r.cod_facultad));
+      const nameKey     = normalizeName(r.nombre_programa);
+      if (!planestudio || !codFacultad || !nameKey) continue;
+
+      const programId = programNameToId.get(nameKey);
       const facultyId = facultyCodeToId.get(codFacultad);
+
       if (!programId || !facultyId) {
         errors.push({
-          message: programId ? "Facultad no encontrada" : "Programa no encontrado",
-          item: `relación ${planestudio} + ${codFacultad}`,
+          message: !programId ? "Programa no encontrado en BD" : "Facultad no encontrada en BD",
+          item: `relación "${r.nombre_programa}" + facultad ${r.cod_facultad}`,
         });
         continue;
       }
-      const exists = await ProgramFaculty.findOne({ programId, facultyId });
+
+      // Verificar duplicado por las 3 claves
+      const exists = await ProgramFaculty.findOne({ programId, facultyId, code: planestudio });
       if (exists) continue;
+
+      const activo  = String(r.activo ?? "S").trim().toUpperCase() === "S" ? "SI" : "NO";
+      const status  = activo === "SI" ? "ACTIVE" : "INACTIVE";
+
       const rel = await ProgramFaculty.create({
         programId,
         facultyId,
         code: planestudio,
-        status: "ACTIVE",
-        activo: r.activo === "NO" ? "NO" : "SI",
+        status,
+        activo,
         userCreator: userCreatorEmail || undefined,
         dateCreation: new Date(),
       });
-      createdRelationsDetail.push({ _id: rel._id, programId, facultyId });
+      createdRelationsDetail.push({ _id: rel._id, programId, facultyId, code: planestudio });
     } catch (err) {
       errors.push({
         message: err.message,
-        item: `relación ${(r.planestudio ?? "").toString().trim()} + ${(r.cod_facultad ?? "").toString().trim()}`,
+        item: `relación "${(r.nombre_programa ?? "").toString().trim()}" + facultad ${(r.cod_facultad ?? "").toString().trim()}`,
       });
+    }
+  }
+
+  // ── 4. Inactivar relaciones que ya no están en UXXI ──────────────────────
+  let deactivatedRelationsCount = 0;
+  if (toDeactivateRelations.length > 0) {
+    try {
+      const ids = toDeactivateRelations.map((r) => r._id).filter(Boolean);
+      const result = await ProgramFaculty.updateMany(
+        { _id: { $in: ids } },
+        {
+          $set: {
+            status: "INACTIVE",
+            activo: "NO",
+            userUpdater: userCreatorEmail || undefined,
+            dateUpdate: new Date(),
+          },
+        }
+      );
+      deactivatedRelationsCount = result.modifiedCount;
+    } catch (err) {
+      errors.push({ message: err.message, context: "deactivate relations" });
+    }
+  }
+
+  // ── 5. Inactivar programas que ya no están en UXXI ───────────────────────
+  let deactivatedProgramsCount = 0;
+  const allProgramIdsToDeactivate = [
+    ...toDeactivatePrograms.map((p) => p._id),
+    ...duplicatePrograms.map((p) => p._id),
+  ].filter(Boolean);
+
+  if (allProgramIdsToDeactivate.length > 0) {
+    try {
+      const result = await Program.updateMany(
+        { _id: { $in: allProgramIdsToDeactivate } },
+        {
+          $set: {
+            status: "INACTIVE",
+            userUpdater: userCreatorEmail || undefined,
+            dateUpdate: new Date(),
+          },
+        }
+      );
+      deactivatedProgramsCount = result.modifiedCount;
+    } catch (err) {
+      errors.push({ message: err.message, context: "deactivate programs" });
     }
   }
 
   const createdRelations = createdRelationsDetail.length;
   const message =
     errors.length === 0
-      ? `Se crearon ${createdPrograms.length} programa(s) y ${createdRelations} relación(es) programa-facultad.`
-      : `Proceso completado con observaciones: ${createdPrograms.length} programa(s), ${createdRelations} relación(es) creados; ${errors.length} error(es).`;
+      ? `Se crearon ${createdPrograms.length} programa(s) y ${createdRelations} relación(es). Se inactivaron ${deactivatedProgramsCount} programa(s) y ${deactivatedRelationsCount} relación(es).`
+      : `Proceso completado con observaciones: ${createdPrograms.length} prog, ${createdRelations} rel creados; ${deactivatedProgramsCount} prog, ${deactivatedRelationsCount} rel inactivados; ${errors.length} error(es).`;
 
   return res.status(200).json({
     success: true,
     message,
     createdPrograms,
     createdRelations: createdRelationsDetail,
+    deactivatedRelationsCount,
+    deactivatedProgramsCount,
     errors: errors.length ? errors : undefined,
   });
 };
@@ -343,7 +494,8 @@ export const getProgramFaculties = async (req, res) => {
         faculty,
         codigoFacultad: faculty?.code ?? pf.codigoFacultad,
         nombreFacultad: faculty?.name ?? pf.nombreFacultad,
-        codigoPrograma: program?.code ?? pf.code,
+        codigoPrograma: pf.code ?? pf.codigoPrograma,   // planestudio (código de relación en program_faculties)
+        codigoProgramaModel: program?.code,              // código del modelo programs
         nombrePrograma: program?.name ?? pf.nombrePrograma,
         tipoEstudio: faculty ? { _id: faculty._id, code: faculty.code, name: faculty.name } : null,
         estado: pf.status,
