@@ -41,26 +41,13 @@ export const getCompanies = async (req, res) => {
     if (country) filter.country = { $regex: country, $options: "i" };
     if (size) filter.size = size;
     
-    // Búsqueda por palabras clave (busca en múltiples campos)
+    // Búsqueda por nombre de empresa únicamente
     if (search) {
       const searchRegex = { $regex: search, $options: "i" };
       filter.$or = [
         { name: searchRegex },
         { legalName: searchRegex },
         { commercialName: searchRegex },
-        { nit: searchRegex },
-        { idNumber: searchRegex },
-        { sector: searchRegex },
-        { city: searchRegex },
-        { country: searchRegex },
-        { email: searchRegex },
-        { phone: searchRegex },
-        { description: searchRegex },
-        { 'contact.name': searchRegex },
-        { 'contact.email': searchRegex },
-        { 'legalRepresentative.firstName': searchRegex },
-        { 'legalRepresentative.lastName': searchRegex },
-        { 'legalRepresentative.email': searchRegex }
       ];
     }
 
