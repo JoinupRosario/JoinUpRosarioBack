@@ -34,11 +34,17 @@ export const loginUser = async (req, res) => {
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ message: "Usuario no encontrado" });
 
-    // Usuarios con Directorio Activo (Office 365) no pueden ingresar por login normal
-    if (user.directorioActivo) {
+    // Solo las entidades externas pueden ingresar por este formulario.
+    // Administrativos, estudiantes y postulantes deben usar el Directorio Activo (Office 365).
+    if (user.modulo !== "entidades") {
       return res.status(403).json({
-        message: "No está autorizado para ingresar por este medio. Debe acceder con su cuenta institucional (Office 365)."
+        code: "USE_SAML",
+        message: "Debe acceder con su cuenta institucional (Office 365). Use el botón 'Ingresar como Comunidad Universitaria'."
       });
+    }
+
+    if (!user.estado) {
+      return res.status(403).json({ message: "Su cuenta está inactiva. Contacte al administrador." });
     }
 
     if (!user.password) {

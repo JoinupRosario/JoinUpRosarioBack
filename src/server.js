@@ -7,7 +7,11 @@ import compression from "compression";
 import path from "path";
 import { fileURLToPath } from "url";
 import mongoose from "mongoose";
+import session from "express-session";
+import MongoStore from "connect-mongo";
+import passport from "passport";
 import connectDB from "./config/db.js";
+import { configureSaml } from "./config/saml.config.js";
 import routes from "./routes/index.js";
 import { handleUploadError } from "./middlewares/upload.js";
 
@@ -17,6 +21,9 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 const app = express();
+
+// Configurar estrategia SAML en passport
+configureSaml(passport);
 
 // Conectar a la base de datos
 // En Vercel, la conexión se mantiene entre invocaciones si está configurado correctamente
@@ -42,13 +49,35 @@ if (process.env.VERCEL !== "1") {
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+// Sesión necesaria para el flujo SAML (se almacena en MongoDB)
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || process.env.JWT_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    store: MongoStore.create({
+      mongoUrl: process.env.MONGO_URI,
+      ttl: 8 * 60 * 60, // 8 horas, igual que el JWT
+    }),
+    cookie: {
+      secure: process.env.NODE_ENV === "production",
+      httpOnly: true,
+      maxAge: 8 * 60 * 60 * 1000,
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    },
+  })
+);
+
+app.use(passport.initialize());
+app.use(passport.session());
+
 // Configuración de CORS antes de otros middlewares
 app.use(
   cors({
     origin: function (origin, callback) {
       const allowedOrigins = [
-        "https://app.rosario.mozartia.com",
-        "https://app.rosario.mozartia.com/",
+        "https://rosario.mozartai.com.co/",
+        "https://rosario.mozartai.com.co",
         "https://join-up-rosario-front.vercel.app",
         "https://join-up-rosario-front.vercel.app/",
         "http://localhost:5173",
