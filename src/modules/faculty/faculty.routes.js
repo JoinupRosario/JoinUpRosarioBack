@@ -10,6 +10,7 @@ import {
   syncFacultiesFromUXXI,
   compareFacultiesWithUniversitas,
   createFacultiesFromUniversitas,
+  deactivateFacultiesNotInUniversitas,
 } from "./controller/faculty.controller.js";
 import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
 
@@ -22,6 +23,8 @@ router.use(verifyToken);
 router.get("/compare-universitas", authorizeRoles("admin", "superadmin"), compareFacultiesWithUniversitas);
 /** Crear facultades nuevas desde lista Universitas (tras confirmar en modal) */
 router.post("/create-from-universitas", authorizeRoles("admin", "superadmin"), createFacultiesFromUniversitas);
+/** Inactivar facultades que ya no vienen en UXXI/Universitas */
+router.post("/deactivate-from-universitas", authorizeRoles("admin", "superadmin"), deactivateFacultiesNotInUniversitas);
 /** RQ02_HU003: Botón ejecutar integración-actualización facultades (UXXI getInfoFacultades) */
 router.post("/sync", authorizeRoles("admin", "superadmin"), syncFacultiesFromUXXI);
 /** RQ02_HU003: Listado facultades activas para parámetro Tipo de estudio */

@@ -7,7 +7,11 @@ import compression from "compression";
 import path from "path";
 import { fileURLToPath } from "url";
 import mongoose from "mongoose";
+import session from "express-session";
+import MongoStore from "connect-mongo";
+import passport from "passport";
 import connectDB from "./config/db.js";
+import { configureSaml } from "./config/saml.config.js";
 import routes from "./routes/index.js";
 import { handleUploadError } from "./middlewares/upload.js";
 
@@ -17,6 +21,9 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 const app = express();
+
+// Configurar estrategia SAML en passport
+configureSaml(passport);
 
 // Conectar a la base de datos
 // En Vercel, la conexión se mantiene entre invocaciones si está configurado correctamente
@@ -42,38 +49,66 @@ if (process.env.VERCEL !== "1") {
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// Configuración de CORS antes de otros middlewares
+// Sesión necesaria para el flujo SAML (se almacena en MongoDB)
 app.use(
-  cors({
-    origin: function (origin, callback) {
-      const allowedOrigins = [
-        "https://app.rosario.mozartia.com",
-        "https://app.rosario.mozartia.com/",
-        "https://join-up-rosario-front.vercel.app",
-        "https://join-up-rosario-front.vercel.app/",
-        "http://localhost:5173",
-        "http://localhost:5174",
-      ];
-      // Permitir requests sin origin (mobile apps, Postman, etc.)
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("No permitido por CORS"));
-      }
+  session({
+    secret: process.env.SESSION_SECRET || process.env.JWT_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    store: MongoStore.create({
+      mongoUrl: process.env.MONGO_URI,
+      ttl: 8 * 60 * 60, // 8 horas, igual que el JWT
+    }),
+    cookie: {
+      secure: process.env.NODE_ENV === "production",
+      httpOnly: true,
+      maxAge: 8 * 60 * 60 * 1000,
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
     },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Requested-With",
-      "Accept",
-      "Origin",
-    ],
-    exposedHeaders: ["Authorization"],
-    optionsSuccessStatus: 200, // Para navegadores legacy
   })
 );
+
+app.use(passport.initialize());
+app.use(passport.session());
+
+// Configuración de CORS
+// Las rutas SAML reciben POST desde login.microsoftonline.com (Origin externo del IdP).
+// El middleware general NO debe ejecutarse para esas rutas; se las saltea explícitamente.
+const generalCors = cors({
+  origin: function (origin, callback) {
+    const allowedOrigins = [
+      "https://rosario.mozartai.com.co/",
+      "https://rosario.mozartai.com.co",
+      "https://join-up-rosario-front.vercel.app",
+      "https://join-up-rosario-front.vercel.app/",
+      "http://localhost:5173",
+      "http://localhost:5174",
+    ];
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("No permitido por CORS"));
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+  ],
+  exposedHeaders: ["Authorization"],
+  optionsSuccessStatus: 200,
+});
+
+app.use((req, res, next) => {
+  // Las rutas SAML son invocadas por el browser desde el dominio de Microsoft;
+  // no requieren restricción de CORS — se saltan el middleware general.
+  if (req.path.startsWith("/api/auth/saml")) return next();
+  return generalCors(req, res, next);
+});
 
 app.use(morgan("dev"));
 

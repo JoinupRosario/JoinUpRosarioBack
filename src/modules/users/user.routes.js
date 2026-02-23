@@ -5,7 +5,8 @@ import {
   updateUser, 
   deleteUser,
   updateUserProfile,
-  changePassword
+  changePassword,
+  getMyPermissions,
 } from "./user.controller.js";
 import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
 
@@ -17,6 +18,7 @@ router.use(verifyToken);
 // Rutas para usuarios
 router.get("/", authorizeRoles("admin", "superadmin"), getUsers);
 router.get("/profile", getUserById);
+router.get("/my-permissions", getMyPermissions);
 router.put("/profile", updateUserProfile);
 router.put("/change-password", changePassword);
 router.get("/:id", getUserById);

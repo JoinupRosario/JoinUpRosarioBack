@@ -1,4 +1,5 @@
 import Program from "../model/program.model.js";
+import { buildSearchRegex } from "../../../utils/searchUtils.js";
 
 export const getPrograms = async (req, res) => {
   try {
@@ -7,7 +8,7 @@ export const getPrograms = async (req, res) => {
 
     if (status) filter.status = status;
     if (search) {
-      const searchRegex = { $regex: search, $options: "i" };
+      const searchRegex = buildSearchRegex(search);
       filter.$or = [
         { name: searchRegex },
         { code: searchRegex },
