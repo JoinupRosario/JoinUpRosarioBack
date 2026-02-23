@@ -43,11 +43,15 @@ export const samlLogin = (req, res, next) => {
 export const samlCallback = (req, res, next) => {
   const FRONTEND_URL = getFrontendUrl();
 
-  passport.authenticate("saml", { session: true }, (err, user, info) => {
+  // 303 See Other fuerza al browser a hacer GET en la URL de destino,
+  // evitando que el POST de Azure AD se propague al frontend (307 lo propagaría).
+  const safeRedirect = (url) => res.redirect(303, url);
+
+  passport.authenticate("saml", { session: false }, (err, user, info) => {
     if (err) {
-      console.error("[SAML] Error en callback:", err);
+      console.error("[SAML] Error en callback:", err?.message || err);
       return destroySession(req, () =>
-        res.redirect(`${FRONTEND_URL}/#/login?error=saml_error`)
+        safeRedirect(`${FRONTEND_URL}/#/login?error=saml_error&msg=${encodeURIComponent(err?.message || "Error SAML")}`)
       );
     }
 
@@ -55,32 +59,23 @@ export const samlCallback = (req, res, next) => {
       const message = info?.message || "Acceso denegado";
       console.warn("[SAML] Autenticación fallida:", message);
       return destroySession(req, () =>
-        res.redirect(
+        safeRedirect(
           `${FRONTEND_URL}/#/login?error=saml_unauthorized&msg=${encodeURIComponent(message)}`
         )
       );
     }
 
-    req.logIn(user, (loginErr) => {
-      if (loginErr) {
-        console.error("[SAML] Error al hacer login:", loginErr);
-        return destroySession(req, () =>
-          res.redirect(`${FRONTEND_URL}/#/login?error=saml_session_error`)
-        );
-      }
+    // Generar JWT con los mismos campos que el login normal
+    const token = jwt.sign(
+      { id: user._id, modulo: user.modulo },
+      process.env.JWT_SECRET,
+      { expiresIn: "8h" }
+    );
 
-      // Generar JWT con los mismos campos que el login normal
-      const token = jwt.sign(
-        { id: user._id, modulo: user.modulo },
-        process.env.JWT_SECRET,
-        { expiresIn: "8h" }
-      );
+    console.log(`[SAML] Login exitoso: ${user.email} (módulo: ${user.modulo})`);
 
-      console.log(`[SAML] Login exitoso: ${user.email} (módulo: ${user.modulo})`);
-
-      // Redirigir al frontend con el token. Se usa /#/ porque el frontend usa HashRouter
-      return res.redirect(`${FRONTEND_URL}/#/auth/saml-success?token=${token}`);
-    });
+    // 303 también aquí para que el browser haga GET al frontend con el token
+    return safeRedirect(`${FRONTEND_URL}/#/auth/saml-success?token=${token}`);
   })(req, res, next);
 };
 
