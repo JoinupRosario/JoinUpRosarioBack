@@ -52,9 +52,50 @@ const samlLogoutCallback = async (profile, done) => {
 
 export const getSamlStrategy = () => samlStrategy;
 
+/**
+ * Convierte un certificado X.509 (en cualquier formato) a PEM estándar:
+ *   -----BEGIN CERTIFICATE-----
+ *   <base64 en líneas de 64 chars>
+ *   -----END CERTIFICATE-----
+ * @node-saml requiere este formato para la verificación con xml-crypto.
+ */
+const normalizeCert = (raw) => {
+  if (!raw) return null;
+  const base64 = raw
+    .replace(/-----BEGIN CERTIFICATE-----/g, "")
+    .replace(/-----END CERTIFICATE-----/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+  if (!base64) return null;
+  const lines = base64.match(/.{1,64}/g) || [];
+  return `-----BEGIN CERTIFICATE-----\n${lines.join("\n")}\n-----END CERTIFICATE-----`;
+};
+
+/**
+ * Lee los certificados del IdP desde variables de entorno.
+ * Soporta múltiples certs separados por coma (para rotación de Azure AD).
+ *   SAML_IDP_CERT=cert1base64,cert2base64
+ */
+const loadIdpCerts = () => {
+  const raw = process.env.SAML_IDP_CERT || "";
+  const certs = raw.split(",").map(normalizeCert).filter(Boolean);
+  if (certs.length === 0) {
+    console.error("[SAML] ⚠️  SAML_IDP_CERT no está definido o está vacío.");
+    return null;
+  }
+  console.log(`[SAML] ${certs.length} certificado(s) IdP cargado(s).`);
+  certs.forEach((c, i) =>
+    console.log(`[SAML]   cert[${i}] = ${c.slice(0, 30)}...${c.slice(-10)} (${c.length} chars)`)
+  );
+  // @node-saml acepta string o array
+  return certs.length === 1 ? certs[0] : certs;
+};
+
 export const configureSaml = (passportInstance) => {
   const TENANT_ID = process.env.SAML_TENANT_ID;
   const APP_BASE_URL = process.env.APP_BASE_URL || "https://rosario.mozartai.com.co";
+
+  const idpCert = loadIdpCerts();
 
   samlStrategy = new SamlStrategy(
     {
@@ -66,14 +107,16 @@ export const configureSaml = (passportInstance) => {
       entryPoint: `https://login.microsoftonline.com/${TENANT_ID}/saml2`,
       logoutUrl: `https://login.microsoftonline.com/${TENANT_ID}/saml2`,
 
-      // Certificado del IdP (extraído del XML de metadatos)
-      idpCert: process.env.SAML_IDP_CERT,
+      // Certificado(s) del IdP normalizados
+      idpCert,
 
+      // Azure AD puede firmar el Response, la Assertion, o ambos.
+      // Con false/false la librería acepta cualquier combinación de firma.
       wantAssertionsSigned: false,
-      wantAuthnResponseSigned: true,
+      wantAuthnResponseSigned: false,
       identifierFormat: null,
       disableRequestedAuthnContext: true,
-      acceptedClockSkewMs: 5000,
+      acceptedClockSkewMs: 10000,
     },
     samlVerifyCallback,
     samlLogoutCallback
