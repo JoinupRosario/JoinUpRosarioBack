@@ -71,42 +71,44 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Configuración de CORS antes de otros middlewares
-// Las rutas SAML reciben POST desde login.microsoftonline.com (origin externo).
-// Se les aplica CORS permisivo antes del middleware general.
-app.use("/api/auth/saml", cors({ origin: true, credentials: true }));
+// Configuración de CORS
+// Las rutas SAML reciben POST desde login.microsoftonline.com (Origin externo del IdP).
+// El middleware general NO debe ejecutarse para esas rutas; se las saltea explícitamente.
+const generalCors = cors({
+  origin: function (origin, callback) {
+    const allowedOrigins = [
+      "https://rosario.mozartai.com.co/",
+      "https://rosario.mozartai.com.co",
+      "https://join-up-rosario-front.vercel.app",
+      "https://join-up-rosario-front.vercel.app/",
+      "http://localhost:5173",
+      "http://localhost:5174",
+    ];
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("No permitido por CORS"));
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+  ],
+  exposedHeaders: ["Authorization"],
+  optionsSuccessStatus: 200,
+});
 
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      const allowedOrigins = [
-        "https://rosario.mozartai.com.co/",
-        "https://rosario.mozartai.com.co",
-        "https://join-up-rosario-front.vercel.app",
-        "https://join-up-rosario-front.vercel.app/",
-        "http://localhost:5173",
-        "http://localhost:5174",
-      ];
-      // Permitir requests sin origin (mobile apps, Postman, etc.)
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("No permitido por CORS"));
-      }
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Requested-With",
-      "Accept",
-      "Origin",
-    ],
-    exposedHeaders: ["Authorization"],
-    optionsSuccessStatus: 200, // Para navegadores legacy
-  })
-);
+app.use((req, res, next) => {
+  // Las rutas SAML son invocadas por el browser desde el dominio de Microsoft;
+  // no requieren restricción de CORS — se saltan el middleware general.
+  if (req.path.startsWith("/api/auth/saml")) return next();
+  return generalCors(req, res, next);
+});
 
 app.use(morgan("dev"));
 
