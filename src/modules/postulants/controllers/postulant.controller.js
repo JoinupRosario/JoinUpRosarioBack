@@ -30,6 +30,13 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/** Dominio obligatorio para el correo principal de estudiantes postulantes (Universidad del Rosario). */
+const ALLOWED_EMAIL_DOMAIN = "@urosario.edu.co";
+function isAllowedPostulantEmail(email) {
+  if (!email || typeof email !== "string") return false;
+  return String(email).trim().toLowerCase().endsWith(ALLOWED_EMAIL_DOMAIN.toLowerCase());
+}
+
 export const getPostulants = async (req, res) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1);
@@ -131,6 +138,7 @@ export const createPostulant = async (req, res) => {
     const { identity_postulant, user } = req.body;
 
     let userId = user;
+    let userDoc = null;
     if (!userId && identity_postulant) {
       const foundUser = await User.findOne({ code: identity_postulant.trim() });
       if (!foundUser) {
@@ -139,12 +147,20 @@ export const createPostulant = async (req, res) => {
         });
       }
       userId = foundUser._id;
+      userDoc = foundUser;
     }
 
     if (!userId) {
       return res.status(400).json({
         message:
           "Se requiere un usuario. Proporcione 'user' o 'identity_postulant' para buscar el usuario.",
+      });
+    }
+
+    if (!userDoc) userDoc = await User.findById(userId).select("email").lean();
+    if (userDoc && !isAllowedPostulantEmail(userDoc.email)) {
+      return res.status(400).json({
+        message: `El correo principal del estudiante postulante debe ser del dominio ${ALLOWED_EMAIL_DOMAIN}.`,
       });
     }
 
@@ -444,7 +460,7 @@ export const aplicarInfoUniversitas = async (req, res) => {
       const emailUni = normalizeStr(uni.correo_personal);
       const updateUser = {};
       if (nameUni) updateUser.name = nameUni;
-      if (emailUni) updateUser.email = emailUni;
+      if (emailUni && isAllowedPostulantEmail(emailUni)) updateUser.email = emailUni;
       if (Object.keys(updateUser).length) await User.findByIdAndUpdate(userId, updateUser);
     }
 
@@ -474,6 +490,11 @@ export const aplicarInfoUniversitas = async (req, res) => {
 
     const correoInstUni = normalizeStr(uni.correo_institucioinal);
     if (correoInstUni !== undefined) {
+      if (!isAllowedPostulantEmail(correoInstUni)) {
+        return res.status(400).json({
+          message: `El correo institucional debe ser del dominio ${ALLOWED_EMAIL_DOMAIN}. No se aplicó el cambio.`,
+        });
+      }
       await PostulantProfile.updateMany({ postulantId: id }, { $set: { academicUser: correoInstUni || null } });
     }
     const updated = await Postulant.findById(id)
