@@ -16,24 +16,14 @@ const destroySession = (req, cb) => {
 
 /**
  * GET /api/auth/saml/login
- * Limpia cualquier sesión SAML rota antes de iniciar un nuevo flujo con Azure AD.
+ * Redirige al usuario a Azure AD para autenticarse.
+ * Usamos session: false porque la autenticación es stateless (JWT).
  */
 export const samlLogin = (req, res, next) => {
-  // Regenerar la sesión para evitar que estado SAML anterior cause conflictos
-  if (req.session) {
-    req.session.regenerate((err) => {
-      if (err) console.warn("[SAML] No se pudo regenerar sesión antes del login:", err);
-      passport.authenticate("saml", {
-        failureRedirect: `${getFrontendUrl()}/#/login?error=saml_init_failed`,
-        session: true,
-      })(req, res, next);
-    });
-  } else {
-    passport.authenticate("saml", {
-      failureRedirect: `${getFrontendUrl()}/#/login?error=saml_init_failed`,
-      session: true,
-    })(req, res, next);
-  }
+  passport.authenticate("saml", {
+    failureRedirect: `${getFrontendUrl()}/#/login?error=saml_init_failed`,
+    session: false,
+  })(req, res, next);
 };
 
 /**

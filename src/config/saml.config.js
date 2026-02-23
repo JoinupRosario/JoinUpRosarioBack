@@ -111,12 +111,14 @@ export const configureSaml = (passportInstance) => {
       idpCert,
 
       // Azure AD puede firmar el Response, la Assertion, o ambos.
-      // Con false/false la librería acepta cualquier combinación de firma.
       wantAssertionsSigned: false,
       wantAuthnResponseSigned: false,
       identifierFormat: null,
       disableRequestedAuthnContext: true,
       acceptedClockSkewMs: 10000,
+      // Deshabilitamos la validación InResponseTo porque usamos JWT (stateless)
+      // y en entornos serverless la sesión no garantiza persistencia entre invocaciones.
+      validateInResponseTo: "never",
     },
     samlVerifyCallback,
     samlLogoutCallback
