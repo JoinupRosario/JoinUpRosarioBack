@@ -72,6 +72,10 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 // Configuración de CORS antes de otros middlewares
+// Las rutas SAML reciben POST desde login.microsoftonline.com (origin externo).
+// Se les aplica CORS permisivo antes del middleware general.
+app.use("/api/auth/saml", cors({ origin: true, credentials: true }));
+
 app.use(
   cors({
     origin: function (origin, callback) {

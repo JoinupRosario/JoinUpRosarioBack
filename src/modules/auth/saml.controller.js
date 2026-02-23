@@ -2,40 +2,71 @@ import passport from "passport";
 import jwt from "jsonwebtoken";
 import { getSamlStrategy } from "../../config/saml.config.js";
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://rosario.mozartai.com.co";
+const getFrontendUrl = () =>
+  process.env.FRONTEND_URL || "https://rosario.mozartai.com.co";
+
+/** Destruye la sesión actual y llama al callback cuando termina (o de inmediato si no hay sesión). */
+const destroySession = (req, cb) => {
+  if (req.session) {
+    req.session.destroy(() => cb());
+  } else {
+    cb();
+  }
+};
 
 /**
  * GET /api/auth/saml/login
- * Redirige al usuario a la página de login de Azure AD (Entra ID).
+ * Limpia cualquier sesión SAML rota antes de iniciar un nuevo flujo con Azure AD.
  */
-export const samlLogin = passport.authenticate("saml", {
-  failureRedirect: `${FRONTEND_URL}/login?error=saml_init_failed`,
-  session: true,
-});
+export const samlLogin = (req, res, next) => {
+  // Regenerar la sesión para evitar que estado SAML anterior cause conflictos
+  if (req.session) {
+    req.session.regenerate((err) => {
+      if (err) console.warn("[SAML] No se pudo regenerar sesión antes del login:", err);
+      passport.authenticate("saml", {
+        failureRedirect: `${getFrontendUrl()}/#/login?error=saml_init_failed`,
+        session: true,
+      })(req, res, next);
+    });
+  } else {
+    passport.authenticate("saml", {
+      failureRedirect: `${getFrontendUrl()}/#/login?error=saml_init_failed`,
+      session: true,
+    })(req, res, next);
+  }
+};
 
 /**
  * POST /api/auth/saml/callback
  * Azure llama a este endpoint con la aserción SAML tras autenticar al usuario.
  */
 export const samlCallback = (req, res, next) => {
+  const FRONTEND_URL = getFrontendUrl();
+
   passport.authenticate("saml", { session: true }, (err, user, info) => {
     if (err) {
       console.error("[SAML] Error en callback:", err);
-      return res.redirect(`${FRONTEND_URL}/#/login?error=saml_error`);
+      return destroySession(req, () =>
+        res.redirect(`${FRONTEND_URL}/#/login?error=saml_error`)
+      );
     }
 
     if (!user) {
       const message = info?.message || "Acceso denegado";
       console.warn("[SAML] Autenticación fallida:", message);
-      return res.redirect(
-        `${FRONTEND_URL}/#/login?error=saml_unauthorized&msg=${encodeURIComponent(message)}`
+      return destroySession(req, () =>
+        res.redirect(
+          `${FRONTEND_URL}/#/login?error=saml_unauthorized&msg=${encodeURIComponent(message)}`
+        )
       );
     }
 
     req.logIn(user, (loginErr) => {
       if (loginErr) {
         console.error("[SAML] Error al hacer login:", loginErr);
-        return res.redirect(`${FRONTEND_URL}/#/login?error=saml_session_error`);
+        return destroySession(req, () =>
+          res.redirect(`${FRONTEND_URL}/#/login?error=saml_session_error`)
+        );
       }
 
       // Generar JWT con los mismos campos que el login normal
