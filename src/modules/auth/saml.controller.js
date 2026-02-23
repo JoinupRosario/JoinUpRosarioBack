@@ -97,19 +97,26 @@ export const samlMetadata = (req, res) => {
 
 /**
  * GET /api/auth/saml/logout
- * Inicia el cierre de sesión en Azure AD.
+ * Limpia la sesión local y redirige a Microsoft para cerrar la sesión institucional.
+ * Después de que Microsoft cierra la sesión, redirige de vuelta al login.
  */
 export const samlLogout = (req, res) => {
-  if (!req.user) {
-    return res.redirect(`${FRONTEND_URL}/login`);
-  }
+  const FRONTEND_URL = getFrontendUrl();
+  const TENANT_ID = process.env.SAML_TENANT_ID;
 
-  req.logout((err) => {
-    if (err) {
-      console.error("[SAML] Error en logout:", err);
-    }
-    req.session.destroy(() => {
-      res.redirect(`${FRONTEND_URL}/login`);
+  // URL de logout de Azure AD (OAuth2 v2 — funciona para cualquier sesión AAD/SAML)
+  const msLogoutUrl =
+    `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/logout` +
+    `?post_logout_redirect_uri=${encodeURIComponent(`${FRONTEND_URL}/#/login`)}`;
+
+  const finalize = () => res.redirect(303, msLogoutUrl);
+
+  if (req.session) {
+    req.session.destroy((err) => {
+      if (err) console.error("[SAML] Error destruyendo sesión en logout:", err);
+      finalize();
     });
-  });
+  } else {
+    finalize();
+  }
 };
