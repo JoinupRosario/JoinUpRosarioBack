@@ -14,4 +14,18 @@ router.post("/saml/callback", samlCallback);
 router.get("/saml/metadata", samlMetadata);
 router.get("/saml/logout", samlLogout);
 
+// Diagnóstico temporal: muestra fingerprint del cert cargado (NO exponer en prod permanente)
+router.get("/saml/debug-cert", (req, res) => {
+  const raw = process.env.SAML_IDP_CERT || "";
+  const certs = raw.split(",").map(c => c.replace(/-----BEGIN CERTIFICATE-----/g,"").replace(/-----END CERTIFICATE-----/g,"").replace(/\s+/g,"").trim()).filter(Boolean);
+  res.json({
+    certsLoaded: certs.length,
+    certs: certs.map(c => ({
+      length: c.length,
+      start: c.slice(0, 40),
+      end: c.slice(-20),
+    })),
+  });
+});
+
 export default router;

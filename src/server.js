@@ -110,6 +110,7 @@ app.use((req, res, next) => {
   return generalCors(req, res, next);
 });
 
+
 app.use(morgan("dev"));
 
 // Configurar Helmet para no interferir con CORS
