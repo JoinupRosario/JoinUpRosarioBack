@@ -1,0 +1,59 @@
+name: Backend - Nuevo Rosario
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**/*.js'
+      - '**/*.json'
+      - '.github/workflows/back.yml'
+  workflow_dispatch: {}
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: 873540496317
+  ECR_REPOSITORY: rosario-back-ecr
+  IMAGE_TAG: candidate
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🧩 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔐 Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::873540496317:role/rosario-gha-role
+
+      - name: 🗝️ Create .env file
+        run: |
+          echo "PORT=5000" >> .env
+          echo "NODE_ENV=production" >> .env
+          echo "MONGO_URI=mongodb+srv://rosario_db_user:0UElgliefpes3YkL@cluster0.81a63cr.mongodb.net/Rosario?retryWrites=true&w=majority&appName=Cluster0" >> .env
+          echo "JWT_SECRET=tu_jwt_secret_super_seguro_aqui_cambiar_en_produccion" >> .env
+          echo "CORS_ORIGIN=https://new.rosario.mozartia.com" >> .env
+
+      - name: 🐳 Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 🚀 Build, Tag & Push Docker image
+        run: |
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: 🔄 Force ECS service redeploy
+        run: |
+          aws ecs update-service \
+            --cluster rosario-cluster \
+            --service rosario-svc \
+            --force-new-deployment \
+            --region $AWS_REGION
