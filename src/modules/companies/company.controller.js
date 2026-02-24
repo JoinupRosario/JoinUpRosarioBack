@@ -986,3 +986,252 @@ export const uploadLogo = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
+
+// ============================================================
+// REGISTRO PÚBLICO DE ESCENARIO DE PRÁCTICA (sin autenticación)
+// ============================================================
+
+// Rate limiting en memoria: máximo 5 registros por IP cada 24 horas
+const _publicRegRateMap = new Map();
+const _PUBLIC_REG_MAX = 5;
+const _PUBLIC_REG_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function checkPublicRateLimit(ip) {
+  const now = Date.now();
+  const windowStart = now - _PUBLIC_REG_WINDOW_MS;
+  const times = (_publicRegRateMap.get(ip) || []).filter(t => t > windowStart);
+  if (times.length >= _PUBLIC_REG_MAX) return false;
+  times.push(now);
+  _publicRegRateMap.set(ip, times);
+  return true;
+}
+
+export const publicRegisterCompany = async (req, res) => {
+  try {
+    // Rate limiting por IP
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+    if (!checkPublicRateLimit(clientIp)) {
+      return res.status(429).json({
+        success: false,
+        message: 'Has superado el límite de registros permitidos por día. Intenta mañana o contacta al administrador.'
+      });
+    }
+
+    // Honeypot anti-bot: si viene el campo oculto relleno, es un bot
+    if (req.body._hp && String(req.body._hp).trim() !== '') {
+      return res.status(400).json({ success: false, message: 'Registro inválido.' });
+    }
+
+    // Preparar datos básicos
+    const legalName = (req.body.legalName || req.body.name || '').trim();
+    const commercialName = (req.body.commercialName || legalName).trim();
+    const idType = (req.body.idType || 'NIT').trim();
+    const nit = String(req.body.nit || req.body.idNumber || '').replace(/\s/g, '');
+
+    if (!legalName) {
+      return res.status(400).json({ success: false, message: 'La razón social es requerida.' });
+    }
+    if (!nit) {
+      return res.status(400).json({ success: false, message: 'El número de identificación es requerido.' });
+    }
+
+    // Validar NIT Colombia
+    if (idType.toUpperCase() === 'NIT') {
+      if (!/^\d{10}$/.test(nit)) {
+        return res.status(400).json({ success: false, message: 'El NIT debe tener exactamente 10 dígitos (9 base + 1 dígito de verificación).' });
+      }
+      if (!validarNitColombia(nit)) {
+        return res.status(400).json({ success: false, message: 'El dígito de verificación del NIT no es válido según el algoritmo de la DIAN.' });
+      }
+    }
+
+    // Verificar NIT único
+    const nitExistente = await Company.findOne({ nit });
+    if (nitExistente) {
+      return res.status(400).json({ success: false, message: 'Ya existe una entidad registrada con ese NIT.' });
+    }
+
+    // Representante legal (puede llegar como objeto JSON o como campos planos de FormData)
+    let legalRepBody = req.body.legalRepresentative || {};
+    if (typeof legalRepBody === 'string') { try { legalRepBody = JSON.parse(legalRepBody); } catch { legalRepBody = {}; } }
+    const repFirstName = (legalRepBody.firstName || '').trim();
+    const repLastName  = (legalRepBody.lastName  || '').trim();
+    const repEmail     = (legalRepBody.email     || '').toLowerCase().trim();
+    const repPhone     = (legalRepBody.phone || req.body.phone || '').trim();
+
+    if (!repFirstName || !repLastName || !repEmail) {
+      return res.status(400).json({ success: false, message: 'El nombre, apellido y correo del representante legal son requeridos.' });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(repEmail)) {
+      return res.status(400).json({ success: false, message: 'El correo del representante legal no tiene un formato válido.' });
+    }
+
+    const userExistente = await User.findOne({ email: repEmail });
+    if (userExistente) {
+      return res.status(400).json({ success: false, message: `Ya existe un usuario con el correo ${repEmail}.` });
+    }
+
+    // Crear usuario inactivo para el representante legal (activa cuando el admin apruebe)
+    const hashedPassword = await bcrypt.hash(nit, 10);
+    let nuevoUser;
+    try {
+      nuevoUser = new User({
+        name: `${repFirstName} ${repLastName}`.trim(),
+        email: repEmail,
+        code: repEmail,
+        password: hashedPassword,
+        modulo: 'entidades',
+        estado: false,
+        debeCambiarPassword: true
+      });
+      await nuevoUser.save();
+    } catch (userError) {
+      if (userError.code === 11000) {
+        return res.status(400).json({ success: false, message: `Ya existe un usuario con el correo ${repEmail}.` });
+      }
+      return res.status(500).json({ success: false, message: `Error al crear el usuario: ${userError.message}` });
+    }
+
+    // Contactos adicionales (puede llegar como JSON string en FormData)
+    let extraContacts = req.body.extraContacts || [];
+    if (typeof extraContacts === 'string') { try { extraContacts = JSON.parse(extraContacts); } catch { extraContacts = []; } }
+    if (!Array.isArray(extraContacts)) extraContacts = [];
+    extraContacts = extraContacts.slice(0, 7);
+    const contactsArray = [{
+      userId: nuevoUser._id,
+      firstName: repFirstName,
+      lastName: repLastName,
+      userEmail: repEmail,
+      phone: repPhone,
+      country: req.body.country || 'Colombia',
+      city: req.body.city || '',
+      address: req.body.address || '',
+      idType: req.body.legalRepresentative?.idType || 'CC',
+      identification: req.body.legalRepresentative?.idNumber || '',
+      isPrincipal: true,
+      status: 'active'
+    }];
+
+    // Crear usuario para cada contacto adicional
+    for (const ec of extraContacts) {
+      const ecFirstName = (ec.firstName || '').trim();
+      const ecLastName  = (ec.lastName  || '').trim();
+      const ecEmail     = (ec.email     || '').toLowerCase().trim();
+      if (!ecFirstName || !ecLastName || !ecEmail) continue;
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ecEmail)) continue;
+
+      let ecUserId = null;
+      try {
+        const ecUser = new User({
+          name: `${ecFirstName} ${ecLastName}`.trim(),
+          email: ecEmail,
+          code: ecEmail,
+          password: hashedPassword, // misma contraseña inicial (NIT)
+          modulo: 'entidades',
+          estado: false,
+          debeCambiarPassword: true
+        });
+        await ecUser.save();
+        ecUserId = ecUser._id;
+      } catch (ecErr) {
+        // Si el email ya existe simplemente omitimos crear usuario pero sí agregamos el contacto
+        if (ecErr.code !== 11000) {
+          console.warn(`[public-register] No se pudo crear usuario para contacto ${ecEmail}:`, ecErr.message);
+        }
+      }
+
+      contactsArray.push({
+        ...(ecUserId ? { userId: ecUserId } : {}),
+        firstName: ecFirstName,
+        lastName: ecLastName,
+        userEmail: ecEmail,
+        phone: ec.phone || '',
+        position: ec.position || '',
+        isPracticeTutor: ec.isPracticeTutor === true || ec.isPracticeTutor === 'true',
+        status: 'active'
+      });
+    }
+
+    // Archivos adjuntos (multer)
+    const chamberFile = req.files?.chamberOfCommerce?.[0]?.path || '';
+    const rutFile     = req.files?.rut?.[0]?.path || '';
+
+    // Parsear ciiuCodes: puede venir como JSON string o array
+    let ciiuCodes = [];
+    if (req.body.ciiuCodes) {
+      try {
+        ciiuCodes = typeof req.body.ciiuCodes === 'string'
+          ? JSON.parse(req.body.ciiuCodes)
+          : req.body.ciiuCodes;
+      } catch { ciiuCodes = []; }
+    }
+    if (!Array.isArray(ciiuCodes)) ciiuCodes = [];
+
+    // Parsear domains
+    let domains = [];
+    if (req.body.domains) {
+      try {
+        domains = typeof req.body.domains === 'string'
+          ? JSON.parse(req.body.domains)
+          : req.body.domains;
+      } catch { domains = []; }
+    }
+    if (!Array.isArray(domains)) domains = [];
+
+    // Parsear legalRepresentative
+    let legalRep = req.body.legalRepresentative || {};
+    if (typeof legalRep === 'string') { try { legalRep = JSON.parse(legalRep); } catch { legalRep = {}; } }
+
+    const newCompany = new Company({
+      name: legalName,
+      legalName,
+      commercialName,
+      idType,
+      idNumber: nit,
+      nit,
+      sector: req.body.sector || '',
+      sectorMineSnies: req.body.sectorMineSnies || '',
+      size: req.body.size || '',
+      arl: req.body.arl || '',
+      ciiuCodes: ciiuCodes.slice(0, 3),
+      address: req.body.address || '',
+      city: req.body.city || '',
+      country: req.body.country || 'Colombia',
+      phone: repPhone,
+      email: repEmail,
+      website: req.body.website || '',
+      domains: domains.filter(Boolean),
+      description: req.body.description || '',
+      chamberOfCommerceCertificate: chamberFile,
+      rutDocument: rutFile,
+      contact: {
+        name: `${repFirstName} ${repLastName}`.trim(),
+        position: legalRep.position || '',
+        phone: repPhone,
+        email: repEmail
+      },
+      legalRepresentative: {
+        firstName: repFirstName,
+        lastName: repLastName,
+        email: repEmail,
+        idType: legalRep.idType || 'CC',
+        idNumber: legalRep.idNumber || ''
+      },
+      contacts: contactsArray,
+      status: 'pending_approval',
+      canCreateOpportunities: false
+    });
+
+    await newCompany.save();
+
+    // Nota: no se genera log de auditoría aquí porque es una ruta pública sin req.user
+
+    return res.status(201).json({
+      success: true,
+      message: 'Tu registro fue enviado exitosamente. La coordinación revisará y aprobará tu solicitud pronto.',
+      companyId: newCompany._id
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};

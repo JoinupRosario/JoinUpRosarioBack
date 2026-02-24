@@ -1,4 +1,8 @@
 import express from "express";
+import multer from "multer";
+import fs from "fs";
+import path from "path";
+import { v4 as uuidv4 } from "uuid";
 import { 
   getCompanies, 
   getCompanyById, 
@@ -10,14 +14,37 @@ import {
   addContact,
   updateContact,
   deleteContact,
-  resetContactPassword
+  resetContactPassword,
+  publicRegisterCompany
 } from "./company.controller.js";
 import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
 import { upload } from "../../middlewares/upload.js";
 
 const router = express.Router();
 
-// Rutas públicas (con autenticación)
+// Multer para registro público (PDF o imagen, máx 5 MB cada archivo)
+const PUBLIC_UPLOAD_DIR = 'src/uploads/public-register/';
+if (!fs.existsSync(PUBLIC_UPLOAD_DIR)) fs.mkdirSync(PUBLIC_UPLOAD_DIR, { recursive: true });
+
+const publicUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, PUBLIC_UPLOAD_DIR),
+    filename: (_req, file, cb) => cb(null, `${uuidv4()}-${Date.now()}${path.extname(file.originalname)}`)
+  }),
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
+    cb(null, allowed.includes(file.mimetype));
+  },
+  limits: { fileSize: 5 * 1024 * 1024, files: 2 }
+});
+
+// ── Ruta pública sin autenticación ──────────────────────────────────────────
+router.post("/public-register", publicUpload.fields([
+  { name: 'chamberOfCommerce', maxCount: 1 },
+  { name: 'rut', maxCount: 1 }
+]), publicRegisterCompany);
+
+// ── Rutas protegidas (requieren token) ──────────────────────────────────────
 router.use(verifyToken);
 
 // Rutas para empresas
