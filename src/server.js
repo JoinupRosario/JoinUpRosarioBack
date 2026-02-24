@@ -55,7 +55,8 @@ const corsOptions = {
 };
 
 // Preflight OPTIONS: responder inmediatamente, antes de que cualquier otro middleware pueda fallar
-app.options("*", (req, res, next) => {
+// Nota: se usa regex /(.*)/ en vez de "*" porque path-to-regexp v8+ no acepta wildcard sin nombre
+app.options(/(.*)/, (req, res, next) => {
   // Rutas SAML: Microsoft no envía Origin normal, dejar pasar sin restricción
   if (req.path.startsWith("/api/auth/saml")) return res.sendStatus(200);
   return cors(corsOptions)(req, res, () => res.sendStatus(200));
