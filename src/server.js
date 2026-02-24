@@ -33,6 +33,7 @@ if (process.env.VERCEL !== "1") {
 // ── CORS debe ser lo primero — antes de session, passport y cualquier otro middleware ──
 // Si session/DB falla en Vercel y CORS no corrió aún, el browser ve un error CORS en vez del 500 real.
 const ALLOWED_ORIGINS = [
+  "https://new.rosario.mozartia.com",
   "https://rosario.mozartai.com.co",
   "https://join-up-rosario-front.vercel.app",
   "http://localhost:5173",
