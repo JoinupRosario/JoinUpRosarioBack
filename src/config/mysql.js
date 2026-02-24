@@ -1,7 +1,7 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config(); 
 
 // Configuración de conexión a MySQL
 const mysqlConfig = {
