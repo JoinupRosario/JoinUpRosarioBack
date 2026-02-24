@@ -1152,10 +1152,6 @@ export const publicRegisterCompany = async (req, res) => {
       });
     }
 
-    // Archivos adjuntos (multer)
-    const chamberFile = req.files?.chamberOfCommerce?.[0]?.path || '';
-    const rutFile     = req.files?.rut?.[0]?.path || '';
-
     // Parsear ciiuCodes: puede venir como JSON string o array
     let ciiuCodes = [];
     if (req.body.ciiuCodes) {
@@ -1202,8 +1198,8 @@ export const publicRegisterCompany = async (req, res) => {
       website: req.body.website || '',
       domains: domains.filter(Boolean),
       description: req.body.description || '',
-      chamberOfCommerceCertificate: chamberFile,
-      rutDocument: rutFile,
+      chamberOfCommerceCertificate: '',
+      rutDocument: '',
       contact: {
         name: `${repFirstName} ${repLastName}`.trim(),
         position: legalRep.position || '',
