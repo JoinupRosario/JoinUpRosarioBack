@@ -127,8 +127,8 @@ app.use(compression());
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") {
     const allowedOrigins = [
-      "https://app.rosario.mozartia.com",
-      "https://app.rosario.mozartia.com/",
+      "https://rosario.mozartai.com.co/",
+      "https://rosario.mozartai.com.co",
       "https://join-up-rosario-front.vercel.app/",
       "http://localhost:5173",
       "http://localhost:5174",
