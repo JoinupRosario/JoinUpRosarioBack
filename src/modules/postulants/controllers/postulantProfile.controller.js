@@ -10,6 +10,8 @@ import ProfileLanguage from "../models/profile/profileLanguage.schema.js";
 import ProfileWorkExperience from "../models/profile/profileWorkExperience.schema.js";
 import ProfileAward from "../models/profile/profileAward.schema.js";
 import ProfileReference from "../models/profile/profileReference.schema.js";
+import ProfileCv from "../models/profile/profileCv.schema.js";
+import ProfileSupport from "../models/profile/profileSupport.schema.js";
 
 /** RQ03_HU001: Máximo de perfiles (hojas de vida) por postulante */
 export const MAX_PROFILES_PER_POSTULANT = 5;
@@ -935,6 +937,44 @@ export const deleteReference = async (req, res) => {
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
     const deleted = await ProfileReference.findOneAndDelete({ _id: referenceId, profileId: profile._id });
     if (!deleted) return res.status(404).json({ message: "Referencia no encontrada" });
+    res.json({ message: "Eliminado correctamente", deleted: deleted._id });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * DELETE /postulants/:id/profiles/:profileId/cvs/:profileCvId
+ * Elimina una hoja de vida (documento CV) del perfil.
+ */
+export const deleteProfileCv = async (req, res) => {
+  try {
+    const { id, profileId, profileCvId } = req.params;
+    const postulant = await resolvePostulant(id);
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
+    if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
+    const deleted = await ProfileCv.findOneAndDelete({ _id: profileCvId, profileId: profile._id });
+    if (!deleted) return res.status(404).json({ message: "Hoja de vida no encontrada" });
+    res.json({ message: "Eliminado correctamente", deleted: deleted._id });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * DELETE /postulants/:id/profiles/:profileId/supports/:profileSupportId
+ * Elimina un documento de soporte del perfil.
+ */
+export const deleteProfileSupport = async (req, res) => {
+  try {
+    const { id, profileId, profileSupportId } = req.params;
+    const postulant = await resolvePostulant(id);
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
+    if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
+    const deleted = await ProfileSupport.findOneAndDelete({ _id: profileSupportId, profileId: profile._id });
+    if (!deleted) return res.status(404).json({ message: "Documento de soporte no encontrado" });
     res.json({ message: "Eliminado correctamente", deleted: deleted._id });
   } catch (error) {
     res.status(500).json({ message: error.message });

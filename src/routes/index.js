@@ -23,6 +23,7 @@ import periodoRoutes from '../modules/periodos/periodo.routes.js';
 import dashboardRoutes from '../modules/dashboard/dashboard.routes.js';
 import asignaturaRoutes from '../modules/asignaturas/asignatura.routes.js';
 import oportunidadesMTMRoutes from '../modules/oportunidadesMTM/oportunidadMTM.routes.js';
+import documentParametrizationRoutes from '../modules/parametrizacionDocumentos/documentParametrization.routes.js';
 
 const router = express.Router();
 
@@ -50,5 +51,6 @@ router.use("/periodos", periodoRoutes);
 router.use("/dashboard", dashboardRoutes);
 router.use("/asignaturas", asignaturaRoutes);
 router.use("/oportunidades-mtm", oportunidadesMTMRoutes);
+router.use("/parametrizacion-documentos", documentParametrizationRoutes);
 
 export default router;

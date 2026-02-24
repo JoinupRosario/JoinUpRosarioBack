@@ -3,6 +3,7 @@ import {
   getPostulants,
   getPostulantById,
   getPostulantProfileData,
+  generateHojaVidaPdf,
   testConsultaUniversitas,
   testConsultaAcademicaUniversitas,
   consultaInfEstudianteUniversitas,
@@ -43,6 +44,8 @@ import {
   createReference,
   updateReference,
   deleteReference,
+  deleteProfileCv,
+  deleteProfileSupport,
 } from "../controllers/postulantProfile.controller.js";
 import { verifyToken, authorizeRoles } from "../../../middlewares/auth.js";
 import { upload, handleUploadError } from "../../../middlewares/upload.js";
@@ -90,9 +93,12 @@ router.delete("/:id/profiles/:profileId/awards/:awardId", deleteAward);
 router.post("/:id/profiles/:profileId/references", createReference);
 router.put("/:id/profiles/:profileId/references/:referenceId", updateReference);
 router.delete("/:id/profiles/:profileId/references/:referenceId", deleteReference);
+router.delete("/:id/profiles/:profileId/cvs/:profileCvId", deleteProfileCv);
+router.delete("/:id/profiles/:profileId/supports/:profileSupportId", deleteProfileSupport);
 
 // Rutas generales después
 router.get("/", getPostulants);
+router.get("/:id/generate-hoja-vida-pdf", generateHojaVidaPdf);
 router.get("/:id/profile-data", getPostulantProfileData);
 router.get("/:id/consulta-inf-estudiante-universitas", consultaInfEstudianteUniversitas);
 router.put("/:id/aplicar-info-universitas", aplicarInfoUniversitas);

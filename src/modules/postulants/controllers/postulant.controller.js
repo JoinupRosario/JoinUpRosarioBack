@@ -24,6 +24,8 @@ import { consultaInfEstudiante, consultaInfAcademica } from "../../../services/u
 import Program from "../../program/model/program.model.js";
 import Item from "../../shared/reference-data/models/item.schema.js";
 import Attachment from "../../shared/attachment/attachment.schema.js";
+import DocumentParametrization from "../../parametrizacionDocumentos/documentParametrization.schema.js";
+import { buildHojaVidaPdf } from "../../../services/hojaVidaPdf.service.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -850,6 +852,171 @@ export const getPostulantProfileData = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+/** GET /postulants/:id/generate-hoja-vida-pdf?profileId=...&versionId=... — Genera y devuelve el PDF de la hoja de vida según parametrización. */
+export const generateHojaVidaPdf = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { profileId: queryProfileId, versionId: queryVersionId } = req.query;
+    let postulant = await Postulant.findById(id).select("_id postulantId").lean();
+    if (!postulant) postulant = await Postulant.findOne({ postulantId: id }).select("_id postulantId").lean();
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    if (!queryProfileId) return res.status(400).json({ message: "profileId es requerido" });
+
+    const postulantDocId = postulant._id;
+    const userId = postulant.postulantId ?? null;
+    const profileFilter = userId
+      ? { $or: [{ postulantId: postulantDocId }, { postulantId: userId }] }
+      : { postulantId: postulantDocId };
+
+    const postulantProfile = await PostulantProfile.findOne({
+      _id: queryProfileId,
+      ...profileFilter,
+    })
+      .populate("levelJob", "value name")
+      .populate("companySector", "value name")
+      .lean();
+    if (!postulantProfile) return res.status(404).json({ message: "Perfil no encontrado" });
+
+    const profileId = postulantProfile._id;
+    const allBaseProfiles = await PostulantProfile.find(profileFilter).select("_id").lean();
+    const allProfileIds = allBaseProfiles.map((p) => p._id);
+
+    const [
+      enrolledPrograms,
+      graduatePrograms,
+      workExperiences,
+      skills,
+      languages,
+      awards,
+      references,
+      otherStudies,
+      interestAreas,
+      profileCvs,
+      profileSupports,
+      profileInfoPermissions,
+      profileProfileVersions,
+    ] = await Promise.all([
+      ProfileEnrolledProgram.find({ profileId })
+        .populate("programId", "name code")
+        .populate({ path: "programFacultyId", select: "code facultyId", populate: { path: "facultyId", select: "name" } })
+        .populate("university", "value description")
+        .populate("countryId", "name")
+        .populate("stateId", "name")
+        .populate("cityId", "name")
+        .lean(),
+      ProfileGraduateProgram.find({ profileId })
+        .populate("programId", "name code")
+        .populate({ path: "programFacultyId", select: "code facultyId", populate: { path: "facultyId", select: "name" } })
+        .populate("university", "value description")
+        .populate("countryId", "name")
+        .populate("stateId", "name")
+        .populate("cityId", "name")
+        .lean(),
+      ProfileWorkExperience.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId })
+        .populate("companySector", "value name")
+        .populate("countryId", "name")
+        .populate("stateId", "name")
+        .populate("cityId", "name")
+        .sort({ startDate: -1 })
+        .lean(),
+      ProfileSkill.find({ profileId }).populate("skillId", "name").lean(),
+      ProfileLanguage.find({ profileId })
+        .populate("language", "value name")
+        .populate("level", "value name")
+        .lean(),
+      ProfileAward.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId })
+        .populate("awardType", "value name")
+        .sort({ awardDate: -1, dateCreation: -1 })
+        .lean(),
+      ProfileReference.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId }).lean(),
+      ProfileOtherStudy.find({ profileId }).lean(),
+      ProfileInterestArea.find({ profileId }).populate("area", "value name").lean(),
+      ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").lean(),
+      ProfileSupport.find({ profileId }).populate("attachmentId", "name filepath contentType").lean(),
+      ProfileInfoPermission.find({ profileId }).lean(),
+      ProfileProfileVersion.find({ profileId }).lean(),
+    ]);
+
+    const enrolledIds = enrolledPrograms.map((e) => e._id);
+    const programExtraInfoFiltered =
+      enrolledIds.length > 0
+        ? await ProfileProgramExtraInfo.find({ enrolledProgramId: { $in: enrolledIds } }).lean()
+        : [];
+
+    let selectedProfileVersion = null;
+    if (queryVersionId && profileId) {
+      const versionDoc = await ProfileProfileVersion.findOne({
+        _id: queryVersionId,
+        profileId,
+      }).lean();
+      if (versionDoc) selectedProfileVersion = versionDoc;
+    }
+
+    const profileData = {
+      postulantProfile,
+      selectedProfileVersion,
+      enrolledPrograms,
+      graduatePrograms,
+      programExtraInfo: programExtraInfoFiltered,
+      workExperiences,
+      skills,
+      languages,
+      awards,
+      references,
+      otherStudies,
+      interestAreas,
+      profileCvs,
+      profileSupports,
+      profileInfoPermissions,
+      profileProfileVersions,
+    };
+
+    const postulantFull = await Postulant.findById(postulantDocId)
+      .populate("postulantId", "name email")
+      .populate("typeOfIdentification", "name value")
+      .lean();
+    if (!postulantFull) return res.status(404).json({ message: "Postulante no encontrado" });
+
+    let parametrizacion = await DocumentParametrization.findOne({ type: "hoja_vida" }).lean();
+    if (!parametrizacion) {
+      parametrizacion = { logoBase64: null, formatSecciones: [], camposObligatorios: {} };
+    }
+
+    const pdfBuffer = await buildHojaVidaPdf(postulantFull, profileData, parametrizacion);
+    const baseName = (selectedProfileVersion?.profileName || postulantFull?.postulantId?.name || "Hoja de vida").replace(/[^\w\s\u00C0-\u00FF-]/g, "").trim() || "Hoja de vida";
+    const displayName = `${baseName}.pdf`;
+
+    const uploadsDir = path.join(__dirname, "..", "..", "..", "uploads");
+    const cvDir = path.join(uploadsDir, "cv");
+    if (!fs.existsSync(cvDir)) fs.mkdirSync(cvDir, { recursive: true });
+    const safeFileName = `hoja-vida-${String(profileId).slice(-8)}-${Date.now()}.pdf`;
+    const relativePath = path.join("cv", safeFileName);
+    const fullPath = path.join(uploadsDir, relativePath);
+    fs.writeFileSync(fullPath, pdfBuffer);
+
+    const attachment = await Attachment.create({
+      name: displayName,
+      contentType: "application/pdf",
+      filepath: relativePath.replace(/\\/g, "/"),
+      status: "active",
+      dateCreation: new Date(),
+      userCreator: req.user?.name || req.user?.email || "api",
+    });
+
+    await ProfileCv.create({
+      profileId,
+      attachmentId: attachment._id,
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${displayName}"`);
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error("[generateHojaVidaPdf]", error);
+    res.status(500).json({ message: error.message || "Error al generar el PDF" });
   }
 };
 
