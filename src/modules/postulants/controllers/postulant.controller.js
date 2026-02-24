@@ -28,9 +28,23 @@ import DocumentParametrization from "../../parametrizacionDocumentos/documentPar
 import { buildHojaVidaPdf } from "../../../services/hojaVidaPdf.service.js";
 import fs from "fs";
 import path from "path";
+import os from "os";
 import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/**
+ * Raíz de directorio para subidas (PDFs de hoja de vida, etc.).
+ * En Vercel/serverless el filesystem es de solo lectura excepto /tmp, por eso se usa os.tmpdir().
+ * Nota: en Vercel los archivos en /tmp son efímeros; una descarga posterior puede fallar si el archivo ya no existe.
+ * Para persistencia real en producción conviene usar Vercel Blob o S3 y guardar la URL/key en Attachment.
+ */
+function getUploadsRoot() {
+  if (process.env.VERCEL === "1") {
+    return path.join(os.tmpdir(), "uploads");
+  }
+  return path.join(__dirname, "..", "..", "..", "uploads");
+}
 
 /** Dominio obligatorio para el correo principal de estudiantes postulantes (Universidad del Rosario). */
 const ALLOWED_EMAIL_DOMAIN = "@urosario.edu.co";
@@ -989,7 +1003,7 @@ export const generateHojaVidaPdf = async (req, res) => {
     const baseName = (selectedProfileVersion?.profileName || postulantFull?.postulantId?.name || "Hoja de vida").replace(/[^\w\s\u00C0-\u00FF-]/g, "").trim() || "Hoja de vida";
     const displayName = `${baseName}.pdf`;
 
-    const uploadsDir = path.join(__dirname, "..", "..", "..", "uploads");
+    const uploadsDir = getUploadsRoot();
     const cvDir = path.join(uploadsDir, "cv");
     if (!fs.existsSync(cvDir)) fs.mkdirSync(cvDir, { recursive: true });
     const safeFileName = `hoja-vida-${String(profileId).slice(-8)}-${Date.now()}.pdf`;
@@ -1053,7 +1067,7 @@ export const downloadAttachment = async (req, res) => {
       return res.status(404).json({ message: "Archivo no encontrado" });
     }
 
-    const uploadsDir = path.join(__dirname, "..", "..", "..", "uploads");
+    const uploadsDir = getUploadsRoot();
     const fullPath = path.join(uploadsDir, attachment.filepath);
     if (!fs.existsSync(fullPath)) {
       return res.status(404).json({ message: "Archivo no encontrado en el servidor" });
