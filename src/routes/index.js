@@ -24,6 +24,7 @@ import dashboardRoutes from '../modules/dashboard/dashboard.routes.js';
 import asignaturaRoutes from '../modules/asignaturas/asignatura.routes.js';
 import oportunidadesMTMRoutes from '../modules/oportunidadesMTM/oportunidadMTM.routes.js';
 import condicionCurricularRoutes from '../modules/condicionesCurriculares/condicionCurricular.routes.js';
+import documentParametrizationRoutes from '../modules/parametrizacionDocumentos/documentParametrization.routes.js';
 
 const router = express.Router();
 
@@ -52,5 +53,6 @@ router.use("/dashboard", dashboardRoutes);
 router.use("/asignaturas", asignaturaRoutes);
 router.use("/oportunidades-mtm", oportunidadesMTMRoutes);
 router.use("/condiciones-curriculares", condicionCurricularRoutes);
+router.use("/parametrizacion-documentos", documentParametrizationRoutes);
 
 export default router;
