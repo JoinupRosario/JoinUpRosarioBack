@@ -25,12 +25,52 @@ const app = express();
 // Configurar estrategia SAML en passport
 configureSaml(passport);
 
-// Conectar a la base de datos
-// En Vercel, la conexión se mantiene entre invocaciones si está configurado correctamente
+// En local, conectar DB al arrancar
 if (process.env.VERCEL !== "1") {
   connectDB();
-} else {
-  // En Vercel, conectar de forma lazy en el primer request
+}
+
+// ── CORS debe ser lo primero — antes de session, passport y cualquier otro middleware ──
+// Si session/DB falla en Vercel y CORS no corrió aún, el browser ve un error CORS en vez del 500 real.
+const ALLOWED_ORIGINS = [
+  "https://rosario.mozartai.com.co",
+  "https://join-up-rosario-front.vercel.app",
+  "http://localhost:5173",
+  "http://localhost:5174",
+];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("No permitido por CORS"));
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
+  exposedHeaders: ["Authorization"],
+  optionsSuccessStatus: 200,
+};
+
+// Preflight OPTIONS: responder inmediatamente, antes de que cualquier otro middleware pueda fallar
+app.options("*", (req, res, next) => {
+  // Rutas SAML: Microsoft no envía Origin normal, dejar pasar sin restricción
+  if (req.path.startsWith("/api/auth/saml")) return res.sendStatus(200);
+  return cors(corsOptions)(req, res, () => res.sendStatus(200));
+});
+
+// CORS para el resto de peticiones normales (no SAML)
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/auth/saml")) return next();
+  return cors(corsOptions)(req, res, next);
+});
+
+// ── Resto de middlewares (después de CORS) ─────────────────────────────────
+
+// En Vercel, conectar DB de forma lazy — va DESPUÉS de CORS para que OPTIONS no falle
+if (process.env.VERCEL === "1") {
   let dbConnecting = false;
   app.use(async (req, res, next) => {
     if (mongoose.connection.readyState === 0 && !dbConnecting) {
@@ -57,7 +97,7 @@ app.use(
     saveUninitialized: false,
     store: MongoStore.create({
       mongoUrl: process.env.MONGO_URI,
-      ttl: 8 * 60 * 60, // 8 horas, igual que el JWT
+      ttl: 8 * 60 * 60,
     }),
     cookie: {
       secure: process.env.NODE_ENV === "production",
@@ -71,49 +111,8 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Configuración de CORS
-// Las rutas SAML reciben POST desde login.microsoftonline.com (Origin externo del IdP).
-// El middleware general NO debe ejecutarse para esas rutas; se las saltea explícitamente.
-const generalCors = cors({
-  origin: function (origin, callback) {
-    const allowedOrigins = [
-      "https://rosario.mozartai.com.co/",
-      "https://rosario.mozartai.com.co",
-      "https://join-up-rosario-front.vercel.app",
-      "https://join-up-rosario-front.vercel.app/",
-      "http://localhost:5173",
-      "http://localhost:5174",
-    ];
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error("No permitido por CORS"));
-    }
-  },
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "X-Requested-With",
-    "Accept",
-    "Origin",
-  ],
-  exposedHeaders: ["Authorization"],
-  optionsSuccessStatus: 200,
-});
-
-app.use((req, res, next) => {
-  // Las rutas SAML son invocadas por el browser desde el dominio de Microsoft;
-  // no requieren restricción de CORS — se saltan el middleware general.
-  if (req.path.startsWith("/api/auth/saml")) return next();
-  return generalCors(req, res, next);
-});
-
-
 app.use(morgan("dev"));
 
-// Configurar Helmet para no interferir con CORS
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
@@ -122,30 +121,6 @@ app.use(
 );
 
 app.use(compression());
-
-// Manejar preflight requests explícitamente (antes de las rutas)
-app.use((req, res, next) => {
-  if (req.method === "OPTIONS") {
-    const allowedOrigins = [
-      "https://rosario.mozartai.com.co/",
-      "https://rosario.mozartai.com.co",
-      "https://join-up-rosario-front.vercel.app/",
-      "http://localhost:5173",
-      "http://localhost:5174",
-    ];
-    const origin = req.headers.origin;
-    
-    if (origin && allowedOrigins.includes(origin)) {
-      res.header("Access-Control-Allow-Origin", origin);
-    }
-    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin");
-    res.header("Access-Control-Allow-Credentials", "true");
-    res.header("Access-Control-Max-Age", "86400"); // 24 horas
-    return res.sendStatus(200);
-  }
-  next();
-});
 
 // Middleware de debugging antes de rutas
 app.use("/api", (req, res, next) => {
