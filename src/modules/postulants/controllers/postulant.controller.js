@@ -1128,7 +1128,12 @@ function mapProfileBodyToPostulant(body) {
     mapped.typeOfIdentification = mapped.type_doc_postulant || null;
     delete mapped.type_doc_postulant;
   }
+  if (mapped.gender_postulant !== undefined) {
+    mapped.gender = mapped.gender_postulant || null;
+    delete mapped.gender_postulant;
+  }
   delete mapped.identity_postulant;
+  delete mapped.student_code;
   delete mapped.user;
   delete mapped.full_profile;
   delete mapped.filling_percentage;
