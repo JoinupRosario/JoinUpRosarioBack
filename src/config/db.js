@@ -5,7 +5,7 @@ const connectDB = async () => {
     // Si ya está conectado, no hacer nada
     if (mongoose.connection.readyState === 1) {
       return;
-    }
+    } 
     
     const conn = await mongoose.connect(process.env.MONGO_URI, {
       useNewUrlParser: true,
