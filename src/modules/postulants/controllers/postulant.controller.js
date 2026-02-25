@@ -26,6 +26,7 @@ import Item from "../../shared/reference-data/models/item.schema.js";
 import Attachment from "../../shared/attachment/attachment.schema.js";
 import DocumentParametrization from "../../parametrizacionDocumentos/documentParametrization.schema.js";
 import { buildHojaVidaPdf } from "../../../services/hojaVidaPdf.service.js";
+import mongoose from "mongoose";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -207,38 +208,38 @@ export const createPostulant = async (req, res) => {
   }
 };
 
+const postulantPopulate = [
+  { path: "postulantId", select: "name email code" },
+  { path: "countryBirthId", select: "name" },
+  { path: "stateBirthId", select: "name" },
+  { path: "cityBirthId", select: "name", populate: { path: "state", select: "name" } },
+  { path: "countryResidenceId", select: "name" },
+  { path: "stateResidenceId", select: "name" },
+  { path: "cityResidenceId", select: "name", populate: { path: "state", select: "name" } },
+  { path: "typeOfIdentification", select: "name value" },
+  { path: "gender", select: "name value" },
+];
+
 export const getPostulantById = async (req, res) => {
   try {
     const { id } = req.params;
+    const idStr = id && String(id).trim();
+    if (!idStr) {
+      return res.status(400).json({ message: "ID de postulante es requerido" });
+    }
 
-    let postulant = await Postulant.findById(id)
-      .populate("postulantId", "name email code")
-      .populate("countryBirthId", "name")
-      .populate("stateBirthId", "name")
-      .populate({ path: "cityBirthId", select: "name", populate: { path: "state", select: "name" } })
-      .populate("countryResidenceId", "name")
-      .populate("stateResidenceId", "name")
-      .populate({ path: "cityResidenceId", select: "name", populate: { path: "state", select: "name" } })
-      .populate("typeOfIdentification", "name value")
-      .populate("gender", "name value")
-      .lean();
+    const isValidObjectId = mongoose.Types.ObjectId.isValid(idStr) && String(new mongoose.Types.ObjectId(idStr)) === idStr;
+    let postulant = null;
 
+    if (isValidObjectId) {
+      postulant = await Postulant.findById(idStr).populate(postulantPopulate).lean();
+    }
     if (!postulant) {
-      postulant = await Postulant.findOne({ postulantId: id })
-        .populate("postulantId", "name email code")
-        .populate("countryBirthId", "name")
-        .populate("stateBirthId", "name")
-        .populate({ path: "cityBirthId", select: "name", populate: { path: "state", select: "name" } })
-        .populate("countryResidenceId", "name")
-        .populate("stateResidenceId", "name")
-        .populate({ path: "cityResidenceId", select: "name", populate: { path: "state", select: "name" } })
-        .populate("typeOfIdentification", "name value")
-        .populate("gender", "name value")
-        .lean();
+      postulant = await Postulant.findOne({ postulantId: idStr }).populate(postulantPopulate).lean();
     }
 
     if (!postulant) {
-      return res.status(404).json({ message: "postulant not found" });
+      return res.status(404).json({ message: "Postulante no encontrado" });
     }
 
     const fillingPercentage = postulant.fillingPercentage ?? calculateCompleteness(postulant);
@@ -248,7 +249,15 @@ export const getPostulantById = async (req, res) => {
 
     res.json(formatPostulantProfileResponse(postulant));
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("[getPostulantById]", error?.message || error);
+    if (process.env.NODE_ENV !== "production") {
+      console.error(error?.stack);
+    }
+    res.status(500).json({
+      message: process.env.NODE_ENV === "production"
+        ? "Error al cargar el perfil del postulante. Intente de nuevo."
+        : (error?.message || "Error interno"),
+    });
   }
 };
 
@@ -721,14 +730,14 @@ export const aplicarInfoAcademicaUniversitas = async (req, res) => {
 export const getPostulantProfileData = async (req, res) => {
   try {
     const { id } = req.params;
+    const idStr = id && String(id).trim();
     const { profileId: queryProfileId, versionId: queryVersionId } = req.query;
-    let postulant = await Postulant.findById(id).select("_id postulantId").lean();
-    if (!postulant) {
-      postulant = await Postulant.findOne({ postulantId: id }).select("_id postulantId").lean();
-    }
-    if (!postulant) {
-      return res.status(404).json({ message: "Postulante no encontrado" });
-    }
+    if (!idStr) return res.status(400).json({ message: "ID de postulante es requerido" });
+    const isValidObjectId = mongoose.Types.ObjectId.isValid(idStr) && String(new mongoose.Types.ObjectId(idStr)) === idStr;
+    let postulant = null;
+    if (isValidObjectId) postulant = await Postulant.findById(idStr).select("_id postulantId").lean();
+    if (!postulant) postulant = await Postulant.findOne({ postulantId: idStr }).select("_id postulantId").lean();
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
     const postulantDocId = postulant._id;
     const userId = postulant.postulantId ?? null;
     const profileFilter = userId
@@ -865,7 +874,13 @@ export const getPostulantProfileData = async (req, res) => {
       profileProfileVersions,
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("[getPostulantProfileData]", error?.message || error);
+    if (process.env.NODE_ENV !== "production") console.error(error?.stack);
+    res.status(500).json({
+      message: process.env.NODE_ENV === "production"
+        ? "Error al cargar los datos del perfil. Intente de nuevo."
+        : (error?.message || "Error interno"),
+    });
   }
 };
 
