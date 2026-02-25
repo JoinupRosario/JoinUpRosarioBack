@@ -1,6 +1,13 @@
 import mongoose from 'mongoose';
 
 const rolSchema = new mongoose.Schema({
+  /** ID en MySQL (role.id) para migración y mapeo user_role.role_id → Rol. */
+  mysqlId: {
+    type: Number,
+    unique: true,
+    sparse: true,
+    index: true,
+  },
   nombre: {
     type: String,
     required: [true, 'El nombre del rol es obligatorio'],

@@ -23,6 +23,7 @@
     "migrate:companies": "node src/seeders/migrateCompaniesFromMySQL.js",
     "migrate:faculties-programs": "node src/seeders/migrateFacultiesAndProgramsFromMySQL.js",
     "migrate:users": "node src/seeders/migrateUsersFromMySQL.js",
+    "migrate:administrativos": "node src/seeders/migrateAdministrativosFromMySQL.js",
     "migrate:postulants": "node src/seeders/migratePostulantsFromMySQL.js"
   },
   "keywords": [],
