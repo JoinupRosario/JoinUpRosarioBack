@@ -6,6 +6,7 @@ import PDFDocument from "pdfkit";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import sharp from "sharp";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -18,7 +19,7 @@ const HEADER_ROLE_FONT_SIZE = 11;
 const LOGO_WIDTH = 140;
 const LOGO_HEIGHT = 60;
 const ICON_SIZE = 14;
-const ICON_GAP = 6;
+const ICON_GAP = 3;
 const ICON_COLOR = "#c41e3a";
 const ICON_NAMES = ["location", "email", "phone", "linkedin", "mobile"];
 
@@ -33,14 +34,34 @@ function safeStr(v) {
   return String(v).trim();
 }
 
-/** Extrae el buffer de imagen desde logo en base64 (data URL o raw base64). PDFKit no soporta SVG. */
-function getLogoBuffer(logoBase64) {
+/** Extrae el buffer de imagen desde logo en base64 (data URL o raw base64). Convierte SVG a PNG automáticamente. */
+async function getLogoBuffer(logoBase64) {
   if (!logoBase64 || typeof logoBase64 !== "string") return null;
   const trimmed = logoBase64.trim();
-  if (trimmed.startsWith("data:image/svg") || trimmed.startsWith("<svg")) {
-    console.warn("[hojaVidaPdf] El logo en formato SVG no se puede incrustar en PDF; use PNG o JPG.");
-    return null;
+
+  const isSvgDataUrl = trimmed.startsWith("data:image/svg");
+  const isRawSvg = trimmed.startsWith("<svg");
+
+  if (isSvgDataUrl || isRawSvg) {
+    try {
+      let svgBuffer;
+      if (isSvgDataUrl) {
+        const base64Part = trimmed.split(",")[1];
+        svgBuffer = Buffer.from(base64Part, "base64");
+      } else {
+        svgBuffer = Buffer.from(trimmed, "utf8");
+      }
+      const pngBuffer = await sharp(svgBuffer)
+        .resize(LOGO_WIDTH * 3, LOGO_HEIGHT * 3, { fit: "inside", withoutEnlargement: false })
+        .png()
+        .toBuffer();
+      return pngBuffer;
+    } catch (e) {
+      console.warn("[hojaVidaPdf] No se pudo convertir SVG a PNG:", e.message);
+      return null;
+    }
   }
+
   const base64Data = trimmed.includes(",") ? trimmed.split(",")[1] : trimmed;
   if (!base64Data) return null;
   try {
@@ -55,9 +76,9 @@ function drawSectionTitle(doc, title) {
   doc.fontSize(SECTION_TITLE_FONT_SIZE).font("Helvetica-Bold").fillColor(COLOR_TITLE);
   doc.text(title.toUpperCase(), MARGIN, doc.y, { width: PAGE_WIDTH - 2 * MARGIN, align: "left", continued: false });
   const y = doc.y;
-  doc.strokeColor(COLOR_LINE).lineWidth(0.5).moveTo(MARGIN, y + 3).lineTo(PAGE_WIDTH - MARGIN, y + 3).stroke();
+  doc.strokeColor(COLOR_LINE).lineWidth(1.2).moveTo(MARGIN, y + 4).lineTo(PAGE_WIDTH - MARGIN, y + 4).stroke();
   doc.strokeColor("#000").lineWidth(1);
-  doc.moveDown(0.6);
+  doc.moveDown(1);
 }
 
 function formatDate(d) {
@@ -114,18 +135,20 @@ function sectionDatosBasicos(doc, profileData, postulant, options = {}) {
     { icon: "email", text: safeStr(email) },
     { icon: "linkedin", text: safeStr(linkedin) },
   ];
-  const lineHeight = 18;
-  const rowGap = 14;
+  const lineHeight = 20;
+  const rowGap = 10;
 
   function drawRow(items, slotIndices) {
     const baseY = doc.y;
-    const textMaxWidth = slotWidth - ICON_SIZE - ICON_GAP - 12;
+    const textMaxWidth = slotWidth - ICON_SIZE - ICON_GAP - 8;
+    // Alinea verticalmente el ícono con el texto (centrado respecto a font size ~10)
+    const iconOffsetY = Math.round((BODY_FONT_SIZE - ICON_SIZE) / 2);
     slotIndices.forEach((slotIndex, i) => {
       const item = items[i];
       const slotLeft = MARGIN + slotIndex * slotWidth;
       const iconX = slotLeft;
       const textX = slotLeft + ICON_SIZE + ICON_GAP;
-      drawContactIcon(doc, contactIcons[item.icon] ?? null, iconX, baseY - 2);
+      drawContactIcon(doc, contactIcons[item.icon] ?? null, iconX, baseY + iconOffsetY);
       doc.text(item.text, textX, baseY, { width: textMaxWidth, align: "left", continued: false });
     });
     doc.y = baseY + lineHeight;
@@ -343,6 +366,12 @@ function drawIdiomasYHabilidades(doc, profileData) {
  * @returns {Promise<Buffer>}
  */
 export async function buildHojaVidaPdf(postulant, profileData, parametrizacion) {
+  // Resolvemos el logo antes de entrar al stream del PDFDocument (puede ser async por conversión SVG→PNG)
+  const logoBuffer = await getLogoBuffer(parametrizacion?.logoBase64).catch((e) => {
+    console.warn("[hojaVidaPdf] Error resolviendo logo:", e.message);
+    return null;
+  });
+
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: MARGIN, size: "A4" });
     const chunks = [];
@@ -351,7 +380,6 @@ export async function buildHojaVidaPdf(postulant, profileData, parametrizacion) 
     doc.on("error", reject);
 
     const y = MARGIN;
-    const logoBuffer = getLogoBuffer(parametrizacion?.logoBase64);
     const nameAreaX = logoBuffer ? MARGIN + LOGO_WIDTH + 16 : MARGIN;
     const nameAreaWidth = logoBuffer ? PAGE_WIDTH - MARGIN - nameAreaX : PAGE_WIDTH - 2 * MARGIN;
 
