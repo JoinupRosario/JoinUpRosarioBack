@@ -178,9 +178,7 @@ function sectionFormacionRosarioEnCurso(doc, profileData, postulant) {
   const list = (profileData?.enrolledPrograms || []).filter((ep) => ep.programFacultyId != null);
   const extraList = profileData?.programExtraInfo || [];
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
-  if (list.length === 0) doc.text("No registrada.", { continued: false });
-  else
-    list.forEach((ep) => {
+  list.forEach((ep) => {
       const program = ep.programId?.name || "—";
       const faculty = ep.programFacultyId?.facultyId?.name || ep.programFacultyId?.code || "—";
       const extra = extraList.find((e) => String(e.enrolledProgramId) === String(ep._id));
@@ -197,9 +195,7 @@ function sectionFormacionRosarioEnCurso(doc, profileData, postulant) {
 function sectionFormacionRosarioFinalizada(doc, profileData, postulant) {
   const list = profileData?.graduatePrograms || [];
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
-  if (list.length === 0) doc.text("No registrada.", { continued: false });
-  else
-    list.forEach((gp) => {
+  list.forEach((gp) => {
       const program = gp.programId?.name || "—";
       const faculty = gp.programFacultyId?.facultyId?.name || gp.programFacultyId?.code || "—";
       const dateStr = gp.dateObtained ? formatDate(gp.dateObtained) : "—";
@@ -215,8 +211,7 @@ function sectionFormacionRosarioFinalizada(doc, profileData, postulant) {
 function sectionFormacionEnCursoOtras(doc, profileData, postulant) {
   const list = (profileData?.enrolledPrograms || []).filter((ep) => ep.programFacultyId == null);
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
-  if (list.length === 0) doc.text("No registrada.", { continued: false });
-  else list.forEach((ep) => {
+  list.forEach((ep) => {
     const program = ep.programId?.name || "—";
     const univ = ep.university?.value || ep.university?.name || "—";
     const city = ep.cityId?.name || "";
@@ -230,8 +225,7 @@ function sectionFormacionEnCursoOtras(doc, profileData, postulant) {
 function sectionFormacionFinalizadaOtras(doc, profileData, postulant) {
   const list = profileData?.otherStudies || [];
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
-  if (list.length === 0) doc.text("No registrada.", { continued: false });
-  else list.forEach((os) => {
+  list.forEach((os) => {
     const name = os.studyName || "—";
     const inst = os.studyInstitution || "—";
     const year = os.studyYear ? `(${os.studyYear})` : "";
@@ -248,8 +242,7 @@ function sectionOtrosEstudios(doc, profileData, postulant) {
 function sectionExperienciaLaboral(doc, profileData, postulant) {
   const list = (profileData?.workExperiences || []).filter((w) => (w.experienceType || "JOB_EXP") === "JOB_EXP");
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
-  if (list.length === 0) doc.text("No registrada.", { continued: false });
-  else list.forEach((w) => {
+  list.forEach((w) => {
     doc.text(`${safeStr(w.jobTitle)}`, { continued: false });
     doc.text(`${safeStr(w.companyName)}`, { continued: false });
     const city = w.cityId?.name || "";
@@ -264,8 +257,7 @@ function sectionExperienciaLaboral(doc, profileData, postulant) {
 function sectionOtrasExperiencias(doc, profileData, postulant) {
   const list = (profileData?.workExperiences || []).filter((w) => (w.experienceType || "JOB_EXP") !== "JOB_EXP");
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
-  if (list.length === 0) doc.text("No registrada.", { continued: false });
-  else list.forEach((w) => {
+  list.forEach((w) => {
     doc.text(`${safeStr(w.jobTitle)} - ${safeStr(w.companyName)}`, { continued: false });
     doc.text(`${formatDate(w.startDate)} - ${w.noEndDate ? "Actualidad" : formatDate(w.endDate)}`, { continued: false });
     if (w.achievements) doc.text(safeStr(w.achievements), { continued: false });
@@ -276,22 +268,15 @@ function sectionOtrasExperiencias(doc, profileData, postulant) {
 function sectionLogros(doc, profileData, postulant) {
   const list = profileData?.awards || [];
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
-  const disclaimer = "La Universidad del Rosario no se hace responsable de la veracidad de la información ingresada en relación a los estudios o experiencia externos a la institución relacionados por el postulante.";
-  if (list.length === 0) doc.text("No registrados.", { continued: false });
-  else list.forEach((a) => {
+  list.forEach((a) => {
     doc.text(`• ${safeStr(a.awardName || a.awardType?.name || a.awardType?.value)}${a.awardDate ? ` (${formatDate(a.awardDate)})` : ""}`, { continued: false });
   });
-  doc.moveDown(0.3);
-  doc.fontSize(9).fillColor(COLOR_SUBTLE);
-  doc.text(disclaimer, { continued: false, lineGap: 2 });
-  doc.fillColor(COLOR_BODY);
 }
 
 function sectionReferencias(doc, profileData, postulant) {
   const list = profileData?.references || [];
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
-  if (list.length === 0) doc.text("No registradas.", { continued: false });
-  else list.forEach((r) => {
+  list.forEach((r) => {
     doc.text(`• ${safeStr(r.firstname)} ${safeStr(r.lastname)} - ${safeStr(r.occupation)} - ${safeStr(r.phone)}`, { continued: false });
   });
 }
@@ -315,16 +300,48 @@ const SECTION_RENDERERS = {
 const SECTION_TITLE_OVERRIDE = {
   datos_basicos: "DATOS DE CONTACTO",
   perfil: "PERFIL PROFESIONAL",
-  formacion_rosario_en_curso: "FORMACIÓN ACADÉMICA",
-  formacion_rosario_finalizada: "FORMACIÓN ACADÉMICA",
-  formacion_en_curso_otras: "FORMACIÓN ACADÉMICA (OTRAS)",
-  formacion_finalizada_otras: "FORMACIÓN ACADÉMICA (OTRAS)",
+  formacion_rosario_en_curso: "FORMACIÓN ACADÉMICA - EN CURSO",
+  formacion_rosario_finalizada: "FORMACIÓN ACADÉMICA - FINALIZADA",
+  formacion_en_curso_otras: "FORMACIÓN ACADÉMICA EN OTRAS INSTITUCIONES - EN CURSO",
+  formacion_finalizada_otras: "FORMACIÓN ACADÉMICA EN OTRAS INSTITUCIONES - FINALIZADA",
   otros_estudios: "OTROS ESTUDIOS",
-  experiencia_laboral: "EXPERIENCIA PROFESIONAL / VOLUNTARIADOS",
-  otras_experiencias: "EXPERIENCIA PROFESIONAL / VOLUNTARIADOS",
-  logros: "LOGROS",
+  experiencia_laboral: "EXPERIENCIA LABORAL",
+  otras_experiencias: "INVESTIGACIÓN, VOLUNTARIADO Y PROYECCIÓN SOCIAL",
+  logros: "LOGROS Y RECONOCIMIENTOS",
   referencias: "REFERENCIAS",
 };
+
+/** Retorna true si la sección tiene datos suficientes para renderizarse. */
+function hasSectionData(key, profileData) {
+  switch (key) {
+    case "datos_basicos": return true;
+    case "cedula": return (profileData?.profileSupports || []).length > 0;
+    case "perfil": {
+      const p = profileData?.postulantProfile;
+      const v = profileData?.selectedProfileVersion;
+      const text = v?.profileText ?? p?.profileText ?? "";
+      return !!(text && text.trim() && text.trim() !== "—");
+    }
+    case "formacion_rosario_en_curso":
+      return (profileData?.enrolledPrograms || []).filter((ep) => ep.programFacultyId != null).length > 0;
+    case "formacion_rosario_finalizada":
+      return (profileData?.graduatePrograms || []).length > 0;
+    case "formacion_en_curso_otras":
+      return (profileData?.enrolledPrograms || []).filter((ep) => ep.programFacultyId == null).length > 0;
+    case "formacion_finalizada_otras":
+    case "otros_estudios":
+      return (profileData?.otherStudies || []).length > 0;
+    case "experiencia_laboral":
+      return (profileData?.workExperiences || []).filter((w) => (w.experienceType || "JOB_EXP") === "JOB_EXP").length > 0;
+    case "otras_experiencias":
+      return (profileData?.workExperiences || []).filter((w) => (w.experienceType || "JOB_EXP") !== "JOB_EXP").length > 0;
+    case "logros":
+      return (profileData?.awards || []).length > 0;
+    case "referencias":
+      return (profileData?.references || []).length > 0;
+    default: return true;
+  }
+}
 
 /** Dibuja idiomas y habilidades en dos columnas. */
 function drawIdiomasYHabilidades(doc, profileData) {
@@ -405,9 +422,11 @@ export async function buildHojaVidaPdf(postulant, profileData, parametrizacion) 
     const formatSecciones = (parametrizacion?.formatSecciones || []).filter((s) => s.visible).sort((a, b) => (a.order || 0) - (b.order || 0));
 
     for (const seccion of formatSecciones) {
-      if (doc.y > 720) doc.addPage({ margin: MARGIN });
       const render = SECTION_RENDERERS[seccion.key];
       if (!render) continue;
+      // Omitir secciones sin datos
+      if (!hasSectionData(seccion.key, profileData)) continue;
+      if (doc.y > 720) doc.addPage({ margin: MARGIN });
       const sectionTitle = SECTION_TITLE_OVERRIDE[seccion.key] ?? (seccion.label || seccion.key).replace(/\([^)]*\)/g, "").trim().toUpperCase();
       drawSectionTitle(doc, sectionTitle);
       doc.fillColor(COLOR_BODY);
@@ -420,6 +439,13 @@ export async function buildHojaVidaPdf(postulant, profileData, parametrizacion) 
       }
       doc.moveDown(1);
     }
+
+    // Disclaimer legal al pie del documento
+    const disclaimer = "La Universidad del Rosario no se hace responsable de la veracidad de la información ingresada en relación a los estudios o experiencia externos a la institución relacionados por el postulante.";
+    doc.moveDown(0.5);
+    doc.fontSize(8).fillColor(COLOR_SUBTLE);
+    doc.text(disclaimer, MARGIN, doc.y, { width: PAGE_WIDTH - 2 * MARGIN, align: "center", continued: false, lineGap: 2 });
+    doc.fillColor(COLOR_BODY);
 
     doc.end();
   });
