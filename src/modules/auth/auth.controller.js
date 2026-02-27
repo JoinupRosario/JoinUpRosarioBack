@@ -1,4 +1,5 @@
 import User from "../users/user.model.js";
+import UserSucursal from "../userSucursal/userSucursal.model.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 
@@ -67,6 +68,15 @@ export const loginUser = async (req, res) => {
       { expiresIn: "8h" }
     );
 
+    // Sucursales (sedes) del usuario desde user_sucursal
+    const userSucursales = await UserSucursal.find({ userId: user._id })
+      .populate("sucursalId", "nombre codigo _id")
+      .lean();
+    const sucursales = userSucursales
+      .map((us) => us.sucursalId)
+      .filter(Boolean)
+      .map((s) => ({ _id: s._id, nombre: s.nombre, codigo: s.codigo }));
+
     // No devolver la contraseña en la respuesta
     // Asegurar que modulo siempre esté presente (incluso si es null o undefined)
     const userResponse = {
@@ -76,6 +86,7 @@ export const loginUser = async (req, res) => {
       modulo: user.modulo !== undefined ? user.modulo : null,
       active: user.estado !== undefined ? user.estado : true,
       estado: user.estado !== undefined ? user.estado : true, // Mantener compatibilidad
+      sucursales: sucursales || [],
       createdAt: user.createdAt,
       updatedAt: user.updatedAt
     };

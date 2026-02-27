@@ -4,8 +4,6 @@ import {
   getPostulantById,
   getPostulantProfileData,
   generateHojaVidaPdf,
-  testConsultaUniversitas,
-  testConsultaAcademicaUniversitas,
   consultaInfEstudianteUniversitas,
   aplicarInfoUniversitas,
   consultaInfAcademicaUniversitas,
@@ -51,10 +49,6 @@ import { verifyToken, authorizeRoles } from "../../../middlewares/auth.js";
 import { upload, handleUploadError } from "../../../middlewares/upload.js";
 
 const router = express.Router();
-
-// Sin token: solo para probar la API OSB con ?documento=...
-router.get("/test-consulta-universitas", testConsultaUniversitas);
-router.get("/test-consulta-academica-universitas", testConsultaAcademicaUniversitas);
 
 // Rutas con autenticación
 router.use(verifyToken);

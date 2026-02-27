@@ -24,7 +24,9 @@
     "migrate:faculties-programs": "node src/seeders/migrateFacultiesAndProgramsFromMySQL.js",
     "migrate:users": "node src/seeders/migrateUsersFromMySQL.js",
     "migrate:administrativos": "node src/seeders/migrateAdministrativosFromMySQL.js",
-    "migrate:postulants": "node src/seeders/migratePostulantsFromMySQL.js"
+    "migrate:postulants": "node src/seeders/migratePostulantsFromMySQL.js",
+    "migrate:logs": "node src/seeders/migrateLogsFromMySQL.js",
+    "migrate:user-sucursal": "node src/seeders/migrateUserSucursalFromMySQL.js"
   },
   "keywords": [],
   "author": "",

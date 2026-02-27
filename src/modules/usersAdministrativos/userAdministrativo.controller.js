@@ -2,6 +2,7 @@ import UserAdministrativo from './userAdministrativo.model.js';
 import User from '../users/user.model.js';
 import Rol from '../roles/roles.model.js';
 import Sucursal from '../sucursales/sucursal.model.js';
+import UserSucursal from '../userSucursal/userSucursal.model.js';
 import Program from '../program/model/program.model.js';
 import bcrypt from 'bcryptjs';
 import { logHelper } from '../logs/log.service.js';
@@ -255,10 +256,31 @@ export const obtenerUsersAdministrativos = async (req, res) => {
       .populate('programas.program', 'name code level')
       .sort({ createdAt: -1 });
 
+    const userIds = [...new Set(usersAdministrativos.map((u) => u.user?._id || u.user).filter(Boolean))];
+    const sucursalesByUser = new Map();
+    if (userIds.length > 0) {
+      const userSucursales = await UserSucursal.find({ userId: { $in: userIds } })
+        .populate('sucursalId', 'nombre codigo _id')
+        .lean();
+      for (const us of userSucursales) {
+        const uid = us.userId?.toString();
+        if (!uid) continue;
+        const arr = sucursalesByUser.get(uid) || [];
+        if (us.sucursalId) arr.push({ _id: us.sucursalId._id, nombre: us.sucursalId.nombre, codigo: us.sucursalId.codigo });
+        sucursalesByUser.set(uid, arr);
+      }
+    }
+    const data = usersAdministrativos.map((u) => {
+      const plain = u.toObject ? u.toObject() : { ...u };
+      const uid = (u.user?._id || u.user)?.toString();
+      plain.sucursales = uid ? (sucursalesByUser.get(uid) || []) : [];
+      return plain;
+    });
+
     res.json({
       success: true,
-      data: usersAdministrativos,
-      total: usersAdministrativos.length
+      data,
+      total: data.length
     });
 
   } catch (error) {
@@ -290,9 +312,20 @@ export const obtenerUserAdministrativoPorId = async (req, res) => {
       });
     }
 
+    const userId = userAdministrativo.user?._id || userAdministrativo.user;
+    let sucursales = [];
+    if (userId) {
+      const list = await UserSucursal.find({ userId })
+        .populate('sucursalId', 'nombre codigo _id')
+        .lean();
+      sucursales = list.map((us) => us.sucursalId).filter(Boolean).map((s) => ({ _id: s._id, nombre: s.nombre, codigo: s.codigo }));
+    }
+    const data = userAdministrativo.toObject ? userAdministrativo.toObject() : { ...userAdministrativo };
+    data.sucursales = sucursales;
+
     res.json({
       success: true,
-      data: userAdministrativo
+      data
     });
 
   } catch (error) {

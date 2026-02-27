@@ -240,12 +240,13 @@ export const consultaInfAcademica = async (documento) => {
     const data = text ? tryParseJson(text) : null;
     if (!data) throw new Error("Universitas devolvió respuesta vacía o no JSON.");
 
-    // Estructura esperada: { items: [ { resultSet: { items: [...] } } ] }
+    // Ficha técnica: { env?: {}, items: [ { resultSet: { items: [...] } } ] }
     const statements = data.items;
     if (Array.isArray(statements) && statements.length > 0) {
       const first = statements[0];
       const resultSet = first?.resultSet;
-      if (resultSet && Array.isArray(resultSet.items)) return resultSet.items;
+      const items = resultSet?.items;
+      if (Array.isArray(items) && items.length > 0) return items;
     }
     // Alternativa: resultSet en la raíz
     if (data.resultSet && Array.isArray(data.resultSet.items)) return data.resultSet.items;
@@ -262,6 +263,9 @@ export const consultaInfAcademica = async (documento) => {
 };
 
 function tryParseJson(str) {
+  if (str == null || typeof str !== "string") return str == null ? null : str;
+  const trimmed = str.trim();
+  if (trimmed === "" || trimmed === "null") return null;
   try {
     return JSON.parse(str);
   } catch {

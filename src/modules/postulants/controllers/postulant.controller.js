@@ -18,7 +18,8 @@ import {
   ProfileInfoPermission,
   ProfileProfileVersion,
 } from "../models/profile/index.js";
-import "../../faculty/model/faculty.model.js"; // Registra modelo Faculty para populate programFacultyId.facultyId
+import Faculty from "../../faculty/model/faculty.model.js";
+import ProgramFaculty from "../../program/model/programFaculty.model.js";
 import { MAX_PROFILES_PER_POSTULANT } from "./postulantProfile.controller.js";
 import { consultaInfEstudiante, consultaInfAcademica } from "../../../services/uxxiIntegration.service.js";
 import Program from "../../program/model/program.model.js";
@@ -31,6 +32,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
+import { log } from "console";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -327,52 +329,22 @@ function comparePostulantWithUniversitas(postulant, uni, currentAcademicUser = "
   return changes;
 }
 
-/**
- * GET test: prueba la API OSB Consulta_inf_estudiante con un documento.
- * Query: documento= (ej. studentCode). Útil para probar desde Postman/curl.
- */
-export const testConsultaUniversitas = async (req, res) => {
-  try {
-    const documento = (req.query.documento || req.body?.documento || "").toString().trim();
-    if (!documento) return res.status(400).json({ message: "Query documento es requerido (ej. ?documento=80196661)." });
-    const data = await consultaInfEstudiante(documento);
-    if (!data) return res.status(404).json({ message: "No se encontró información del estudiante en Universitas.", documento });
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-};
+
 
 /**
- * GET test: prueba la API OSB Consulta_inf_academica con un documento.
- * Query: documento= (ej. 1107524684). Sin auth. Útil para verificar que la petición a Universitas funciona.
+ * Resuelve el documento (studentCode) para consultar Universitas.
+ * Busca PostulantProfile por postulantId = Postulant._id o postulantId = Postulant.postulantId (User).
  */
-export const testConsultaAcademicaUniversitas = async (req, res) => {
-  try {
-    const documento = (req.query.documento || req.body?.documento || "").toString().trim();
-    if (!documento) return res.status(400).json({ message: "Query documento es requerido (ej. ?documento=1107524684)." });
-    const items = await consultaInfAcademica(documento);
-    if (!items || items.length === 0) {
-      return res.status(404).json({
-        message: "No se encontró información académica del estudiante en Universitas.",
-        documento,
-      });
-    }
-    res.json({ documento, count: items.length, items });
-  } catch (error) {
-    res.status(502).json({
-      message: error.message || "Error al conectar con Universitas (Consulta_inf_academica).",
-      documento: (req.query.documento || req.body?.documento || "").toString().trim(),
-    });
-  }
-};
-
-/**
- * Resuelve el documento para consultar Universitas: solo studentCode del PostulantProfile (es el que solicita la API).
- * Usa String() por si studentCode viene como número desde BD; prefiere un perfil que tenga studentCode no vacío.
- */
-async function getDocumentoForUniversitas(postulantId) {
-  const profiles = await PostulantProfile.find({ postulantId }).select("studentCode").lean();
+async function getDocumentoForUniversitas(postulant) {
+  const idPostulant = postulant?._id ?? postulant?.id;
+  const refUser = postulant?.postulantId;
+  const idUser = refUser != null ? (refUser._id ?? refUser) : null;
+  const ids = [...new Set([idPostulant, idUser].filter(Boolean))];
+  if (ids.length === 0) return null;
+  const profiles = await PostulantProfile.find({ postulantId: { $in: ids } })
+    .select("studentCode")
+    .sort({ updatedAt: -1 })
+    .lean();
   for (const p of profiles) {
     const doc = (p?.studentCode != null && p.studentCode !== "") ? String(p.studentCode).trim() : "";
     if (doc) return doc;
@@ -394,7 +366,7 @@ export const consultaInfEstudianteUniversitas = async (req, res) => {
       .populate("gender", "name value")
       .lean();
     if (!postulant) return res.status(404).json({ message: "postulant not found" });
-    const documento = await getDocumentoForUniversitas(id);
+    const documento = await getDocumentoForUniversitas(postulant);
     if (!documento) return res.status(400).json({ message: "El postulante debe tener un perfil con studentCode para consultar Universitas." });
     const universitasData = await consultaInfEstudiante(documento);
     if (!universitasData) return res.status(404).json({ message: "No se encontró información del estudiante en Universitas." });
@@ -473,7 +445,7 @@ export const aplicarInfoUniversitas = async (req, res) => {
     const { id } = req.params;
     const postulantDoc = await Postulant.findById(id).populate("postulantId", "code name email");
     if (!postulantDoc) return res.status(404).json({ message: "postulant not found" });
-    const documento = await getDocumentoForUniversitas(id);
+    const documento = await getDocumentoForUniversitas(postulantDoc);
     if (!documento) return res.status(400).json({ message: "El postulante debe tener un perfil con studentCode para consultar Universitas." });
     const universitasData = await consultaInfEstudiante(documento);
     if (!universitasData) return res.status(404).json({ message: "No se encontró información del estudiante en Universitas." });
@@ -539,55 +511,118 @@ export const aplicarInfoUniversitas = async (req, res) => {
   }
 };
 
-/** Busca programa por codigoprograma o nombreprograma; si no existe, lo crea. */
-async function findOrCreateProgram(codigoprograma, nombreprograma, tipoEstudio) {
+/** tipo_estudio según ficha: PSC = Pregrado, MOF = Posgrado, TCL = Doctorado. */
+function mapTipoEstudioToLevel(tipoEstudio) {
+  const t = (tipoEstudio || "").toString().toUpperCase().trim();
+  if (t === "MOF") return "Maestría";
+  if (t === "TCL") return "Doctorado";
+  return "Pregrado"; // PSC u otro
+}
+
+/**
+ * Busca programa por código (codigoprograma) en la tabla programas. No crea programas: si no existe, retorna null.
+ * Si hay code: busca solo por code. Si no hay code: busca por nombre.
+ */
+async function findProgramByCodeOrName(codigoprograma, nombreprograma) {
   const code = (codigoprograma || "").toString().trim();
   const name = (nombreprograma || "").toString().trim();
-  if (!name) return null;
-  let program = await Program.findOne({
-    $or: [
-      ...(code ? [{ code }] : []),
-      { name: { $regex: new RegExp(`^${escapeRegex(name)}$`, "i") } },
-    ],
-  }).lean();
-  if (!program) {
-    const level = (tipoEstudio || "").toUpperCase() === "MOF" ? "Maestría" : "Pregrado";
-    const created = await Program.create({
-      code: code || undefined,
-      name,
-      level,
-      status: "active",
-    });
-    program = created.toObject();
+  if (!name && !code) return null;
+  if (code) {
+    const program = await Program.findOne({ code }).lean();
+    if (program) return program;
   }
-  return program;
+  if (name) {
+    const program = await Program.findOne({ name: { $regex: new RegExp(`^${escapeRegex(name)}$`, "i") } }).lean();
+    if (program) return program;
+  }
+  return null;
+}
+
+/**
+ * Agrupa ítems de Universitas por codigoprograma. Si el mismo código aparece como "en curso" (N) y "finalizado" (S),
+ * se prefiere "en curso" para no marcar como finalizado un programa que sigue en curso.
+ * @returns {Map<string, { egresado: boolean, nombre: string, tipoEstudio: string, codFacultad, nombreFacultad: string }>}
+ */
+function groupUniversitasItemsByCode(universitasItems) {
+  const byCode = new Map();
+  for (const item of universitasItems || []) {
+    const code = (item.codigoprograma ?? item.codigoPrograma ?? "").toString().trim();
+    if (!code) continue;
+    const egresado = (item.egresado ?? item.Egresado ?? "").toString().toUpperCase() === "S";
+    const nombre = (item.nombreprograma ?? item.nombrePrograma ?? item.nombreplan ?? item.nombrePlan ?? "").toString().trim();
+    const tipoEstudio = item.tipo_estudio ?? item.tipoEstudio ?? "";
+    const codFacultad = item.cod_facultad ?? item.codFacultad;
+    const nombreFacultad = (item.facultad ?? item.nombreFacultad ?? "").toString().trim();
+    const existing = byCode.get(code);
+    if (!existing) {
+      byCode.set(code, { egresado, nombre, tipoEstudio, codFacultad, nombreFacultad });
+    } else if (!egresado) {
+      existing.egresado = false;
+    }
+  }
+  return byCode;
+}
+
+/**
+ * Busca Faculty por code (cod_facultad de Universitas) en la tabla faculties; obtiene el id y devuelve la relación
+ * ProgramFaculty (programId + facultyId). Si existe cod_facultad y la facultad existe pero no hay ProgramFaculty,
+ * se crea para poder asociar programFacultyId en la formación en curso (así no queda como "registrada" sino con facultad).
+ */
+async function findOrCreateProgramFacultyForProgram(programId, codFacultad, nombreFacultad, userLabel = "api") {
+  try {
+    if (!programId) return null;
+    const codeStr = (codFacultad != null && codFacultad !== "") ? String(codFacultad).trim() : "";
+    const nameStr = (nombreFacultad != null && nombreFacultad !== "") ? String(nombreFacultad).trim().substring(0, 255) : "";
+    let faculty = null;
+    if (codeStr) {
+      faculty = await Faculty.findOne({ code: codeStr }).select("_id code").lean();
+    }
+    if (!faculty && nameStr) {
+      faculty = await Faculty.findOne({ name: { $regex: new RegExp(`^${escapeRegex(nameStr)}$`, "i") } }).select("_id code").lean();
+    }
+    if (!faculty) return null;
+    let pf = await ProgramFaculty.findOne({ programId, facultyId: faculty._id }).select("_id").lean();
+    if (!pf) {
+      const created = await ProgramFaculty.create({
+        programId,
+        facultyId: faculty._id,
+        code: codeStr || faculty.code || undefined,
+        status: "ACTIVE",
+        dateCreation: new Date(),
+        userCreator: userLabel,
+      });
+      pf = { _id: created._id };
+    }
+    return pf._id;
+  } catch (err) {
+    console.error("findOrCreateProgramFacultyForProgram:", err.message);
+    return null;
+  }
 }
 
 /**
  * Compara programas actuales del perfil (enrolled + graduate) con los ítems académicos de Universitas.
- * Devuelve array de { label, valorActual, valorNuevo } para mostrar en el modal.
+ * Usa codigoprograma para comparar (no solo nombre). Misma regla: agrupar por code y preferir "en curso" si el mismo código aparece N y S.
+ * Devuelve array de { label, valorActual, valorNuevo } para mostrar en el modal (se muestran nombres para lectura).
  */
 function comparePostulantAcademicWithUniversitas(enrolledPrograms, graduatePrograms, universitasItems) {
   const changes = [];
-  const enrolledNames = (enrolledPrograms || [])
-    .map((e) => e.programId?.name || e.programId?.code)
-    .filter(Boolean);
-  const graduateNames = (graduatePrograms || [])
-    .map((g) => g.programId?.name || g.programId?.code)
-    .filter(Boolean);
-  const uniEnrolled = (universitasItems || []).filter((i) => (i.egresado || "").toString().toUpperCase() === "N");
-  const uniGraduate = (universitasItems || []).filter((i) => (i.egresado || "").toString().toUpperCase() === "S");
-  const uniEnrolledNames = uniEnrolled.map((i) => i.nombreprograma || i.nombreplan || "—").filter(Boolean);
-  const uniGraduateNames = uniGraduate.map((i) => i.nombreprograma || i.nombreplan || "—").filter(Boolean);
-  const actualEnrolled = [...new Set(enrolledNames)].join(", ") || "—";
-  const nuevoEnrolled = [...new Set(uniEnrolledNames)].join(", ") || "—";
-  const actualGraduate = [...new Set(graduateNames)].join(", ") || "—";
-  const nuevoGraduate = [...new Set(uniGraduateNames)].join(", ") || "—";
-  if (actualEnrolled !== nuevoEnrolled) {
-    changes.push({ label: "Programas en curso", valorActual: actualEnrolled, valorNuevo: nuevoEnrolled });
+  const byCode = groupUniversitasItemsByCode(universitasItems);
+  const actualEnrolledCodes = [...new Set((enrolledPrograms || []).map((e) => e.programId?.code).filter(Boolean))].sort().join(", ");
+  const actualGraduateCodes = [...new Set((graduatePrograms || []).map((g) => g.programId?.code).filter(Boolean))].sort().join(", ");
+  const nuevoEnrolledEntries = [...byCode.entries()].filter(([, v]) => !v.egresado);
+  const nuevoGraduateEntries = [...byCode.entries()].filter(([, v]) => v.egresado);
+  const nuevoEnrolledCodes = nuevoEnrolledEntries.map(([code]) => code).sort().join(", ");
+  const nuevoGraduateCodes = nuevoGraduateEntries.map(([code]) => code).sort().join(", ");
+  const actualEnrolledNames = [...new Set((enrolledPrograms || []).map((e) => e.programId?.name || e.programId?.code).filter(Boolean))].join(", ") || "—";
+  const actualGraduateNames = [...new Set((graduatePrograms || []).map((g) => g.programId?.name || g.programId?.code).filter(Boolean))].join(", ") || "—";
+  const nuevoEnrolledNames = [...new Set(nuevoEnrolledEntries.map(([, v]) => v.nombre || "—").filter((n) => n !== "—"))].join(", ") || "—";
+  const nuevoGraduateNames = [...new Set(nuevoGraduateEntries.map(([, v]) => v.nombre || "—").filter((n) => n !== "—"))].join(", ") || "—";
+  if (actualEnrolledCodes !== nuevoEnrolledCodes) {
+    changes.push({ label: "Programas en curso", valorActual: actualEnrolledNames, valorNuevo: nuevoEnrolledNames });
   }
-  if (actualGraduate !== nuevoGraduate) {
-    changes.push({ label: "Programas finalizados", valorActual: actualGraduate, valorNuevo: nuevoGraduate });
+  if (actualGraduateCodes !== nuevoGraduateCodes) {
+    changes.push({ label: "Programas finalizados", valorActual: actualGraduateNames, valorNuevo: nuevoGraduateNames });
   }
   return changes;
 }
@@ -603,7 +638,7 @@ export const consultaInfAcademicaUniversitas = async (req, res) => {
     const { id } = req.params;
     const postulant = await Postulant.findById(id).select("_id postulantId").lean();
     if (!postulant) return res.status(404).json({ message: "postulant not found" });
-    documento = await getDocumentoForUniversitas(id);
+    documento = await getDocumentoForUniversitas(postulant);
     if (!documento) return res.status(400).json({ message: "El postulante debe tener un perfil con studentCode para consultar Universitas." });
 
     let universitasItems;
@@ -625,7 +660,17 @@ export const consultaInfAcademicaUniversitas = async (req, res) => {
     const profileFilter = postulant.postulantId
       ? { $or: [{ postulantId: id }, { postulantId: postulant.postulantId }] }
       : { postulantId: id };
-    const profile = await PostulantProfile.findOne(profileFilter).select("_id").lean();
+    const profileIdFromReq = req.query.profileId ?? req.body?.profileId;
+    let profile = null;
+    if (profileIdFromReq) {
+      const pid = typeof profileIdFromReq === "string" ? profileIdFromReq.trim() : profileIdFromReq;
+      if (pid && mongoose.Types.ObjectId.isValid(pid)) {
+        profile = await PostulantProfile.findOne({ _id: new mongoose.Types.ObjectId(pid), ...profileFilter }).select("_id").lean();
+      }
+    }
+    if (!profile) {
+      profile = await PostulantProfile.findOne(profileFilter).select("_id").lean();
+    }
     let enrolledPrograms = [];
     let graduatePrograms = [];
     if (profile) {
@@ -646,7 +691,7 @@ export const consultaInfAcademicaUniversitas = async (req, res) => {
 
 /**
  * PUT aplica la información académica de Universitas al perfil del postulante.
- * Crea/asegura ProfileEnrolledProgram (egresado N) y ProfileGraduateProgram (egresado S) por cada ítem de Universitas.
+ * Reemplaza programas en curso y finalizados por los que devuelve Universitas (mismo perfil que se consulta si se envía profileId).
  */
 export const aplicarInfoAcademicaUniversitas = async (req, res) => {
   let documento = null;
@@ -654,7 +699,7 @@ export const aplicarInfoAcademicaUniversitas = async (req, res) => {
     const { id } = req.params;
     const postulant = await Postulant.findById(id).select("_id postulantId").lean();
     if (!postulant) return res.status(404).json({ message: "postulant not found" });
-    documento = await getDocumentoForUniversitas(id);
+    documento = await getDocumentoForUniversitas(postulant);
     if (!documento) return res.status(400).json({ message: "El postulante debe tener un perfil con studentCode para consultar Universitas." });
 
     let universitasItems;
@@ -666,6 +711,8 @@ export const aplicarInfoAcademicaUniversitas = async (req, res) => {
         documento,
       });
     }
+    
+    
     if (!universitasItems || universitasItems.length === 0) {
       return res.status(404).json({
         message: "No se encontró información académica del estudiante en Universitas.",
@@ -675,7 +722,22 @@ export const aplicarInfoAcademicaUniversitas = async (req, res) => {
     const profileFilter = postulant.postulantId
       ? { $or: [{ postulantId: id }, { postulantId: postulant.postulantId }] }
       : { postulantId: id };
-    let profile = await PostulantProfile.findOne(profileFilter);
+    const profileIdFromReq = req.query.profileId ?? req.body?.profileId;
+    let profile = null;
+    if (profileIdFromReq) {
+      const pid = typeof profileIdFromReq === "string" ? profileIdFromReq.trim() : profileIdFromReq;
+      if (!pid || !mongoose.Types.ObjectId.isValid(pid)) {
+        return res.status(400).json({ message: "profileId inválido." });
+      }
+      profile = await PostulantProfile.findOne({ _id: new mongoose.Types.ObjectId(pid), ...profileFilter });
+      if (!profile) {
+        return res.status(400).json({
+          message: "El profileId no corresponde al postulante o no existe. Usa el perfil que estás viendo.",
+        });
+      }
+    } else {
+      profile = await PostulantProfile.findOne(profileFilter);
+    }
     if (!profile) {
       profile = new PostulantProfile({
         postulantId: id,
@@ -686,32 +748,81 @@ export const aplicarInfoAcademicaUniversitas = async (req, res) => {
       await profile.save();
     }
     const userLabel = req.user?.name || req.user?.email || "api";
-    for (const item of universitasItems) {
-      const egresado = (item.egresado || "").toString().toUpperCase() === "S";
-      const program = await findOrCreateProgram(item.codigoprograma, item.nombreprograma || item.nombreplan, item.tipo_estudio);
-      if (!program) continue;
-      if (egresado) {
-        const exists = await ProfileGraduateProgram.findOne({ profileId: profile._id, programId: program._id });
-        if (!exists) {
-          await ProfileGraduateProgram.create({
-            profileId: profile._id,
-            programId: program._id,
-            programFacultyId: null,
-          });
-        }
+
+    // Agrupar por codigoprograma y preferir "en curso" si el mismo código aparece N y S. Resolver programa por code en tabla programas (no se crean; si no existe, se informa).
+    const byCode = groupUniversitasItemsByCode(universitasItems);
+    const enrolledList = [];
+    const graduateList = [];
+    const missingPrograms = [];
+    for (const [codigo, data] of byCode) {
+      const program = await findProgramByCodeOrName(codigo, data.nombre);
+      if (!program) {
+        missingPrograms.push({ code: codigo, name: data.nombre || codigo });
+        continue;
+      }
+      const programFacultyId = await findOrCreateProgramFacultyForProgram(program._id, data.codFacultad, data.nombreFacultad, userLabel);
+      const entry = { programId: program._id, programFacultyId: programFacultyId || undefined };
+      if (data.egresado) {
+        graduateList.push(entry);
       } else {
-        const exists = await ProfileEnrolledProgram.findOne({ profileId: profile._id, programId: program._id });
-        if (!exists) {
-          await ProfileEnrolledProgram.create({
-            profileId: profile._id,
-            programId: program._id,
-            programFacultyId: null,
-            dateCreation: new Date(),
-            userCreator: userLabel,
-          });
-        }
+        enrolledList.push(entry);
       }
     }
+    if (missingPrograms.length > 0) {
+      const list = missingPrograms.map((p) => (p.name ? `${p.name} (cód. ${p.code})` : p.code)).join("; ");
+      return res.status(400).json({
+        message: "No existen los siguientes programas en el sistema. Deben darse de alta en la tabla de programas antes de aplicar.",
+        missingPrograms: missingPrograms.map((p) => ({ code: p.code, name: p.name })),
+        detail: list,
+      });
+    }
+    const programIdsEnrolled = enrolledList.map((e) => e.programId);
+    const programIdsGraduate = graduateList.map((e) => e.programId);
+
+    // Quitar del perfil los que ya no vienen en Universitas. Si no trae ningún finalizado, borrar todos los profile_graduate_programs de este perfil.
+    await ProfileEnrolledProgram.deleteMany({
+      profileId: profile._id,
+      programId: { $nin: programIdsEnrolled },
+    });
+    await ProfileGraduateProgram.deleteMany({
+      profileId: profile._id,
+      ...(programIdsGraduate.length > 0 ? { programId: { $nin: programIdsGraduate } } : {}),
+    });
+
+    // Añadir o actualizar programas en curso. Si trae cod_facultad, programFacultyId queda asignado (Faculty por code → ProgramFaculty → relación en perfil).
+    for (const entry of enrolledList) {
+      const exists = await ProfileEnrolledProgram.findOne({ profileId: profile._id, programId: entry.programId });
+      if (!exists) {
+        await ProfileEnrolledProgram.create({
+          profileId: profile._id,
+          programId: entry.programId,
+          programFacultyId: entry.programFacultyId ?? null,
+          dateCreation: new Date(),
+          userCreator: userLabel,
+        });
+      } else if (entry.programFacultyId != null) {
+        await ProfileEnrolledProgram.updateOne(
+          { profileId: profile._id, programId: entry.programId },
+          { $set: { programFacultyId: entry.programFacultyId } }
+        );
+      }
+    }
+    for (const entry of graduateList) {
+      const exists = await ProfileGraduateProgram.findOne({ profileId: profile._id, programId: entry.programId });
+      if (!exists) {
+        await ProfileGraduateProgram.create({
+          profileId: profile._id,
+          programId: entry.programId,
+          programFacultyId: entry.programFacultyId ?? null,
+        });
+      } else if (entry.programFacultyId != null) {
+        await ProfileGraduateProgram.updateOne(
+          { profileId: profile._id, programId: entry.programId },
+          { $set: { programFacultyId: entry.programFacultyId } }
+        );
+      }
+    }
+
     const [enrolledPrograms, graduatePrograms] = await Promise.all([
       ProfileEnrolledProgram.find({ profileId: profile._id }).populate("programId", "name code").lean(),
       ProfileGraduateProgram.find({ profileId: profile._id }).populate("programId", "name code").lean(),
@@ -722,7 +833,11 @@ export const aplicarInfoAcademicaUniversitas = async (req, res) => {
       graduatePrograms,
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    const errMsg = (error && (error.message || error.stack)) || String(error) || "Error al aplicar información académica.";
+    console.error("aplicarInfoAcademicaUniversitas:", errMsg, error);
+    if (!res.headersSent) {
+      res.status(500).json({ message: errMsg });
+    }
   }
 };
 
@@ -800,7 +915,7 @@ export const getPostulantProfileData = async (req, res) => {
       profileProfileVersions,
     ] = await Promise.all([
       ProfileEnrolledProgram.find({ profileId })
-        .populate("programId", "name code")
+        .populate("programId", "name code level")
         .populate({ path: "programFacultyId", select: "code facultyId", populate: { path: "facultyId", select: "name" } })
         .populate("university", "value description")
         .populate("countryId", "name")
@@ -808,7 +923,7 @@ export const getPostulantProfileData = async (req, res) => {
         .populate("cityId", "name")
         .lean(),
       ProfileGraduateProgram.find({ profileId })
-        .populate("programId", "name code")
+        .populate("programId", "name code level")
         .populate({ path: "programFacultyId", select: "code facultyId", populate: { path: "facultyId", select: "name" } })
         .populate("university", "value description")
         .populate("countryId", "name")
@@ -929,7 +1044,7 @@ export const generateHojaVidaPdf = async (req, res) => {
       profileProfileVersions,
     ] = await Promise.all([
       ProfileEnrolledProgram.find({ profileId })
-        .populate("programId", "name code")
+        .populate("programId", "name code level")
         .populate({ path: "programFacultyId", select: "code facultyId", populate: { path: "facultyId", select: "name" } })
         .populate("university", "value description")
         .populate("countryId", "name")
@@ -937,7 +1052,7 @@ export const generateHojaVidaPdf = async (req, res) => {
         .populate("cityId", "name")
         .lean(),
       ProfileGraduateProgram.find({ profileId })
-        .populate("programId", "name code")
+        .populate("programId", "name code level")
         .populate({ path: "programFacultyId", select: "code facultyId", populate: { path: "facultyId", select: "name" } })
         .populate("university", "value description")
         .populate("countryId", "name")
