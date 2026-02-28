@@ -1,5 +1,7 @@
+import bcrypt from "bcryptjs";
 import Postulant from "../models/postulants.schema.js";
 import PostulantProfile from "../models/profile/profile.schema.js";
+import PostulantAcademic from "../models/postulant_academic.schema.js";
 import User from "../../users/user.model.js";
 import PostulantStatusHistory from "../models/logs/postulantLogStatus.schema.js";
 import {
@@ -22,6 +24,7 @@ import Faculty from "../../faculty/model/faculty.model.js";
 import ProgramFaculty from "../../program/model/programFaculty.model.js";
 import { MAX_PROFILES_PER_POSTULANT } from "./postulantProfile.controller.js";
 import { consultaInfEstudiante, consultaInfAcademica } from "../../../services/uxxiIntegration.service.js";
+import { descargarYFiltrarPostulantes } from "../../estudiantesHabilitados/carguePostulantes.sftp.js";
 import Program from "../../program/model/program.model.js";
 import Item from "../../shared/reference-data/models/item.schema.js";
 import Attachment from "../../shared/attachment/attachment.schema.js";
@@ -1465,5 +1468,221 @@ export const uploadProfilePicture = async (req, res) => {
       message: error.message || "Error interno del servidor al subir la foto",
       error: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
+  }
+};
+
+/** Calcula el diff entre el archivo UXXI y la BD sin aplicar cambios.
+ *  Clave de comparación: Excel.identificacion  ↔  PostulantProfile.studentCode
+ */
+async function calcularDiffUxxi() {
+  // 1. Parsear el archivo SFTP
+  const filasExcel = await descargarYFiltrarPostulantes();
+
+  // Set de identificaciones únicas en el archivo (normalizadas)
+  const idEnArchivo = new Set(
+    filasExcel.map(f => String(f.identificacion || "").trim()).filter(Boolean)
+  );
+  console.log(`[calcularDiffUxxi] Identificaciones únicas en archivo: ${idEnArchivo.size}`);
+
+  // 2. Obtener todos los studentCodes que ya existen en PostulantProfile
+  //    con sus datos de usuario para poder construir nombres y para la inactivación
+  const profiles = await PostulantProfile
+    .find({ studentCode: { $exists: true, $ne: "" } })
+    .select("studentCode postulantId")
+    .populate({
+      path: "postulantId",
+      select: "postulantId",
+      populate: { path: "postulantId", model: "User", select: "name email estado _id" },
+    })
+    .lean();
+
+  console.log(`[calcularDiffUxxi] Perfiles en BD: ${profiles.length}`);
+
+  // Mapa studentCode (normalizado) → profile (con info de usuario)
+  const perfilPorCode = new Map(
+    profiles.map(p => [String(p.studentCode || "").trim().toLowerCase(), p])
+  );
+
+  // 3. Diff: qué hay en el archivo que no está en BD
+  const porCrear   = [];
+  const existentes = [];
+  const vistos     = new Set();
+
+  for (const fila of filasExcel) {
+    const id = String(fila.identificacion || "").trim();
+    if (!id || vistos.has(id.toLowerCase())) continue;
+    vistos.add(id.toLowerCase());
+
+    if (perfilPorCode.has(id.toLowerCase())) {
+      existentes.push({ identificacion: id });
+    } else {
+      porCrear.push({
+        identificacion: id,
+        nombre:  [fila.nombres, fila.apellidos].filter(Boolean).join(" ").trim() || id,
+        correo:  fila.correo,
+        programa: fila.codProgramaCurso,
+      });
+    }
+  }
+
+  // 4. Diff inverso: qué hay en BD que ya no está en el archivo → inactivar
+  const porInactivar = [];
+  for (const p of profiles) {
+    const code = String(p.studentCode || "").trim();
+    if (!code || idEnArchivo.has(code)) continue;
+
+    // Obtener el User para verificar que aún esté activo
+    const user = p.postulantId?.postulantId; // User populado
+    if (user && user.estado !== false) {
+      porInactivar.push({
+        identificacion: code,
+        nombre:  user.name || code,
+        userId:  user._id,
+      });
+    }
+  }
+
+  console.log(`[calcularDiffUxxi] Por crear: ${porCrear.length} | Por inactivar: ${porInactivar.length} | Ya en BD: ${existentes.length}`);
+
+  return {
+    totalArchivo:  filasExcel.length,
+    totalBD:       profiles.length,
+    porCrear,
+    existentes,
+    porInactivar,
+    filasExcel,
+    perfilPorCode,
+  };
+}
+
+/**
+ * POST /postulants/preview-sincronizar-uxxi
+ * Solo lee el archivo y la BD, devuelve el resumen sin modificar nada.
+ */
+export const previewSincronizarUxxi = async (req, res) => {
+  console.log("[previewSincronizarUxxi] Calculando diff...");
+  try {
+    const diff = await calcularDiffUxxi();
+    res.json({
+      totalArchivo:         diff.totalArchivo,
+      totalBD:              diff.totalBD,
+      porCrear:             diff.porCrear,
+      porInactivar:         diff.porInactivar,
+      existentes:           diff.existentes.length,
+      cantidadPorCrear:     diff.porCrear.length,
+      cantidadPorInactivar: diff.porInactivar.length,
+    });
+  } catch (err) {
+    console.error("[previewSincronizarUxxi] ERROR:", err.message);
+    res.status(500).json({ message: "Error al calcular preview", error: err.message });
+  }
+};
+
+/**
+ * POST /postulants/sincronizar-uxxi
+ * Aplica los cambios: crea los nuevos (con studentCode = identificacion),
+ * inactiva los que ya no aparecen en el archivo (por studentCode).
+ */
+export const sincronizarPostulantesUxxi = async (req, res) => {
+  const log = (...args) => console.log("[sincronizarUxxi]", ...args);
+  log("── INICIO ──────────────────────────────────────────");
+
+  try {
+    const diff = await calcularDiffUxxi();
+    const { filasExcel, porCrear, porInactivar, perfilPorCode } = diff;
+
+    if (filasExcel.length === 0) {
+      return res.json({ message: "El archivo UXXI está vacío.", creados: 0, inactivados: 0, errores: [] });
+    }
+
+    // 1. Crear los que no existen en BD (identificados por studentCode ausente)
+    let creados = 0;
+    const errores = [];
+
+    for (const item of porCrear) {
+      const id    = String(item.identificacion || "").trim();
+      const fila  = filasExcel.find(f => String(f.identificacion || "").trim() === id);
+      const email = String(fila?.correo || "").toLowerCase().trim();
+
+      if (!id) continue;
+
+      // Doble chequeo: no crear si ya apareció en este run (duplicados en el Excel)
+      if (perfilPorCode.has(id.toLowerCase())) continue;
+
+      try {
+        const fullName     = item.nombre || `Estudiante ${id}`;
+        const passwordHash = await bcrypt.hash(id, 10);
+
+        const nuevoUser = await User.create({
+          name:                fullName,
+          email:               email || `${id}@urosario.edu.co`,
+          code:                id,
+          password:            passwordHash,
+          modulo:              "estudiante",
+          estado:              true,
+          debeCambiarPassword: true,
+          directorioActivo:    false,
+        });
+
+        const nuevoPostulant = await Postulant.create({
+          postulantId:       nuevoUser._id,
+          alternateEmail:    email || `${id}@urosario.edu.co`,
+          phone:             fila?.celular || "",
+          fillingPercentage: 0,
+          filled:            false,
+        });
+
+        // studentCode = identificacion (campo que se usa para la comparación)
+        await PostulantProfile.create({
+          postulantId:  nuevoPostulant._id,
+          studentCode:  id,
+          filled:       false,
+          dateCreation: new Date(),
+          userCreator:  "sincronizacion-uxxi",
+        });
+
+        await PostulantAcademic.create({
+          postulant:            nuevoPostulant._id,
+          current_program_code: fila?.codProgramaCurso || "",
+          current_program_name: fila?.tituloCurso      || "",
+        });
+
+        // Marcar en el mapa local para evitar duplicado si el Excel repite la id
+        perfilPorCode.set(id.toLowerCase(), { studentCode: id });
+
+        creados++;
+        log(`  [ALTA] ${id} — ${fullName}`);
+      } catch (err) {
+        const msg = err.code === 11000
+          ? `Duplicado para ${id} (posible email o studentCode repetido)`
+          : err.message;
+        log(`  [ERROR] ${id}: ${msg}`);
+        errores.push({ identificacion: id, error: msg });
+      }
+    }
+
+    // 2. Inactivar los que ya no están en el archivo (porInactivar ya trae userId)
+    let inactivados = 0;
+    for (const item of porInactivar) {
+      if (item.userId) {
+        await User.updateOne({ _id: item.userId }, { $set: { estado: false } });
+        inactivados++;
+        log(`  [BAJA] ${item.identificacion}`);
+      }
+    }
+
+    log(`── FIN: ${creados} creados, ${inactivados} inactivados, ${errores.length} errores ─────`);
+
+    res.json({
+      message:     `Sincronización completada: ${creados} creados, ${inactivados} inactivados, ${errores.length} errores.`,
+      creados,
+      inactivados,
+      errores,
+      totalArchivo: filasExcel.length,
+    });
+
+  } catch (err) {
+    console.error("[sincronizarUxxi] ERROR FATAL:", err.message, err.stack);
+    res.status(500).json({ message: "Error en sincronización UXXI", error: err.message });
   }
 };

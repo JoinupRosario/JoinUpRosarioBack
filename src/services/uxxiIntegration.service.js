@@ -215,6 +215,8 @@ export const consultaInfAcademica = async (documento) => {
   const url = baseUrl + "/uxxi-URO/Proxy/Consulta_inf_academica";
   const body = JSON.stringify({ documento: docStr });
 
+  console.log(`[OSB Acad] POST ${url} — doc=${docStr}`);
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), getTimeout());
@@ -225,6 +227,7 @@ export const consultaInfAcademica = async (documento) => {
       signal: controller.signal,
     });
     clearTimeout(timeout);
+    console.log(`[OSB Acad] doc=${docStr} → HTTP ${res.status}`);
 
     const contentType = res.headers.get("content-type") || "";
     const text = await res.text();
@@ -246,10 +249,17 @@ export const consultaInfAcademica = async (documento) => {
       const first = statements[0];
       const resultSet = first?.resultSet;
       const items = resultSet?.items;
-      if (Array.isArray(items) && items.length > 0) return items;
+      if (Array.isArray(items) && items.length > 0) {
+        console.log(`[OSB Acad] doc=${docStr} → ${items.length} planes`);
+        return items;
+      }
     }
     // Alternativa: resultSet en la raíz
-    if (data.resultSet && Array.isArray(data.resultSet.items)) return data.resultSet.items;
+    if (data.resultSet && Array.isArray(data.resultSet.items)) {
+      console.log(`[OSB Acad] doc=${docStr} → ${data.resultSet.items.length} planes (raíz)`);
+      return data.resultSet.items;
+    }
+    console.warn(`[OSB Acad] doc=${docStr} → sin planes en la respuesta. Keys: ${Object.keys(data).join(', ')}`);
     return [];
   } catch (err) {
     if (err.name === "AbortError") {
