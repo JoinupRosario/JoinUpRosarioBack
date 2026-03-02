@@ -136,15 +136,26 @@ export async function descargarYFiltrarPostulantes(codigoPrograma) {
     codProgramaCurso2: normalize(row["COD_PROGRAMA_CURSO2"] || ""),
     tituloCurso:       normalize(row["TITULO_PROGRAMA_CURSO"] || row["TITULO_PROGRAMA_CURSO2"] || ""),
     identificacion:    normalize(row["IDENTIFICACION"]),
-    codigoEstudiante:  normalize(row["CODIGO"] || ""),   // código académico (matrícula)
+    codigoEstudiante:  normalize(row["CODIGO"] || ""),   // código académico (academicId en perfil)
     correo:            normalize(row["EMAIL"] || row["CORREO"] || row["MAIL"] || ""),
     nombres:           normalize(row["NOMBRES"]   || row["NOMBRE"]  || ""),
     apellidos:         normalize(row["APELLIDOS"] || row["APELLIDO"]|| ""),
     genero:            normalize(row["GENERO"]    || ""),
-    celular:           normalize(row["CELULAR"]   || ""),
-    sede:              normalize(row["SEDE"]      || row["COD_SEDE"]|| ""),
+    celular:           normalize(row["CELULAR"]   || row["TELEFONO"] || ""),
+    sede:              normalize(row["SEDE"]      || row["COD_SEDE"] || ""),
     periodo:           normalize(row["PERIODO"]   || ""),
     tipoPractica:      normalize(row["TIPO_PRACTICA"] || ""),
+    // Ubicación nacimiento
+    paisNacimiento:    normalize(row["PAIS_NACIMIENTO"]  || row["COD_PAIS_NAC"]  || ""),
+    deptoNacimiento:   normalize(row["DEPTO_NACIMIENTO"] || row["COD_DEPTO_NAC"] || ""),
+    ciudadNacimiento:  normalize(row["CIUDAD_NACIMIENTO"]|| row["COD_CIUDAD_NAC"]|| ""),
+    // Ubicación residencia
+    paisResidencia:    normalize(row["PAIS_RESIDENCIA"]  || row["COD_PAIS_RES"]  || ""),
+    deptoResidencia:   normalize(row["DEPTO_RESIDENCIA"] || row["COD_DEPTO_RES"] || ""),
+    ciudadResidencia:  normalize(row["CIUDAD_RESIDENCIA"]|| row["COD_CIUDAD_RES"]|| ""),
+    // Otros datos personales
+    direccion:         normalize(row["DIRECCION"] || row["DIRECCION_RESIDENCIA"] || ""),
+    fechaNacimiento:   normalize(row["FECHA_NACIMIENTO"] || row["FECHA_NAC"] || ""),
   }));
 
   if (codigoPrograma) {
