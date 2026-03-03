@@ -4,7 +4,11 @@ import { buildSearchRegex } from "../../utils/searchUtils.js";
 const POPULATE_FIELDS = [
   { path: "periodo",  select: "codigo tipo estado" },
   { path: "facultad", select: "name code" },
-  { path: "programas", select: "name code level labelLevel" },
+  {
+    path: "programas",
+    select: "code activo programId",
+    populate: { path: "programId", select: "name code level labelLevel" },
+  },
   { path: "asignaturasRequeridas.asignatura", select: "nombreAsignatura codAsignatura" },
 ];
 

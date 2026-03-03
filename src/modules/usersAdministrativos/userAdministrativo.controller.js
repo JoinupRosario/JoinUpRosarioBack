@@ -233,29 +233,47 @@ export const actualizarUserAdministrativo = async (req, res) => {
 export const obtenerUsersAdministrativos = async (req, res) => {
   try {
     const { estado, search } = req.query;
+    const page  = Math.max(1, parseInt(req.query.page  || '1',  10));
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit || '15', 10)));
+    const skip  = (page - 1) * limit;
+
     let filtro = {};
 
-    if (estado && estado !== 'todos') {
-      filtro.estado = estado;
+    // Filtro por estado (true/false o string 'true'/'false')
+    if (estado !== undefined && estado !== 'todos' && estado !== '') {
+      filtro.estado = estado === 'true' || estado === true;
     }
 
-    if (search) {
-      filtro.$or = [
-        { nombres: { $regex: search, $options: 'i' } },
-        { apellidos: { $regex: search, $options: 'i' } },
-        { identificacion: { $regex: search, $options: 'i' } },
-        { 'user.email': { $regex: search, $options: 'i' } }
+    // Búsqueda por nombre, apellidos e identificación (campos directos)
+    if (search && search.trim()) {
+      const re = { $regex: search.trim(), $options: 'i' };
+      const baseOr = [
+        { nombres:       re },
+        { apellidos:     re },
+        { identificacion: re },
       ];
+      // Email está en la colección User → buscar IDs coincidentes primero
+      const usersConEmail = await User.find({ email: re }).select('_id').lean();
+      if (usersConEmail.length > 0) {
+        baseOr.push({ user: { $in: usersConEmail.map(u => u._id) } });
+      }
+      filtro.$or = baseOr;
     }
 
-    const usersAdministrativos = await UserAdministrativo.find(filtro)
-      .populate('user', 'name email estado modulo directorioActivo')
-      .populate('roles.rol', 'nombre estado')
-      .populate('sucursal', 'nombre codigo')
-      .populate('tipoIdentificacion', 'value description')
-      .populate('programas.program', 'name code level')
-      .sort({ createdAt: -1 });
+    const [total, usersAdministrativos] = await Promise.all([
+      UserAdministrativo.countDocuments(filtro),
+      UserAdministrativo.find(filtro)
+        .populate('user', 'name email estado modulo directorioActivo')
+        .populate('roles.rol', 'nombre estado')
+        .populate('sucursal', 'nombre codigo')
+        .populate('tipoIdentificacion', 'value description')
+        .populate('programas.program', 'name code level')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+    ]);
 
+    // Agregar sucursales desde UserSucursal
     const userIds = [...new Set(usersAdministrativos.map((u) => u.user?._id || u.user).filter(Boolean))];
     const sucursalesByUser = new Map();
     if (userIds.length > 0) {
@@ -270,6 +288,7 @@ export const obtenerUsersAdministrativos = async (req, res) => {
         sucursalesByUser.set(uid, arr);
       }
     }
+
     const data = usersAdministrativos.map((u) => {
       const plain = u.toObject ? u.toObject() : { ...u };
       const uid = (u.user?._id || u.user)?.toString();
@@ -280,7 +299,12 @@ export const obtenerUsersAdministrativos = async (req, res) => {
     res.json({
       success: true,
       data,
-      total: data.length
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+      },
     });
 
   } catch (error) {

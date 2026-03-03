@@ -4,6 +4,7 @@ import {
   getPostulantById,
   getPostulantProfileData,
   generateHojaVidaPdf,
+  canGenerateCartaPresentacion,
   generateCartaPresentacionPdf,
   consultaInfEstudianteUniversitas,
   aplicarInfoUniversitas,
@@ -14,6 +15,8 @@ import {
   createPostulant,
   uploadProfilePicture,
   togglePostulantEstado,
+  previewSincronizarUxxi,
+  sincronizarPostulantesUxxi,
 } from "../controllers/postulant.controller.js";
 import {
   getProfilesByPostulantId,
@@ -56,6 +59,8 @@ const router = express.Router();
 router.use(verifyToken);
 
 // Rutas específicas primero (antes de las rutas con parámetros)
+router.post("/preview-sincronizar-uxxi", previewSincronizarUxxi);
+router.post("/sincronizar-uxxi", sincronizarPostulantesUxxi);
 router.post("/create", createPostulant);
 router.put("/update/:id", updatePostulant);
 
@@ -95,6 +100,7 @@ router.delete("/:id/profiles/:profileId/supports/:profileSupportId", deleteProfi
 // Rutas generales después
 router.get("/", getPostulants);
 router.get("/:id/generate-hoja-vida-pdf", generateHojaVidaPdf);
+router.get("/:id/can-generate-carta-presentacion", canGenerateCartaPresentacion);
 router.get("/:id/generate-carta-presentacion-pdf", generateCartaPresentacionPdf);
 router.get("/:id/profile-data", getPostulantProfileData);
 router.get("/:id/consulta-inf-estudiante-universitas", consultaInfEstudianteUniversitas);

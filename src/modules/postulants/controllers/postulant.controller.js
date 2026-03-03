@@ -1,5 +1,7 @@
+import bcrypt from "bcryptjs";
 import Postulant from "../models/postulants.schema.js";
 import PostulantProfile from "../models/profile/profile.schema.js";
+import PostulantAcademic from "../models/postulant_academic.schema.js";
 import User from "../../users/user.model.js";
 import PostulantStatusHistory from "../models/logs/postulantLogStatus.schema.js";
 import {
@@ -20,12 +22,18 @@ import {
 } from "../models/profile/index.js";
 import Faculty from "../../faculty/model/faculty.model.js";
 import ProgramFaculty from "../../program/model/programFaculty.model.js";
+import Country from "../../shared/location/models/country.schema.js";
+import State from "../../shared/location/models/state.schema.js";
+import City from "../../shared/location/models/city.schema.js";
 import { MAX_PROFILES_PER_POSTULANT } from "./postulantProfile.controller.js";
 import { consultaInfEstudiante, consultaInfAcademica } from "../../../services/uxxiIntegration.service.js";
+import { descargarYFiltrarPostulantes } from "../../estudiantesHabilitados/carguePostulantes.sftp.js";
 import Program from "../../program/model/program.model.js";
 import Item from "../../shared/reference-data/models/item.schema.js";
 import Attachment from "../../shared/attachment/attachment.schema.js";
 import DocumentParametrization from "../../parametrizacionDocumentos/documentParametrization.schema.js";
+import Periodo from "../../periodos/periodo.model.js";
+import EstudianteHabilitado from "../../estudiantesHabilitados/estudianteHabilitado.model.js";
 import { buildHojaVidaPdf } from "../../../services/hojaVidaPdf.service.js";
 import { buildCartaPresentacionPdf } from "../../../services/cartaPresentacionPdf.service.js";
 import mongoose from "mongoose";
@@ -61,24 +69,29 @@ export const getPostulants = async (req, res) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
-    const { status, search } = req.query;
+    const { status, search, userEstado } = req.query;
 
     const postulantFilter = {};
     if (status && String(status).trim()) postulantFilter.estatePostulant = String(status).trim();
 
+    // Filtrar por User.estado (activos/inactivos) — sin restringir por modulo
+    let allowedUserIds = null; // null = sin restricción de tab
+    if (userEstado !== undefined && userEstado !== "") {
+      const estadoBoolean = userEstado === "true" || userEstado === "1";
+      const usersConEstado = await User.find({ estado: estadoBoolean }).select("_id").lean();
+      allowedUserIds = usersConEstado.map((u) => u._id);
+    }
+
     if (search && String(search).trim()) {
       const term = String(search).trim();
       const regexOpt = { $regex: term, $options: "i" };
+
+      // Búsqueda de usuarios, acotada a los permitidos por el tab si aplica
+      const userSearchFilter = { $or: [{ name: regexOpt }, { email: regexOpt }, { code: regexOpt }] };
+      if (allowedUserIds !== null) userSearchFilter._id = { $in: allowedUserIds };
+
       const [users, profilesWithStudentCode] = await Promise.all([
-        User.find({
-          $or: [
-            { name: regexOpt },
-            { email: regexOpt },
-            { code: regexOpt },
-          ],
-        })
-          .select("_id")
-          .lean(),
+        User.find(userSearchFilter).select("_id").lean(),
         PostulantProfile.find({ studentCode: regexOpt }).select("postulantId").lean(),
       ]);
       const userIds = users.map((u) => u._id);
@@ -88,11 +101,14 @@ export const getPostulants = async (req, res) => {
       if (postulantDocIds.length) orClause.push({ _id: { $in: postulantDocIds } });
       if (orClause.length) postulantFilter.$or = orClause;
       else postulantFilter.postulantId = { $in: [] };
+    } else if (allowedUserIds !== null) {
+      // Sin búsqueda pero con filtro de tab: aplicar directamente
+      postulantFilter.postulantId = { $in: allowedUserIds };
     }
 
     const [postulants, total] = await Promise.all([
       Postulant.find(postulantFilter)
-        .populate("postulantId", "_id name email code")
+        .populate("postulantId", "_id name email code estado")
         .sort({ updatedAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
@@ -131,6 +147,7 @@ export const getPostulants = async (req, res) => {
       updatedAt: p.updatedAt,
       profileCount: countByPostulantId.get(p._id.toString()) ?? 0,
       maxProfilesAllowed: MAX_PROFILES_PER_POSTULANT,
+      user_estado: p.postulantId?.estado ?? true,
       user: p.postulantId
         ? {
             _id: p.postulantId._id,
@@ -138,6 +155,7 @@ export const getPostulants = async (req, res) => {
             lastname: "",
             email: p.postulantId.email || "",
             code: p.postulantId.code || null,
+            estado: p.postulantId.estado ?? true,
           }
         : null,
     }));
@@ -1527,6 +1545,93 @@ export const generateHojaVidaPdf = async (req, res) => {
   }
 };
 
+/**
+ * Comprueba si el estudiante puede generar carta de presentación:
+ * - Solo durante el periodo en que está autorizado para práctica (fechaAutorizacion del periodo activo).
+ * - Debe estar en estudiantes_habilitados con estadoFinal "AUTORIZADO" para ese periodo.
+ * Busca por postulant, user o identificacion (documento), por si el registro solo tiene identificacion.
+ * @returns {{ allowed: boolean, message?: string }}
+ */
+async function checkCanGenerateCartaPresentacion(postulantDocId, userId, identificacion) {
+  const now = new Date();
+  const periodosActivos = await Periodo.find({
+    tipo: "practica",
+    estado: { $in: ["Activo", "activo"] },
+  })
+    .select("_id fechaAutorizacion")
+    .lean();
+  const periodoIds = (periodosActivos || [])
+    .filter((p) => {
+      const ini = p.fechaAutorizacion?.inicio;
+      const fin = p.fechaAutorizacion?.fin;
+      if (ini == null && fin == null) return true;
+      if (ini != null && fin != null) return ini <= now && fin >= now;
+      if (ini != null && fin == null) return ini <= now;
+      if (ini == null && fin != null) return fin >= now;
+      return false;
+    })
+    .map((p) => p._id);
+  if (periodoIds.length === 0) {
+    return {
+      allowed: false,
+      message:
+        "La generación de carta de presentación solo está habilitada durante los periodos de autorización para práctica. No hay un periodo activo en este momento.",
+    };
+  }
+  const orConditions = [];
+  if (postulantDocId) orConditions.push({ postulant: postulantDocId });
+  if (userId) orConditions.push({ user: userId });
+  const idDoc = identificacion != null && String(identificacion).trim() !== "" ? String(identificacion).trim() : null;
+  if (idDoc) orConditions.push({ identificacion: idDoc });
+  if (orConditions.length === 0) {
+    return {
+      allowed: false,
+      message:
+        "No se pudo verificar la habilitación del estudiante (falta postulante o documento).",
+    };
+  }
+  const filter = {
+    periodo: { $in: periodoIds },
+    $and: [
+      { $or: [{ estadoFinal: "AUTORIZADO" }, { estadoCurricular: "AUTORIZADO" }] },
+      { $or: orConditions },
+    ],
+  };
+  const habilitado = await EstudianteHabilitado.findOne(filter).select("_id").lean();
+  if (!habilitado) {
+    return {
+      allowed: false,
+      message:
+        "Solo los estudiantes autorizados para práctica en el periodo actual pueden generar carta de presentación. Si ya finalizó su práctica, debe ser habilitado nuevamente para un nuevo periodo académico.",
+    };
+  }
+  return { allowed: true };
+}
+
+/** GET /postulants/:id/can-generate-carta-presentacion — Indica si el estudiante puede generar carta (autorizado en periodo actual). */
+export const canGenerateCartaPresentacion = async (req, res) => {
+  try {
+    const { id } = req.params;
+    let postulant = await Postulant.findById(id).select("_id postulantId").lean();
+    if (!postulant) postulant = await Postulant.findOne({ postulantId: id }).select("_id postulantId").lean();
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    let identificacion = null;
+    if (postulant.postulantId) {
+      const user = await User.findById(postulant.postulantId).select("code").lean();
+      if (user?.code) identificacion = String(user.code).trim();
+    }
+    const result = await checkCanGenerateCartaPresentacion(
+      postulant._id,
+      postulant.postulantId ?? null,
+      identificacion
+    );
+    return res.json({ allowed: result.allowed, message: result.message || null });
+  } catch (error) {
+    console.error("[canGenerateCartaPresentacion]", error);
+    return res.status(500).json({ message: error.message || "Error al verificar" });
+  }
+};
+
 /** GET /postulants/:id/generate-carta-presentacion-pdf?empresa=...&ciudad=... — Genera y devuelve el PDF de la carta de presentación. */
 export const generateCartaPresentacionPdf = async (req, res) => {
   try {
@@ -1540,6 +1645,20 @@ export const generateCartaPresentacionPdf = async (req, res) => {
     let postulant = await Postulant.findById(id).select("_id postulantId").lean();
     if (!postulant) postulant = await Postulant.findOne({ postulantId: id }).select("_id postulantId").lean();
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+
+    let identificacion = null;
+    if (postulant.postulantId) {
+      const user = await User.findById(postulant.postulantId).select("code").lean();
+      if (user?.code) identificacion = String(user.code).trim();
+    }
+    const check = await checkCanGenerateCartaPresentacion(
+      postulant._id,
+      postulant.postulantId ?? null,
+      identificacion
+    );
+    if (!check.allowed) {
+      return res.status(403).json({ message: check.message || "No está habilitado para generar carta de presentación." });
+    }
 
     const postulantDocId = postulant._id;
     const userId = postulant.postulantId ?? null;
@@ -1737,6 +1856,13 @@ export const updatePostulant = async (req, res) => {
       return res.status(404).json({ message: "postulant not found" });
     }
 
+    // Activar / inactivar el User asociado (toggle de la tabla)
+    if (req.body.user_estado !== undefined) {
+      const nuevoEstadoUser = req.body.user_estado === true || req.body.user_estado === "true";
+      await User.findByIdAndUpdate(postulant.postulantId, { estado: nuevoEstadoUser });
+      return res.json({ message: "Estado del usuario actualizado", user_estado: nuevoEstadoUser });
+    }
+
     const previousStatus = postulant.estatePostulant;
     const newStatus = req.body.estate_postulant ?? req.body.estatePostulant;
 
@@ -1906,5 +2032,596 @@ export const uploadProfilePicture = async (req, res) => {
       message: error.message || "Error interno del servidor al subir la foto",
       error: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
+  }
+};
+
+/** Calcula el diff entre el archivo UXXI y la BD sin aplicar cambios.
+ *  Clave de comparación: Excel.identificacion  ↔  PostulantProfile.studentCode
+ *
+ *  Estrategia optimizada:
+ *  - Query 1: solo los studentCodes (lean, sin populate) → O(n) muy rápido
+ *  - Query 2: solo para los códigos a inactivar → aggregation $lookup acotado
+ *  - Query 1 y el parseo SFTP corren en paralelo
+ */
+async function calcularDiffUxxi() {
+  const t0 = Date.now();
+
+  // 1. SFTP + query lean de códigos en PARALELO ──────────────────────────────
+  const [filasExcel, codesEnBD] = await Promise.all([
+    descargarYFiltrarPostulantes(),
+    // Solo traemos studentCode — sin populate ni campos extra
+    PostulantProfile
+      .find({ studentCode: { $exists: true, $ne: "" } })
+      .select("studentCode")
+      .lean(),
+  ]);
+
+  console.log(`[calcularDiffUxxi] SFTP+DB lean en ${Date.now() - t0}ms | Excel: ${filasExcel.length} | Perfiles BD: ${codesEnBD.length}`);
+
+  // Set de códigos en BD (lookup O(1))
+  const setBD = new Set(codesEnBD.map(p => String(p.studentCode || "").trim().toLowerCase()));
+
+  // Set de identificaciones únicas en el archivo
+  const idEnArchivo = new Set(
+    filasExcel.map(f => String(f.identificacion || "").trim()).filter(Boolean)
+  );
+
+  // Cargar User.code y User.email para detectar usuarios que ya existen en la
+  // colección users aunque no tengan PostulantProfile (evitar duplicado de User)
+  const userCodesRaw  = await User.find({}, { code: 1, email: 1 }).lean();
+  // Mapa code→User._id y email→User._id para poder reusar el _id en la creación de perfil
+  const mapUserByCode  = new Map(userCodesRaw.filter(u => u.code ).map(u => [String(u.code ).trim().toLowerCase(), u._id]));
+  const mapUserByEmail = new Map(userCodesRaw.filter(u => u.email).map(u => [String(u.email).trim().toLowerCase(), u._id]));
+  console.log(`[calcularDiffUxxi] Users en BD: ${userCodesRaw.length}`);
+
+  // 2. Diff directo ──────────────────────────────────────────────────────────
+  const porCrear      = []; // No existe ni en User ni en Profile → crear todo
+  const porCompletar  = []; // Existe en User pero NO en Profile → crear solo Postulant + Profile + dependientes
+  const existentes    = []; // Existe en Profile → ignorar
+  const vistos        = new Set();
+
+  for (const fila of filasExcel) {
+    const id    = String(fila.identificacion || "").trim();
+    const email = String(fila.correo        || "").toLowerCase().trim();
+    if (!id || vistos.has(id.toLowerCase())) continue;
+    vistos.add(id.toLowerCase());
+
+    const enProfile = setBD.has(id.toLowerCase());
+    if (enProfile) {
+      existentes.push({ identificacion: id });
+      continue;
+    }
+
+    // Buscar si ya existe como User (por code o email)
+    const existingUserId = mapUserByCode.get(id.toLowerCase())
+      || (email ? mapUserByEmail.get(email) : null);
+
+    if (existingUserId) {
+      // User existe pero sin perfil → completar solo los documentos dependientes
+      porCompletar.push({
+        identificacion: id,
+        nombre:         [fila.nombres, fila.apellidos].filter(Boolean).join(" ").trim() || id,
+        correo:         fila.correo,
+        programa:       fila.codProgramaCurso,
+        existingUserId, // _id del User ya existente
+      });
+    } else {
+      // Completamente nuevo
+      porCrear.push({
+        identificacion: id,
+        nombre:         [fila.nombres, fila.apellidos].filter(Boolean).join(" ").trim() || id,
+        correo:         fila.correo,
+        programa:       fila.codProgramaCurso,
+      });
+    }
+  }
+
+  // Códigos que están en BD pero ya NO están en el archivo
+  const codesAInactivar = codesEnBD
+    .map(p => String(p.studentCode || "").trim())
+    .filter(code => code && !idEnArchivo.has(code));
+
+  console.log(`[calcularDiffUxxi] Diff en ${Date.now() - t0}ms | porCrear=${porCrear.length} | porCompletar=${porCompletar.length} | codesAInactivar=${codesAInactivar.length}`);
+
+  // 3. Para los que hay que inactivar: obtener userId vía aggregation acotada ─
+  //    Solo procesamos los códigos que realmente van a cambiar.
+  let porInactivar = [];
+  if (codesAInactivar.length > 0) {
+    const t1 = Date.now();
+    // $lookup en una sola query: Profile → Postulant → User
+    const inactivarDocs = await PostulantProfile.aggregate([
+      { $match: { studentCode: { $in: codesAInactivar } } },
+      { $project: { studentCode: 1, postulantId: 1 } },
+      // Profile.postulantId → Postulant._id
+      { $lookup: {
+          from: "postulants",
+          localField: "postulantId",
+          foreignField: "_id",
+          as: "postulant",
+          pipeline: [{ $project: { postulantId: 1 } }],
+      }},
+      { $unwind: { path: "$postulant", preserveNullAndEmptyArrays: false } },
+      // Postulant.postulantId → User._id
+      { $lookup: {
+          from: "users",
+          localField: "postulant.postulantId",
+          foreignField: "_id",
+          as: "user",
+          pipeline: [{ $project: { name: 1, estado: 1 } }],
+      }},
+      { $unwind: { path: "$user", preserveNullAndEmptyArrays: false } },
+      { $match: { "user.estado": { $ne: false } } }, // solo activos
+      { $project: { studentCode: 1, userId: "$user._id", nombre: "$user.name" } },
+    ]);
+
+    porInactivar = inactivarDocs.map(d => ({
+      identificacion: d.studentCode,
+      nombre:         d.nombre || d.studentCode,
+      userId:         d.userId,
+    }));
+    console.log(`[calcularDiffUxxi] Aggregation inactivar en ${Date.now() - t1}ms → ${porInactivar.length} usuarios activos`);
+  }
+
+  // perfilPorCode para el paso de creación (solo necesitamos saber si existe)
+  const perfilPorCode = setBD;
+
+  console.log(`[calcularDiffUxxi] TOTAL ${Date.now() - t0}ms`);
+
+  return {
+    totalArchivo:  filasExcel.length,
+    totalBD:       codesEnBD.length,
+    porCrear,
+    porCompletar,
+    existentes,        // array con { identificacion } — para la fase de actualización
+    porInactivar,
+    filasExcel,
+    perfilPorCode, // Set — .has(id.toLowerCase())
+  };
+}
+
+/**
+ * Carga en memoria todos los catálogos necesarios para el mapeo de datos del Excel.
+ * Se llama UNA sola vez antes del loop de creación para evitar miles de queries.
+ */
+async function buildCatalogosUxxi() {
+  // Géneros L_GENDER: H→M, F→F, X→NB, T→T
+  const genderItems = await Item.find({ listId: "L_GENDER", status: "ACTIVE" }).lean();
+  const genderMap = new Map(genderItems.map(i => [String(i.value || "").toUpperCase(), i._id]));
+  // Excel usa H para Masculino (value "M" en BD)
+  const excelGenderMap = {
+    H: genderMap.get("M"),
+    F: genderMap.get("F"),
+    X: genderMap.get("NB"),
+    T: genderMap.get("T"),
+  };
+
+  // Países: isoNumeric → _id
+  const countries = await Country.find({}).select("_id isoNumeric").lean();
+  const countryByIso = new Map(
+    countries.filter(c => c.isoNumeric != null).map(c => [Number(c.isoNumeric), c._id])
+  );
+
+  // Estados: dianCode (string, p.ej "05") → _id
+  const states = await State.find({}).select("_id dianCode").lean();
+  const stateByDian = new Map(
+    states.filter(s => s.dianCode).map(s => [String(s.dianCode).trim(), s._id])
+  );
+
+  // Ciudades: codDian → _id  (codDian es el compuesto de 5 dígitos)
+  const cities = await City.find({}).select("_id codDian").lean();
+  const cityByCodDian = new Map(
+    cities.filter(c => c.codDian).map(c => [String(c.codDian).trim(), c._id])
+  );
+
+  // ProgramFaculty: code → { _id, programId }
+  const programFaculties = await ProgramFaculty.find({ activo: "SI" })
+    .select("_id code programId")
+    .lean();
+  const pfByCode = new Map(
+    programFaculties.map(pf => [String(pf.code || "").trim().toUpperCase(), pf])
+  );
+
+  return { excelGenderMap, countryByIso, stateByDian, cityByCodDian, pfByCode };
+}
+
+/** Convierte el código de departamento (dianCode) + código de ciudad del Excel al codDian completo de 5 dígitos.
+ *  Ejemplo: dept="23", city="1" → "23001"; dept="23", city="568" → "23568" */
+function buildCodDian(deptCode, cityCode) {
+  if (!deptCode || !cityCode) return null;
+  const dept = String(deptCode).trim();
+  const city = String(cityCode).trim();
+  if (!dept || !city) return null;
+  // El cod DIAN de ciudad tiene 5 dígitos: los primeros 2 son el depto, los últimos 3 la ciudad
+  const cityPart = city.padStart(3, "0");
+  return `${dept}${cityPart}`;
+}
+
+/**
+ * POST /postulants/preview-sincronizar-uxxi
+ * Solo lee el archivo y la BD, devuelve el resumen sin modificar nada.
+ */
+export const previewSincronizarUxxi = async (req, res) => {
+  console.log("[previewSincronizarUxxi] Calculando diff...");
+  try {
+    const diff = await calcularDiffUxxi();
+    res.json({
+      totalArchivo:           diff.totalArchivo,
+      totalBD:                diff.totalBD,
+      porCrear:               diff.porCrear,
+      porCompletar:           diff.porCompletar,
+      porInactivar:           diff.porInactivar,
+      existentes:             diff.existentes.length,
+      cantidadExistentes:     diff.existentes.length,
+      cantidadPorCrear:       diff.porCrear.length,
+      cantidadPorCompletar:   diff.porCompletar.length,
+      cantidadPorInactivar:   diff.porInactivar.length,
+    });
+  } catch (err) {
+    console.error("[previewSincronizarUxxi] ERROR:", err.message);
+    res.status(500).json({ message: "Error al calcular preview", error: err.message });
+  }
+};
+
+/**
+ * POST /postulants/sincronizar-uxxi
+ * Aplica los cambios: crea los nuevos (con studentCode = identificacion),
+ * inactiva los que ya no aparecen en el archivo (por studentCode).
+ */
+export const sincronizarPostulantesUxxi = async (req, res) => {
+  const CHUNK = 50; // registros por lote de creación
+  const log   = (...args) => console.log("[sincronizarUxxi]", ...args);
+  log("── INICIO ──────────────────────────────────────────");
+
+  try {
+    // ── Email del usuario logueado (para userCreator) ────────────────────────
+    let userCreatorEmail = "sincronizacion-uxxi";
+    if (req.user?.id) {
+      const userLogueado = await User.findById(req.user.id).select("email").lean();
+      if (userLogueado?.email) userCreatorEmail = userLogueado.email;
+    }
+    log(`[INICIO] Ejecutado por: ${userCreatorEmail}`);
+
+    // ── Diff + catálogos en paralelo ────────────────────────────────────────────
+    const [diff, catalogos] = await Promise.all([
+      calcularDiffUxxi(),
+      buildCatalogosUxxi(),
+    ]);
+    const { filasExcel, porCrear, porCompletar, porInactivar, existentes, perfilPorCode } = diff;
+    const { excelGenderMap, countryByIso, stateByDian, cityByCodDian, pfByCode } = catalogos;
+
+    if (filasExcel.length === 0) {
+      return res.json({ message: "El archivo UXXI está vacío.", creados: 0, inactivados: 0, errores: [] });
+    }
+
+    // Mapa rápido id → fila
+    const filaPorId = new Map(filasExcel.map(f => [String(f.identificacion || "").trim(), f]));
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // FASE 1 — INACTIVAR en bulk (una sola query, inmediata)
+    // ════════════════════════════════════════════════════════════════════════════
+    const userIdsInactivar = porInactivar.map(i => i.userId).filter(Boolean);
+    let inactivados = 0;
+
+    if (userIdsInactivar.length > 0) {
+      log(`[FASE 1] Inactivando ${userIdsInactivar.length} usuarios con bulkWrite…`);
+      const bulkResult = await User.bulkWrite(
+        userIdsInactivar.map(uid => ({
+          updateOne: {
+            filter: { _id: uid },
+            update: { $set: { estado: false } },
+          },
+        })),
+        { ordered: false } // continúa aunque falle alguno
+      );
+      inactivados = bulkResult.modifiedCount;
+      log(`[FASE 1] Inactivados: ${inactivados}`);
+    } else {
+      log("[FASE 1] Nada que inactivar.");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // FASE 2 — CREAR en lotes de ${CHUNK}
+    //   Dentro de cada chunk se pre-hashean las contraseñas en paralelo,
+    //   se insertan Users con insertMany, y luego se procesan los registros
+    //   dependientes (Postulant, Profile, Academic, EnrolledPrograms) en paralelo.
+    // ════════════════════════════════════════════════════════════════════════════
+    let creados = 0;
+    const errores = [];
+
+    // Filtrar duplicados del propio Excel antes de iterar
+    const candidatos = [];
+    const vistosEnRun = new Set();
+    for (const item of porCrear) {
+      const id = String(item.identificacion || "").trim();
+      if (!id || !filaPorId.get(id) || perfilPorCode.has(id.toLowerCase()) || vistosEnRun.has(id)) continue;
+      vistosEnRun.add(id);
+      candidatos.push(id);
+    }
+
+    log(`[FASE 2] Candidatos a crear: ${candidatos.length} | lotes de ${CHUNK}`);
+
+    for (let i = 0; i < candidatos.length; i += CHUNK) {
+      const chunk = candidatos.slice(i, i + CHUNK);
+      log(`[FASE 2] Lote ${Math.floor(i / CHUNK) + 1}/${Math.ceil(candidatos.length / CHUNK)} (${chunk.length} registros)`);
+
+      // ── a) Pre-hashear contraseñas en paralelo ──────────────────────────────
+      const hashes = await Promise.all(chunk.map(id => bcrypt.hash(id, 10)));
+
+      // ── b) Preparar documentos User ────────────────────────────────────────
+      const userDocs = chunk.map((id, idx) => {
+        const fila     = filaPorId.get(id);
+        const email    = String(fila.correo || "").toLowerCase().trim();
+        const fullName = [fila.nombres, fila.apellidos].filter(Boolean).join(" ").trim() || `Estudiante ${id}`;
+        return {
+          _id:                 new mongoose.Types.ObjectId(),
+          name:                fullName,
+          email:               email || `${id}@urosario.edu.co`,
+          code:                id,
+          password:            hashes[idx],
+          modulo:              "estudiante",
+          estado:              true,
+          debeCambiarPassword: true,
+          directorioActivo:    false,
+        };
+      });
+
+      // ── c) insertMany Users (ordered:false → no para en el 1er duplicado) ──
+      let insertedUsers;
+      try {
+        insertedUsers = await User.insertMany(userDocs, { ordered: false });
+      } catch (bulkErr) {
+        // insertMany con ordered:false lanza error pero igual inserta los buenos
+        insertedUsers = bulkErr.insertedDocs || [];
+        const failedIds = new Set(
+          (bulkErr.writeErrors || []).map(e => String(e.err?.op?.code || ""))
+        );
+        (bulkErr.writeErrors || []).forEach(e => {
+          const failId = e.err?.op?.code || "?";
+          log(`  [SKIP-USER] ${failId}: duplicado`);
+          errores.push({ identificacion: failId, error: "Usuario duplicado (email/code)" });
+        });
+        // Filtrar candidatos que fallaron para no intentar crear sus dependientes
+        chunk.forEach(id => { if (failedIds.has(id)) perfilPorCode.add(id.toLowerCase()); });
+      }
+
+      // Mapa userId por code para los inserts dependientes
+      const userPorCode = new Map(
+        (Array.isArray(insertedUsers) ? insertedUsers : []).map(u => [String(u.code || "").trim(), u])
+      );
+
+      // ── d) Crear registros dependientes en paralelo por cada User insertado ─
+      const enrolledBuffer = []; // acumula ProfileEnrolledProgram para insertMany al final del lote
+
+      await Promise.all(
+        [...userPorCode.entries()].map(async ([id, user]) => {
+          const fila = filaPorId.get(id);
+          if (!fila) return;
+
+          try {
+            const email = String(fila.correo || "").toLowerCase().trim();
+
+            // Geo nacimiento
+            const paisNacRaw  = fila.paisNacimiento  ? Number(fila.paisNacimiento)  : null;
+            const deptoNacRaw = fila.deptoNacimiento ? String(fila.deptoNacimiento).trim() : null;
+            const ciudNacRaw  = fila.ciudadNacimiento ? String(fila.ciudadNacimiento).trim() : null;
+            const countryBirthId = paisNacRaw  ? (countryByIso.get(paisNacRaw) || null) : null;
+            const stateBirthId   = deptoNacRaw ? (stateByDian.get(deptoNacRaw.padStart(2, "0")) || stateByDian.get(deptoNacRaw) || null) : null;
+            const codDianNac     = buildCodDian(deptoNacRaw, ciudNacRaw);
+            const cityBirthId    = codDianNac  ? (cityByCodDian.get(codDianNac) || null) : null;
+
+            // Geo residencia
+            const paisResRaw  = fila.paisResidencia  ? Number(fila.paisResidencia)  : null;
+            const deptoResRaw = fila.deptoResidencia ? String(fila.deptoResidencia).trim() : null;
+            const ciudResRaw  = fila.ciudadResidencia ? String(fila.ciudadResidencia).trim() : null;
+            const countryResidenceId = paisResRaw  ? (countryByIso.get(paisResRaw) || null) : null;
+            const stateResidenceId   = deptoResRaw ? (stateByDian.get(deptoResRaw.padStart(2, "0")) || stateByDian.get(deptoResRaw) || null) : null;
+            const codDianRes         = buildCodDian(deptoResRaw, ciudResRaw);
+            const cityResidenceId    = codDianRes  ? (cityByCodDian.get(codDianRes) || null) : null;
+
+            // Género
+            const genderId = excelGenderMap[String(fila.genero || "").trim().toUpperCase()] || null;
+
+            // Fecha nacimiento
+            let dateBirth = null;
+            if (fila.fechaNacimiento) {
+              const d = new Date(fila.fechaNacimiento);
+              if (!isNaN(d.getTime())) dateBirth = d;
+            }
+
+            // Postulant
+            const postulant = await Postulant.create({
+              postulantId:       user._id,
+              alternateEmail:    email || `${id}@urosario.edu.co`,
+              phone:             fila.celular   || "",
+              address:           fila.direccion || "",
+              dateBirth,
+              gender:            genderId,
+              countryBirthId,    stateBirthId,    cityBirthId,
+              countryResidenceId,stateResidenceId,cityResidenceId,
+              fillingPercentage: 0,
+              filled:            false,
+            });
+
+            // PostulantProfile
+            const academicIdNum = fila.codigoEstudiante ? Number(fila.codigoEstudiante) : null;
+            const profile = await PostulantProfile.create({
+              postulantId:  postulant._id,
+              studentCode:  id,
+              academicId:   !isNaN(academicIdNum) ? academicIdNum : null,
+              filled:       false,
+              dateCreation: new Date(),
+              userCreator:  userCreatorEmail,
+            });
+
+            // PostulantAcademic
+            await PostulantAcademic.create({
+              postulant:            postulant._id,
+              current_program_code: fila.codProgramaCurso || "",
+              current_program_name: fila.tituloCurso      || "",
+            });
+
+            // Acumular ProfileEnrolledProgram para insertMany del lote
+            const pCodes = [fila.codProgramaCurso, fila.codProgramaCurso2]
+              .map(c => String(c || "").trim().toUpperCase())
+              .filter(Boolean);
+
+            for (const pCode of pCodes) {
+              const pf = pfByCode.get(pCode);
+              if (pf?.programId) {
+                enrolledBuffer.push({
+                  profileId:        profile._id,
+                  programId:        pf.programId,
+                  programFacultyId: pf._id,
+                  dateCreation:     new Date(),
+                  userCreator:      userCreatorEmail,
+                });
+              }
+            }
+
+            perfilPorCode.add(id.toLowerCase());
+            creados++;
+          } catch (innerErr) {
+            const msg = innerErr.code === 11000
+              ? `Duplicado en registros dependientes para ${id}`
+              : innerErr.message;
+            log(`  [ERROR-DEP] ${id}: ${msg}`);
+            errores.push({ identificacion: id, error: msg });
+          }
+        })
+      );
+
+      // ── e) insertMany ProfileEnrolledProgram del lote ──────────────────────
+      if (enrolledBuffer.length > 0) {
+        await ProfileEnrolledProgram.insertMany(enrolledBuffer, { ordered: false }).catch(e => {
+          log(`  [WARN] Algunos ProfileEnrolledProgram del lote fallaron: ${e.message}`);
+        });
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // FASE 3 — COMPLETAR perfiles para Users que ya existen sin Postulant/Profile
+    // ════════════════════════════════════════════════════════════════════════════
+    let completados = 0;
+
+    if (porCompletar.length > 0) {
+      log(`[FASE 3] Completando perfiles para ${porCompletar.length} usuarios sin profile…`);
+
+      for (let i = 0; i < porCompletar.length; i += CHUNK) {
+        const chunk = porCompletar.slice(i, i + CHUNK);
+        const enrolledBufferF3 = [];
+
+        await Promise.all(chunk.map(async (item) => {
+          const id   = String(item.identificacion || "").trim();
+          const fila = filaPorId.get(id);
+          if (!id || !fila || perfilPorCode.has(id.toLowerCase())) return;
+
+          try {
+            const email = String(fila.correo || "").toLowerCase().trim();
+
+            // Geo nacimiento
+            const paisNacRaw  = fila.paisNacimiento  ? Number(fila.paisNacimiento)  : null;
+            const deptoNacRaw = fila.deptoNacimiento ? String(fila.deptoNacimiento).trim() : null;
+            const ciudNacRaw  = fila.ciudadNacimiento ? String(fila.ciudadNacimiento).trim() : null;
+            const countryBirthId = paisNacRaw  ? (countryByIso.get(paisNacRaw) || null) : null;
+            const stateBirthId   = deptoNacRaw ? (stateByDian.get(deptoNacRaw.padStart(2,"0")) || stateByDian.get(deptoNacRaw) || null) : null;
+            const cityBirthId    = buildCodDian(deptoNacRaw, ciudNacRaw) ? (cityByCodDian.get(buildCodDian(deptoNacRaw, ciudNacRaw)) || null) : null;
+
+            // Geo residencia
+            const paisResRaw  = fila.paisResidencia  ? Number(fila.paisResidencia)  : null;
+            const deptoResRaw = fila.deptoResidencia ? String(fila.deptoResidencia).trim() : null;
+            const ciudResRaw  = fila.ciudadResidencia ? String(fila.ciudadResidencia).trim() : null;
+            const countryResidenceId = paisResRaw  ? (countryByIso.get(paisResRaw) || null) : null;
+            const stateResidenceId   = deptoResRaw ? (stateByDian.get(deptoResRaw.padStart(2,"0")) || stateByDian.get(deptoResRaw) || null) : null;
+            const cityResidenceId    = buildCodDian(deptoResRaw, ciudResRaw) ? (cityByCodDian.get(buildCodDian(deptoResRaw, ciudResRaw)) || null) : null;
+
+            const genderId = excelGenderMap[String(fila.genero || "").trim().toUpperCase()] || null;
+            let dateBirth = null;
+            if (fila.fechaNacimiento) { const d = new Date(fila.fechaNacimiento); if (!isNaN(d.getTime())) dateBirth = d; }
+
+            // Verificar si ya tiene Postulant (puede haberse creado por otra vía)
+            let postulant = await Postulant.findOne({ postulantId: item.existingUserId }).lean();
+
+            if (!postulant) {
+              postulant = await Postulant.create({
+                postulantId:       item.existingUserId,
+                alternateEmail:    email || `${id}@urosario.edu.co`,
+                phone:             fila.celular   || "",
+                address:           fila.direccion || "",
+                dateBirth,
+                gender:            genderId,
+                countryBirthId,    stateBirthId,    cityBirthId,
+                countryResidenceId,stateResidenceId,cityResidenceId,
+                fillingPercentage: 0,
+                filled:            false,
+              });
+            }
+
+            // Crear PostulantProfile con studentCode = identificacion
+            const academicIdNum = fila.codigoEstudiante ? Number(fila.codigoEstudiante) : null;
+            const profile = await PostulantProfile.create({
+              postulantId:  postulant._id,
+              studentCode:  id,
+              academicId:   !isNaN(academicIdNum) ? academicIdNum : null,
+              filled:       false,
+              dateCreation: new Date(),
+              userCreator:  userCreatorEmail,
+            });
+
+            await PostulantAcademic.create({
+              postulant:            postulant._id,
+              current_program_code: fila.codProgramaCurso || "",
+              current_program_name: fila.tituloCurso      || "",
+            });
+
+            const pCodes = [fila.codProgramaCurso, fila.codProgramaCurso2]
+              .map(c => String(c || "").trim().toUpperCase()).filter(Boolean);
+            for (const pCode of pCodes) {
+              const pf = pfByCode.get(pCode);
+              if (pf?.programId) {
+                enrolledBufferF3.push({
+                  profileId:        profile._id,
+                  programId:        pf.programId,
+                  programFacultyId: pf._id,
+                  dateCreation:     new Date(),
+                  userCreator:      userCreatorEmail,
+                });
+              }
+            }
+
+            perfilPorCode.add(id.toLowerCase());
+            completados++;
+            log(`  [COMPLETA] ${id} — perfil creado sobre User existente`);
+          } catch (innerErr) {
+            const msg = innerErr.code === 11000
+              ? `Duplicado al completar perfil de ${id}`
+              : innerErr.message;
+            log(`  [ERROR-COMPLETA] ${id}: ${msg}`);
+            errores.push({ identificacion: id, error: msg });
+          }
+        }));
+
+        if (enrolledBufferF3.length > 0) {
+          await ProfileEnrolledProgram.insertMany(enrolledBufferF3, { ordered: false }).catch(e => {
+            log(`  [WARN-F3] EnrolledProgram fallaron: ${e.message}`);
+          });
+        }
+      }
+      log(`[FASE 3] Completados: ${completados}`);
+    }
+
+    log(`── FIN: ${creados} creados, ${completados} completados, ${inactivados} inactivados, ${errores.length} errores ─────`);
+
+    res.json({
+      message:     `Sincronización completada: ${creados} creados, ${completados} completados, ${inactivados} inactivados, ${errores.length} errores.`,
+      creados,
+      completados,
+      inactivados,
+      errores,
+      totalArchivo: filasExcel.length,
+    });
+
+  } catch (err) {
+    console.error("[sincronizarUxxi] ERROR FATAL:", err.message, err.stack);
+    res.status(500).json({ message: "Error en sincronización UXXI", error: err.message });
   }
 };

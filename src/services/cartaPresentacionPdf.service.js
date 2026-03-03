@@ -131,8 +131,8 @@ function drawTextWithBold(doc, text, options = {}) {
 }
 
 /**
- * Construye datos del estudiante para la carta: nombre, documento, programa, créditos, promedio.
- * Usa el primer perfil con programas en curso y su extra info.
+ * Construye datos del estudiante para la carta: nombre, documento, programas (doble programa), créditos, promedio.
+ * Incluye todos los programas en curso (programFacultyId != null) para doble programa; NOMBRE_PROGRAMA los lista.
  */
 function getCartaDataFromPostulant(postulant, profileData) {
   const user = postulant?.postulantId || postulant?.user;
@@ -145,17 +145,24 @@ function getCartaDataFromPostulant(postulant, profileData) {
   let promedio = "—";
   let universidadNombre = "Universidad del Rosario";
 
-  const enrolled = (profileData?.enrolledPrograms || [])[0];
-  if (enrolled?.programId) {
-    nombrePrograma = safeStr(enrolled.programId?.name || enrolled.programId?.code) || "—";
-    const extraList = profileData?.programExtraInfo || [];
-    const extra = extraList.find((e) => e.enrolledProgramId?.toString?.() === enrolled._id?.toString?.());
+  const enrolledList = (profileData?.enrolledPrograms || []).filter((e) => e.programFacultyId != null);
+  const programNames = enrolledList
+    .map((e) => safeStr(e.programId?.name || e.programId?.code))
+    .filter(Boolean);
+  if (programNames.length > 0) {
+    nombrePrograma = programNames.length === 1 ? programNames[0] : programNames.join(" y ");
+  }
+
+  const extraList = profileData?.programExtraInfo || [];
+  const firstEnrolled = enrolledList[0];
+  if (firstEnrolled) {
+    const extra = extraList.find((e) => e.enrolledProgramId?.toString?.() === firstEnrolled._id?.toString?.());
     if (extra) {
       creditosCursados = extra.approvedCredits != null ? String(extra.approvedCredits) : "—";
       creditosTotal = extra.totalCredits != null ? String(extra.totalCredits) : "—";
       promedio = extra.cumulativeAverage != null ? String(extra.cumulativeAverage) : "—";
     }
-    const faculty = enrolled.programFacultyId?.facultyId;
+    const faculty = firstEnrolled.programFacultyId?.facultyId;
     const sucursal = faculty?.sucursalId;
     if (sucursal?.nombre) universidadNombre = sucursal.nombre;
   }

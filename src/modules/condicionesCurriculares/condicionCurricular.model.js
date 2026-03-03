@@ -53,7 +53,7 @@ const condicionCurricularSchema = new mongoose.Schema(
     nombre:               { type: String, required: true, trim: true },
     periodo:              { type: mongoose.Schema.Types.ObjectId, ref: "Periodo", required: true },
     facultad:             { type: mongoose.Schema.Types.ObjectId, ref: "Faculty", required: true },
-    programas:            [{ type: mongoose.Schema.Types.ObjectId, ref: "Program" }],
+    programas:            [{ type: mongoose.Schema.Types.ObjectId, ref: "ProgramFaculty" }],
     logica:               { type: String, enum: ["AND", "OR"], default: "AND" },
     condiciones:          [condicionItemSchema],
     asignaturasRequeridas:[asignaturaRequeridaSchema],
