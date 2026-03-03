@@ -169,9 +169,12 @@ function sectionCedula(doc, profileData, postulant) {
 function sectionPerfil(doc, profileData, postulant) {
   const p = profileData?.postulantProfile;
   const version = profileData?.selectedProfileVersion;
-  const text = version?.profileText ?? p?.profileText ?? "—";
-  doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
-  doc.text(safeStr(text), { continued: false, lineGap: 4 });
+  const raw = version?.profileText ?? p?.profileText ?? "";
+  const text = typeof raw === "string" ? raw.trim() : "";
+  if (text && text !== "—") {
+    doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
+    doc.text(text, { continued: false, lineGap: 4 });
+  }
 }
 
 function sectionFormacionRosarioEnCurso(doc, profileData, postulant) {
@@ -319,8 +322,12 @@ function hasSectionData(key, profileData) {
     case "perfil": {
       const p = profileData?.postulantProfile;
       const v = profileData?.selectedProfileVersion;
-      const text = v?.profileText ?? p?.profileText ?? "";
-      return !!(text && text.trim() && text.trim() !== "—");
+      const text = (v?.profileText ?? p?.profileText ?? "") && String(v?.profileText ?? p?.profileText ?? "").trim();
+      const hasText = !!(text && text !== "—");
+      const hasLanguages = (profileData?.languages || []).length > 0;
+      const hasSkills = (profileData?.skills || []).length > 0;
+      const hasSkillsTech = !!(p?.skillsTechnicalSoftware && String(p.skillsTechnicalSoftware).trim());
+      return hasText || hasLanguages || hasSkills || hasSkillsTech;
     }
     case "formacion_rosario_en_curso":
       return (profileData?.enrolledPrograms || []).filter((ep) => ep.programFacultyId != null).length > 0;

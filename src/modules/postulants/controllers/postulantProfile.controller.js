@@ -306,6 +306,20 @@ async function findProfileForPostulant(postulantDocId, userId, profileId) {
 }
 
 /**
+ * Resuelve versionId (body o query) a profileVersionId válido para este perfil base.
+ * Retorna { profileVersionId: ObjectId | null }. Si versionId viene pero no es válido, lanza error con res.
+ */
+async function resolveProfileVersionId(profileId, versionId, res) {
+  if (!versionId) return { profileVersionId: null };
+  const version = await ProfileProfileVersion.findOne({ _id: versionId, profileId }).lean();
+  if (!version) {
+    res.status(400).json({ message: "La versión no existe o no pertenece a este perfil" });
+    throw new Error("INVALID_VERSION");
+  }
+  return { profileVersionId: version._id };
+}
+
+/**
  * POST /postulants/:id/profiles/:profileId/enrolled-programs
  * Crea formación en curso registrada (programFacultyId null).
  */
@@ -331,7 +345,7 @@ export const createEnrolledProgram = async (req, res) => {
       userCreator: req.user?.name || req.user?.email || "api",
     });
     const populated = await ProfileEnrolledProgram.findById(doc._id)
-      .populate("programId", "name code")
+      .populate("programId", "name code level labelLevel")
       .populate("countryId", "name")
       .populate("stateId", "name")
       .populate("cityId", "name")
@@ -368,7 +382,7 @@ export const updateEnrolledProgram = async (req, res) => {
     enrolled.userUpdater = req.user?.name || req.user?.email || "api";
     await enrolled.save();
     const populated = await ProfileEnrolledProgram.findById(enrolled._id)
-      .populate("programId", "name code")
+      .populate("programId", "name code level labelLevel")
       .populate("countryId", "name")
       .populate("stateId", "name")
       .populate("cityId", "name")
@@ -425,7 +439,7 @@ export const createGraduateProgram = async (req, res) => {
       cityId: cityId || undefined,
     });
     const populated = await ProfileGraduateProgram.findById(doc._id)
-      .populate("programId", "name code")
+      .populate("programId", "name code level labelLevel")
       .populate("countryId", "name")
       .populate("stateId", "name")
       .populate("cityId", "name")
@@ -463,7 +477,7 @@ export const updateGraduateProgram = async (req, res) => {
     if (cityId !== undefined) graduate.cityId = cityId;
     await graduate.save();
     const populated = await ProfileGraduateProgram.findById(graduate._id)
-      .populate("programId", "name code")
+      .populate("programId", "name code level labelLevel")
       .populate("countryId", "name")
       .populate("stateId", "name")
       .populate("cityId", "name")
@@ -570,6 +584,7 @@ export const deleteOtherStudy = async (req, res) => {
 
 /**
  * POST /postulants/:id/profiles/:profileId/interest-areas
+ * Body opcional: versionId — si se envía, el ítem pertenece a esa versión del perfil.
  */
 export const createInterestArea = async (req, res) => {
   try {
@@ -578,10 +593,19 @@ export const createInterestArea = async (req, res) => {
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
     const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
-    const { area } = req.body;
+    const { area, versionId } = req.body;
     if (!area) return res.status(400).json({ message: "area es requerido" });
+    let profileVersionId = null;
+    try {
+      const resolved = await resolveProfileVersionId(profile._id, versionId, res);
+      profileVersionId = resolved.profileVersionId;
+    } catch (e) {
+      if (e.message === "INVALID_VERSION") return;
+      throw e;
+    }
     const doc = await ProfileInterestArea.create({
       profileId: profile._id,
+      profileVersionId: profileVersionId || undefined,
       area,
       dateCreation: new Date(),
       userCreator: req.user?.name || req.user?.email || "api",
@@ -595,18 +619,28 @@ export const createInterestArea = async (req, res) => {
 
 /**
  * DELETE /postulants/:id/profiles/:profileId/interest-areas/:interestAreaId
+ * Query opcional: versionId — si se envía, solo se elimina el ítem de esa versión.
  */
 export const deleteInterestArea = async (req, res) => {
   try {
     const { id, profileId, interestAreaId } = req.params;
+    const versionId = req.query.versionId;
     const postulant = await resolvePostulant(id);
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
     const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
-    const deleted = await ProfileInterestArea.findOneAndDelete({
-      _id: interestAreaId,
-      profileId: profile._id,
-    });
+    let profileVersionId = null;
+    try {
+      const resolved = await resolveProfileVersionId(profile._id, versionId, res);
+      profileVersionId = resolved.profileVersionId;
+    } catch (e) {
+      if (e.message === "INVALID_VERSION") return;
+      throw e;
+    }
+    const filter = { _id: interestAreaId, profileId: profile._id };
+    if (profileVersionId != null) filter.profileVersionId = profileVersionId;
+    else filter.$or = [{ profileVersionId: null }, { profileVersionId: { $exists: false } }];
+    const deleted = await ProfileInterestArea.findOneAndDelete(filter);
     if (!deleted) return res.status(404).json({ message: "Área de interés no encontrada" });
     res.json({ message: "Eliminado correctamente", deleted: deleted._id });
   } catch (error) {
@@ -616,6 +650,7 @@ export const deleteInterestArea = async (req, res) => {
 
 /**
  * POST /postulants/:id/profiles/:profileId/skills
+ * Body opcional: versionId — si se envía, el ítem pertenece a esa versión del perfil.
  */
 export const createSkill = async (req, res) => {
   try {
@@ -624,11 +659,20 @@ export const createSkill = async (req, res) => {
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
     const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
-    const { skillId, experienceYears } = req.body;
+    const { skillId, experienceYears, versionId } = req.body;
     if (!skillId) return res.status(400).json({ message: "skillId es requerido" });
+    let profileVersionId = null;
+    try {
+      const resolved = await resolveProfileVersionId(profile._id, versionId, res);
+      profileVersionId = resolved.profileVersionId;
+    } catch (e) {
+      if (e.message === "INVALID_VERSION") return;
+      throw e;
+    }
     const years = experienceYears != null ? Number(experienceYears) : 0;
     const doc = await ProfileSkill.create({
       profileId: profile._id,
+      profileVersionId: profileVersionId || undefined,
       skillId,
       experienceYears: Number.isFinite(years) ? years : 0,
       dateCreation: new Date(),
@@ -643,18 +687,28 @@ export const createSkill = async (req, res) => {
 
 /**
  * DELETE /postulants/:id/profiles/:profileId/skills/:skillId
+ * Query opcional: versionId — si se envía, solo se elimina el ítem de esa versión.
  */
 export const deleteSkill = async (req, res) => {
   try {
     const { id, profileId, skillId } = req.params;
+    const versionId = req.query.versionId;
     const postulant = await resolvePostulant(id);
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
     const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
-    const deleted = await ProfileSkill.findOneAndDelete({
-      _id: skillId,
-      profileId: profile._id,
-    });
+    let profileVersionId = null;
+    try {
+      const resolved = await resolveProfileVersionId(profile._id, versionId, res);
+      profileVersionId = resolved.profileVersionId;
+    } catch (e) {
+      if (e.message === "INVALID_VERSION") return;
+      throw e;
+    }
+    const filter = { _id: skillId, profileId: profile._id };
+    if (profileVersionId != null) filter.profileVersionId = profileVersionId;
+    else filter.$or = [{ profileVersionId: null }, { profileVersionId: { $exists: false } }];
+    const deleted = await ProfileSkill.findOneAndDelete(filter);
     if (!deleted) return res.status(404).json({ message: "Competencia no encontrada" });
     res.json({ message: "Eliminado correctamente", deleted: deleted._id });
   } catch (error) {
@@ -664,6 +718,7 @@ export const deleteSkill = async (req, res) => {
 
 /**
  * POST /postulants/:id/profiles/:profileId/languages
+ * Body opcional: versionId — si se envía, el ítem pertenece a esa versión del perfil.
  */
 export const createLanguage = async (req, res) => {
   try {
@@ -672,10 +727,19 @@ export const createLanguage = async (req, res) => {
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
     const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
-    const { language, level, certificationExam, certificationExamName } = req.body;
+    const { language, level, certificationExam, certificationExamName, versionId } = req.body;
     if (!language) return res.status(400).json({ message: "language es requerido" });
+    let profileVersionId = null;
+    try {
+      const resolved = await resolveProfileVersionId(profile._id, versionId, res);
+      profileVersionId = resolved.profileVersionId;
+    } catch (e) {
+      if (e.message === "INVALID_VERSION") return;
+      throw e;
+    }
     const doc = await ProfileLanguage.create({
       profileId: profile._id,
+      profileVersionId: profileVersionId || undefined,
       language,
       level: level || undefined,
       certificationExam: certificationExam === true || certificationExam === "true",
@@ -695,18 +759,28 @@ export const createLanguage = async (req, res) => {
 
 /**
  * DELETE /postulants/:id/profiles/:profileId/languages/:languageId
+ * Query opcional: versionId — si se envía, solo se elimina el ítem de esa versión.
  */
 export const deleteLanguage = async (req, res) => {
   try {
     const { id, profileId, languageId } = req.params;
+    const versionId = req.query.versionId;
     const postulant = await resolvePostulant(id);
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
     const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
-    const deleted = await ProfileLanguage.findOneAndDelete({
-      _id: languageId,
-      profileId: profile._id,
-    });
+    let profileVersionId = null;
+    try {
+      const resolved = await resolveProfileVersionId(profile._id, versionId, res);
+      profileVersionId = resolved.profileVersionId;
+    } catch (e) {
+      if (e.message === "INVALID_VERSION") return;
+      throw e;
+    }
+    const filter = { _id: languageId, profileId: profile._id };
+    if (profileVersionId != null) filter.profileVersionId = profileVersionId;
+    else filter.$or = [{ profileVersionId: null }, { profileVersionId: { $exists: false } }];
+    const deleted = await ProfileLanguage.findOneAndDelete(filter);
     if (!deleted) return res.status(404).json({ message: "Idioma no encontrado" });
     res.json({ message: "Eliminado correctamente", deleted: deleted._id });
   } catch (error) {

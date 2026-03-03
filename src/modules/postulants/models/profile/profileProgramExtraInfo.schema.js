@@ -3,6 +3,8 @@ import mongoose from "mongoose";
 const schema = new mongoose.Schema({
   enrolledProgramId: { type: mongoose.Schema.Types.ObjectId, ref: "ProfileEnrolledProgram", required: true, index: true },
   mysqlId: { type: Number, unique: true, sparse: true },
+  /** Sede / centro beneficio (UXXI: centrobeneficio). */
+  sede: { type: String, trim: true },
   accordingCreditSemester: Number,
   enrolled: { type: Boolean, default: false },
   approvedCourses: String,

@@ -4,6 +4,7 @@ import {
   getPostulantById,
   getPostulantProfileData,
   generateHojaVidaPdf,
+  generateCartaPresentacionPdf,
   consultaInfEstudianteUniversitas,
   aplicarInfoUniversitas,
   consultaInfAcademicaUniversitas,
@@ -12,6 +13,7 @@ import {
   updatePostulant,
   createPostulant,
   uploadProfilePicture,
+  togglePostulantEstado,
 } from "../controllers/postulant.controller.js";
 import {
   getProfilesByPostulantId,
@@ -93,11 +95,13 @@ router.delete("/:id/profiles/:profileId/supports/:profileSupportId", deleteProfi
 // Rutas generales después
 router.get("/", getPostulants);
 router.get("/:id/generate-hoja-vida-pdf", generateHojaVidaPdf);
+router.get("/:id/generate-carta-presentacion-pdf", generateCartaPresentacionPdf);
 router.get("/:id/profile-data", getPostulantProfileData);
 router.get("/:id/consulta-inf-estudiante-universitas", consultaInfEstudianteUniversitas);
 router.put("/:id/aplicar-info-universitas", aplicarInfoUniversitas);
 router.get("/:id/consulta-inf-academica-universitas", consultaInfAcademicaUniversitas);
 router.put("/:id/aplicar-info-academica-universitas", aplicarInfoAcademicaUniversitas);
+router.put("/:id/toggle-estado", togglePostulantEstado);
 router.get("/:id/attachments/:attachmentId/download", downloadAttachment);
 router.get("/:id", getPostulantById);
 
