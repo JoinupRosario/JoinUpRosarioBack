@@ -1366,6 +1366,24 @@ export const getPostulantProfileData = async (req, res) => {
         ? await ProfileProgramExtraInfo.find({ enrolledProgramId: { $in: enrolledIds } }).lean()
         : [];
 
+    // Recalcular y guardar completitud completa (21 ítems: datos + perfil + referencias + académica)
+    try {
+      const postulantFull = await Postulant.findById(postulantDocId)
+        .select("typeOfIdentification gender dateBirth phone address alternateEmail countryBirthId stateBirthId cityBirthId countryResidenceId stateResidenceId cityResidenceId")
+        .lean();
+      const fullPct = calculateFullCompleteness(postulantFull, postulantProfile, {
+        references,
+        interestAreas,
+        skills,
+        languages,
+        enrolledPrograms,
+        programExtraInfo: programExtraInfoFiltered,
+      });
+      await Postulant.updateOne({ _id: postulantDocId }, { fillingPercentage: fullPct });
+    } catch (err) {
+      console.error("[getPostulantProfileData] recalc completeness:", err?.message || err);
+    }
+
     res.json({
       postulantProfile,
       selectedProfileVersion,
@@ -1944,7 +1962,7 @@ export const updatePostulant = async (req, res) => {
     if (req.body.full_profile !== undefined) {
       postulant.filled = req.body.full_profile === true || req.body.full_profile === "true";
     }
-    postulant.fillingPercentage = calculateCompleteness(postulant);
+    // fillingPercentage se actualiza en getPostulantProfileData (completitud completa 21 ítems)
     await postulant.save();
 
     if (req.body.acept_terms !== undefined) {
@@ -2050,7 +2068,7 @@ function formatPostulantProfileResponse(p) {
 
 /**
  * Calcula el porcentaje de completitud del perfil del postulante (0-100)
- * según datos básicos del documento Postulant.
+ * según datos básicos del documento Postulant (solo 13 campos).
  */
 function calculateCompleteness(postulant) {
   const fields = [
@@ -2070,6 +2088,64 @@ function calculateCompleteness(postulant) {
   ];
   const completed = fields.filter(Boolean).length;
   return Math.min(100, Math.round((completed / fields.length) * 100));
+}
+
+/**
+ * Completitud completa: mismas 21 variables que el front (datos personales + perfil + referencias + académica).
+ * Devuelve 0-100. Se persiste en Postulant.fillingPercentage al cargar profile-data.
+ */
+function calculateFullCompleteness(postulant, postulantProfile, profileData) {
+  const isFilled = (v) => {
+    if (v == null || v === "") return false;
+    if (typeof v !== "object") return true;
+    if (v._id != null) return true;
+    if (v.constructor && v.constructor.name === "ObjectId") return true;
+    return false;
+  };
+  const datosFields = [
+    "typeOfIdentification",
+    "gender",
+    "dateBirth",
+    "phone",
+    "address",
+    "alternateEmail",
+    "countryBirthId",
+    "stateBirthId",
+    "cityBirthId",
+    "countryResidenceId",
+    "stateResidenceId",
+    "cityResidenceId",
+  ];
+  const itemsDatos = datosFields.map((key) => ({ ok: isFilled(postulant?.[key]) }));
+  const pp = postulantProfile;
+  const hasRefs = (profileData?.references?.length ?? 0) > 0;
+  const hasInterest = (profileData?.interestAreas?.length ?? 0) > 0;
+  const hasSkills = (profileData?.skills?.length ?? 0) > 0;
+  const hasLangs = (profileData?.languages?.length ?? 0) > 0;
+  const hasStudentCode = pp?.studentCode != null && String(pp.studentCode).trim() !== "";
+  const itemsPerfil = [
+    { ok: hasStudentCode },
+    { ok: hasInterest },
+    { ok: hasSkills },
+    { ok: hasLangs },
+    { ok: hasRefs },
+  ];
+  const enrolled = (profileData?.enrolledPrograms || []).filter((e) => e.programFacultyId != null);
+  const firstEnrolled = enrolled[0];
+  const extraList = profileData?.programExtraInfo || [];
+  const firstExtra = firstEnrolled
+    ? extraList.find((e) => e.enrolledProgramId?.toString?.() === firstEnrolled._id?.toString?.())
+    : null;
+  const itemsAcademica = [
+    { ok: enrolled.length > 0 },
+    { ok: firstExtra?.approvedCredits != null && firstExtra?.approvedCredits !== "" },
+    { ok: firstExtra?.totalCredits != null && firstExtra?.totalCredits !== "" },
+    { ok: firstExtra?.cumulativeAverage != null && firstExtra?.cumulativeAverage !== "" },
+  ];
+  const allItems = [...itemsDatos, ...itemsPerfil, ...itemsAcademica];
+  const completed = allItems.filter((i) => i.ok).length;
+  const total = allItems.length;
+  return total ? Math.min(100, Math.round((completed / total) * 100)) : 0;
 }
 
 export const uploadProfilePicture = async (req, res) => {
