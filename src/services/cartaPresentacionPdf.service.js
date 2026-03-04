@@ -93,52 +93,30 @@ function replaceVars(text, vars) {
 }
 
 /**
- * Divide el texto en segmentos: lo que está entre * o ** se marca como bold.
- * Ej: "Hola *mundo* cruel" o "Hola **mundo** cruel" -> segmento "mundo" en negrita.
+ * Elige el programa en curso a usar para la carta: si hay codigoPrograma (habilitado para práctica), el que coincida; si no, el primero.
  */
-function parseBoldSegments(text) {
-  if (!text || typeof text !== "string") return [];
-  const parts = text.split(/\*+(.*?)\*+/g);
-  const segments = [];
-  for (let i = 0; i < parts.length; i++) {
-    const s = parts[i];
-    if (s === "") continue;
-    segments.push({ text: s, bold: i % 2 === 1 });
-  }
-  if (segments.length === 0 && text.length > 0) segments.push({ text, bold: false });
-  return segments;
-}
-
-/**
- * Dibuja texto con negrita (*texto* o **texto**). Tamaño y fuente se fijan en cada segmento.
- */
-function drawTextWithBold(doc, text, options = {}) {
-  const width = options.width ?? TEXT_WIDTH;
-  const lineGap = options.lineGap ?? LINE_GAP;
-  const segments = parseBoldSegments(text);
-  if (segments.length === 0) return;
-  doc.fontSize(FONT_SIZE_BODY).font("Helvetica").fillColor(COLOR_BODY);
-  const opts = { width, lineGap, continued: false, align: "left" };
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    const isLast = i === segments.length - 1;
-    doc.fontSize(FONT_SIZE_BODY).font(seg.bold ? "Helvetica-Bold" : "Helvetica");
-    opts.continued = !isLast;
-    const x = doc.x;
-    const y = doc.y;
-    doc.text(seg.text, x, y, opts);
-  }
+function selectEnrolledForCarta(enrolledList, codigoPrograma) {
+  if (!enrolledList || enrolledList.length === 0) return null;
+  const code = codigoPrograma != null && String(codigoPrograma).trim() !== "" ? String(codigoPrograma).trim().toUpperCase() : null;
+  if (!code) return enrolledList[0];
+  const match = enrolledList.find(
+    (e) =>
+      (e.programId?.code && String(e.programId.code).trim().toUpperCase() === code) ||
+      (e.programFacultyId?.code && String(e.programFacultyId.code).trim().toUpperCase() === code)
+  );
+  return match || enrolledList[0];
 }
 
 /**
  * Construye datos del estudiante para la carta: nombre, documento, programas (doble programa), créditos, promedio.
- * Incluye todos los programas en curso (programFacultyId != null) para doble programa; NOMBRE_PROGRAMA los lista.
+ * Si se pasa preferProgramCode (codigo del programa habilitado para práctica), se usan créditos/promedio de ese programa cuando el estudiante tiene varios.
  */
-function getCartaDataFromPostulant(postulant, profileData) {
+function getCartaDataFromPostulant(postulant, profileData, preferProgramCode) {
   const user = postulant?.postulantId || postulant?.user;
   const nombreCompleto = safeStr(user?.name) || "Estudiante";
-  const numeroDocumento = safeStr(user?.code) || "—";
-
+  const studentCode = profileData?.postulantProfile?.studentCode;
+  const numeroDocumento =
+    studentCode != null && String(studentCode).trim() !== "" ? String(studentCode).trim() : "—";
   let nombrePrograma = "—";
   let creditosCursados = "—";
   let creditosTotal = "—";
@@ -154,13 +132,18 @@ function getCartaDataFromPostulant(postulant, profileData) {
   }
 
   const extraList = profileData?.programExtraInfo || [];
-  const firstEnrolled = enrolledList[0];
+  const firstEnrolled = selectEnrolledForCarta(enrolledList, preferProgramCode);
   if (firstEnrolled) {
     const extra = extraList.find((e) => e.enrolledProgramId?.toString?.() === firstEnrolled._id?.toString?.());
     if (extra) {
       creditosCursados = extra.approvedCredits != null ? String(extra.approvedCredits) : "—";
       creditosTotal = extra.totalCredits != null ? String(extra.totalCredits) : "—";
-      promedio = extra.cumulativeAverage != null ? String(extra.cumulativeAverage) : "—";
+      // Promedio acumulado: siempre máximo 2 decimales (redondeo numérico)
+      const avg = extra.cumulativeAverage;
+      if (avg != null && avg !== "") {
+        const num = parseFloat(avg);
+        promedio = Number.isNaN(num) ? "—" : num.toFixed(2);
+      }
     }
     const faculty = firstEnrolled.programFacultyId?.facultyId;
     const sucursal = faculty?.sucursalId;
@@ -183,12 +166,13 @@ function getCartaDataFromPostulant(postulant, profileData) {
  * @param {object} postulant - Postulante (postulantId populado con name, email, code)
  * @param {object} profileData - { enrolledPrograms (populate programId, programFacultyId.facultyId.sucursalId), programExtraInfo }
  * @param {object} parametrizacion - { logoBase64?, textosInternos: { encabezado, cuerpo, cierre }, firmaBase64?, firmaDatos: { nombre, cargo, unidad }, opcionFechaCarta }
- * @param {{ empresa: string, ciudad: string }} dest - Destinatario (empresa y ciudad)
+ * @param {{ empresa: string, ciudad: string, codigoPrograma?: string }} dest - Destinatario (empresa, ciudad) y opcional código del programa habilitado para práctica
  * @returns {Promise<Buffer>}
  */
 export async function buildCartaPresentacionPdf(postulant, profileData, parametrizacion, dest) {
   const empresa = safeStr(dest?.empresa) || "—";
   const ciudad = safeStr(dest?.ciudad) || "—";
+  const codigoPrograma = dest?.codigoPrograma != null && String(dest.codigoPrograma).trim() !== "" ? String(dest.codigoPrograma).trim() : null;
   const textosInternos = parametrizacion?.textosInternos || { encabezado: "", cuerpo: "", cierre: "" };
   const firmaDatos = parametrizacion?.firmaDatos && typeof parametrizacion.firmaDatos === "object"
     ? {
@@ -198,7 +182,7 @@ export async function buildCartaPresentacionPdf(postulant, profileData, parametr
       }
     : { nombre: "", cargo: "", unidad: "" };
 
-  const cartaData = getCartaDataFromPostulant(postulant, profileData);
+  const cartaData = getCartaDataFromPostulant(postulant, profileData, codigoPrograma);
   const incluirFecha = parametrizacion?.opcionFechaCarta !== "ninguna";
   const fechaTexto = incluirFecha ? formatFechaActual() : "";
 
@@ -215,9 +199,47 @@ export async function buildCartaPresentacionPdf(postulant, profileData, parametr
   };
 
   const encabezadoTemplate = normalizeEncabezadoSaltos(textosInternos.encabezado ?? "");
-  const encabezado = replaceVars(encabezadoTemplate, vars);
-  const cuerpo = replaceVars(textosInternos.cuerpo ?? "", vars);
-  const cierre = replaceVars(textosInternos.cierre ?? "", vars);
+  let encabezado = replaceVars(encabezadoTemplate, vars);
+  let cuerpo = replaceVars(textosInternos.cuerpo ?? "", vars);
+  let cierre = replaceVars(textosInternos.cierre ?? "", vars);
+
+  // Si la parametrización guardó valores literales en vez de placeholders, corregirlos (mismo programa elegido que para cartaData)
+  const enrolledList = (profileData?.enrolledPrograms || []).filter((e) => e.programFacultyId != null);
+  const firstEnrolled = selectEnrolledForCarta(enrolledList, codigoPrograma);
+  const extraList = profileData?.programExtraInfo || [];
+  const extra = firstEnrolled ? extraList.find((e) => e.enrolledProgramId?.toString?.() === firstEnrolled._id?.toString?.()) : null;
+  const rawAverageVal = extra?.cumulativeAverage;
+  const rawAverageStr = rawAverageVal != null && rawAverageVal !== "" ? String(rawAverageVal) : "";
+  const userCodeLiteral =
+    (postulant?.postulantId?.code ?? postulant?.user?.code) != null
+      ? String(postulant?.postulantId?.code ?? postulant?.user?.code).trim()
+      : "";
+  const fixLiteralInText = (text) => {
+    if (!text || typeof text !== "string") return text;
+    let t = text;
+    if (userCodeLiteral && cartaData.NUMERO_DOCUMENTO !== userCodeLiteral) {
+      t = t.split(userCodeLiteral).join(cartaData.NUMERO_DOCUMENTO);
+    }
+    if (rawAverageStr && cartaData.PROMEDIO !== rawAverageStr) {
+      t = t.split(rawAverageStr).join(cartaData.PROMEDIO);
+    }
+    if (rawAverageVal != null && cartaData.PROMEDIO !== "—") {
+      const num = parseFloat(rawAverageVal);
+      if (!Number.isNaN(num)) {
+        const longDecimalRegex = new RegExp(
+          "\\b" + String(num).replace(".", "\\.") + "\\d*\\b",
+          "g"
+        );
+        t = t.replace(longDecimalRegex, cartaData.PROMEDIO);
+      }
+    }
+    return t;
+  };
+  encabezado = fixLiteralInText(encabezado);
+  cuerpo = fixLiteralInText(cuerpo);
+  cierre = fixLiteralInText(cierre);
+  // Asegurar salto de línea después de "Señores" en el encabezado final (por si el template no lo tenía)
+  encabezado = normalizeEncabezadoSaltos(encabezado);
 
   const logoBuffer = await getImageBuffer(parametrizacion?.logoBase64, LOGO_WIDTH, LOGO_HEIGHT).catch(() => null);
   const firmaBuffer = await getImageBuffer(
@@ -248,22 +270,22 @@ export async function buildCartaPresentacionPdf(postulant, profileData, parametr
 
     doc.x = MARGIN;
     doc.y = y;
-    const textOpts = { width: TEXT_WIDTH, lineGap: LINE_GAP };
+    const textOpts = { width: TEXT_WIDTH, lineGap: LINE_GAP, align: "left" };
+    doc.fontSize(FONT_SIZE_BODY).font("Helvetica").fillColor(COLOR_BODY);
     if (encabezado) {
-      doc.font("Helvetica");
-      doc.text(encabezado, doc.x, doc.y, { ...textOpts, align: "left" });
+      doc.text(encabezado, doc.x, doc.y, textOpts);
       doc.moveDown(0.5);
     }
     doc.x = MARGIN;
     doc.fontSize(FONT_SIZE_BODY).font("Helvetica").fillColor(COLOR_BODY);
     if (cuerpo) {
-      drawTextWithBold(doc, cuerpo, textOpts);
+      doc.text(cuerpo, doc.x, doc.y, textOpts);
       doc.moveDown(0.5);
     }
     doc.x = MARGIN;
     doc.fontSize(FONT_SIZE_BODY).font("Helvetica").fillColor(COLOR_BODY);
     if (cierre) {
-      drawTextWithBold(doc, cierre, textOpts);
+      doc.text(cierre, doc.x, doc.y, textOpts);
       doc.moveDown(0.8);
     }
 

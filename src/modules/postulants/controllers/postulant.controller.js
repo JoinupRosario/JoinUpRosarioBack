@@ -268,7 +268,10 @@ export const getPostulantById = async (req, res) => {
       ? { name: postulant.postulantId.name, email: postulant.postulantId.email, code: postulant.postulantId.code }
       : null;
 
-    res.json(formatPostulantProfileResponse(postulant));
+    const profile = await PostulantProfile.findOne({ postulantId: postulant._id }).select("acceptTerms").lean();
+    const response = formatPostulantProfileResponse(postulant);
+    response.acept_terms = profile?.acceptTerms ?? false;
+    res.json(response);
   } catch (error) {
     console.error("[getPostulantById]", error?.message || error);
     if (process.env.NODE_ENV !== "production") {
@@ -1017,6 +1020,138 @@ export const consultaInfAcademicaUniversitas = async (req, res) => {
 };
 
 /**
+ * Aplica los ítems de Universitas al perfil (programas en curso, finalizados y extra info).
+ * Usado por aplicarInfoAcademicaUniversitas y por generateCartaPresentacionPdf.
+ * @returns {{ ok: true, enrolledPrograms, graduatePrograms, programExtraInfo } | { ok: false, message: string, missingPrograms?: Array }}
+ */
+async function applyUniversitasItemsToProfile(universitasItems, profile, userLabel) {
+  const byCode = groupUniversitasItemsByCode(universitasItems);
+  const enrolledList = [];
+  const graduateList = [];
+  const missingPrograms = [];
+  for (const [codigo, data] of byCode) {
+    const program = await findProgramByCodeOrName(data.planCode ?? codigo, data.nombre, data.codigoprograma);
+    if (!program) {
+      missingPrograms.push({ code: codigo, name: data.nombre || codigo });
+      continue;
+    }
+    const programFacultyId = await findOrCreateProgramFacultyForProgram(program._id, data.codFacultad, data.nombreFacultad, userLabel);
+    const entry = { programId: program._id, programFacultyId: programFacultyId || undefined, extra: data };
+    if (data.egresado) {
+      graduateList.push(entry);
+    } else {
+      enrolledList.push(entry);
+    }
+  }
+  if (missingPrograms.length > 0) {
+    const list = missingPrograms.map((p) => (p.name ? `${p.name} (cód. ${p.code})` : p.code)).join("; ");
+    return {
+      ok: false,
+      message: "No existen los siguientes programas en el sistema. Deben darse de alta en la tabla de programas antes de aplicar.",
+      missingPrograms: missingPrograms.map((p) => ({ code: p.code, name: p.name })),
+      detail: list,
+    };
+  }
+  const programIdsEnrolled = enrolledList.map((e) => e.programId);
+  const programIdsGraduate = graduateList.map((e) => e.programId);
+
+  const toRemoveEnrolled = await ProfileEnrolledProgram.find({
+    profileId: profile._id,
+    programId: { $nin: programIdsEnrolled },
+  })
+    .select("_id")
+    .lean();
+  const toRemoveEnrolledIds = toRemoveEnrolled.map((e) => e._id);
+  if (toRemoveEnrolledIds.length > 0) {
+    await ProfileProgramExtraInfo.deleteMany({ enrolledProgramId: { $in: toRemoveEnrolledIds } });
+  }
+  await ProfileEnrolledProgram.deleteMany({
+    profileId: profile._id,
+    programId: { $nin: programIdsEnrolled },
+  });
+  await ProfileGraduateProgram.deleteMany({
+    profileId: profile._id,
+    ...(programIdsGraduate.length > 0 ? { programId: { $nin: programIdsGraduate } } : {}),
+  });
+
+  for (const entry of enrolledList) {
+    let enrolledDoc = await ProfileEnrolledProgram.findOne({ profileId: profile._id, programId: entry.programId });
+    if (!enrolledDoc) {
+      enrolledDoc = await ProfileEnrolledProgram.create({
+        profileId: profile._id,
+        programId: entry.programId,
+        programFacultyId: entry.programFacultyId ?? null,
+        dateCreation: new Date(),
+        userCreator: userLabel,
+      });
+    } else if (entry.programFacultyId != null) {
+      await ProfileEnrolledProgram.updateOne(
+        { profileId: profile._id, programId: entry.programId },
+        { $set: { programFacultyId: entry.programFacultyId } }
+      );
+    }
+    const extra = entry.extra || {};
+    const updateExtra = {
+      sede: extra.sede ?? null,
+      cumulativeAverage: extra.promedioacumulado != null ? extra.promedioacumulado : undefined,
+      approvedCredits: extra.creditos_conseguidos != null ? String(extra.creditos_conseguidos).trim() : undefined,
+      currentCourses: extra.currentCourses ?? undefined,
+      enrolled: extra.matriculado !== undefined ? extra.matriculado : undefined,
+      canPractice: extra.canPractice !== undefined ? extra.canPractice : undefined,
+      disciplinarySuspension: extra.suspensiones !== undefined ? extra.suspensiones : undefined,
+      accordingCreditSemester: extra.semestre != null ? toNum(extra.semestre) : undefined,
+      totalCredits: extra.creditos_plan != null ? toNum(extra.creditos_plan) : undefined,
+      approvedCourses: extra.approvedCourses ?? undefined,
+    };
+    const cleanExtra = Object.fromEntries(Object.entries(updateExtra).filter(([, v]) => v !== undefined));
+    const now = new Date();
+    const existingExtra = await ProfileProgramExtraInfo.findOne({ enrolledProgramId: enrolledDoc._id });
+    if (!existingExtra) {
+      await ProfileProgramExtraInfo.create({
+        enrolledProgramId: enrolledDoc._id,
+        dateCreation: now,
+        userCreator: userLabel,
+        ...cleanExtra,
+      });
+    } else {
+      const setFields = { ...cleanExtra, dateUpdate: now, userUpdater: userLabel };
+      if (Object.keys(cleanExtra).length > 0) {
+        await ProfileProgramExtraInfo.updateOne(
+          { enrolledProgramId: enrolledDoc._id },
+          { $set: setFields }
+        );
+      }
+    }
+  }
+  for (const entry of graduateList) {
+    const exists = await ProfileGraduateProgram.findOne({ profileId: profile._id, programId: entry.programId });
+    if (!exists) {
+      await ProfileGraduateProgram.create({
+        profileId: profile._id,
+        programId: entry.programId,
+        programFacultyId: entry.programFacultyId ?? null,
+      });
+    } else if (entry.programFacultyId != null) {
+      await ProfileGraduateProgram.updateOne(
+        { profileId: profile._id, programId: entry.programId },
+        { $set: { programFacultyId: entry.programFacultyId } }
+      );
+    }
+  }
+
+  const [enrolledPrograms, graduatePrograms] = await Promise.all([
+    ProfileEnrolledProgram.find({ profileId: profile._id }).populate("programId", "name code level").lean(),
+    ProfileGraduateProgram.find({ profileId: profile._id }).populate("programId", "name code level").lean(),
+  ]);
+  const enrolledIds = enrolledPrograms.map((e) => e._id);
+  const programExtraInfo =
+    enrolledIds.length > 0
+      ? await ProfileProgramExtraInfo.find({ enrolledProgramId: { $in: enrolledIds } }).lean()
+      : [];
+  return { ok: true, enrolledPrograms, graduatePrograms, programExtraInfo };
+}
+
+/**
  * PUT aplica la información académica de Universitas al perfil del postulante.
  * Reemplaza programas en curso y finalizados por los que devuelve Universitas (mismo perfil que se consulta si se envía profileId).
  */
@@ -1076,136 +1211,19 @@ export const aplicarInfoAcademicaUniversitas = async (req, res) => {
     }
     const userLabel = req.user?.name || req.user?.email || "api";
 
-    // Agrupar por codigoprograma y preferir "en curso" si el mismo código aparece N y S. Resolver programa por code en tabla programas (no se crean; si no existe, se informa).
-    const byCode = groupUniversitasItemsByCode(universitasItems);
-    const enrolledList = [];
-    const graduateList = [];
-    const missingPrograms = [];
-    for (const [codigo, data] of byCode) {
-      const program = await findProgramByCodeOrName(data.planCode ?? codigo, data.nombre, data.codigoprograma);
-      if (!program) {
-        missingPrograms.push({ code: codigo, name: data.nombre || codigo });
-        continue;
-      }
-      const programFacultyId = await findOrCreateProgramFacultyForProgram(program._id, data.codFacultad, data.nombreFacultad, userLabel);
-      const entry = { programId: program._id, programFacultyId: programFacultyId || undefined, extra: data };
-      if (data.egresado) {
-        graduateList.push(entry);
-      } else {
-        enrolledList.push(entry);
-      }
-    }
-    if (missingPrograms.length > 0) {
-      const list = missingPrograms.map((p) => (p.name ? `${p.name} (cód. ${p.code})` : p.code)).join("; ");
+    const result = await applyUniversitasItemsToProfile(universitasItems, profile, userLabel);
+    if (!result.ok) {
       return res.status(400).json({
-        message: "No existen los siguientes programas en el sistema. Deben darse de alta en la tabla de programas antes de aplicar.",
-        missingPrograms: missingPrograms.map((p) => ({ code: p.code, name: p.name })),
-        detail: list,
+        message: result.message,
+        missingPrograms: result.missingPrograms,
+        detail: result.detail,
       });
     }
-    const programIdsEnrolled = enrolledList.map((e) => e.programId);
-    const programIdsGraduate = graduateList.map((e) => e.programId);
-
-    // Quitar del perfil los que ya no vienen en Universitas. Borrar también su ProfileProgramExtraInfo.
-    const toRemoveEnrolled = await ProfileEnrolledProgram.find({
-      profileId: profile._id,
-      programId: { $nin: programIdsEnrolled },
-    })
-      .select("_id")
-      .lean();
-    const toRemoveEnrolledIds = toRemoveEnrolled.map((e) => e._id);
-    if (toRemoveEnrolledIds.length > 0) {
-      await ProfileProgramExtraInfo.deleteMany({ enrolledProgramId: { $in: toRemoveEnrolledIds } });
-    }
-    await ProfileEnrolledProgram.deleteMany({
-      profileId: profile._id,
-      programId: { $nin: programIdsEnrolled },
-    });
-    await ProfileGraduateProgram.deleteMany({
-      profileId: profile._id,
-      ...(programIdsGraduate.length > 0 ? { programId: { $nin: programIdsGraduate } } : {}),
-    });
-
-    // Añadir o actualizar programas en curso y su ProfileProgramExtraInfo (sede, cursos actuales, créditos aprobados, practica, matriculado, suspensiones, promedio acumulado, ssc/semestre).
-    for (const entry of enrolledList) {
-      let enrolledDoc = await ProfileEnrolledProgram.findOne({ profileId: profile._id, programId: entry.programId });
-      if (!enrolledDoc) {
-        enrolledDoc = await ProfileEnrolledProgram.create({
-          profileId: profile._id,
-          programId: entry.programId,
-          programFacultyId: entry.programFacultyId ?? null,
-          dateCreation: new Date(),
-          userCreator: userLabel,
-        });
-      } else if (entry.programFacultyId != null) {
-        await ProfileEnrolledProgram.updateOne(
-          { profileId: profile._id, programId: entry.programId },
-          { $set: { programFacultyId: entry.programFacultyId } }
-        );
-      }
-      const extra = entry.extra || {};
-      const updateExtra = {
-        sede: extra.sede ?? null,
-        cumulativeAverage: extra.promedioacumulado != null ? extra.promedioacumulado : undefined,
-        approvedCredits: extra.creditos_conseguidos != null ? String(extra.creditos_conseguidos).trim() : undefined,
-        currentCourses: extra.currentCourses ?? undefined,
-        enrolled: extra.matriculado !== undefined ? extra.matriculado : undefined,
-        canPractice: extra.canPractice !== undefined ? extra.canPractice : undefined,
-        disciplinarySuspension: extra.suspensiones !== undefined ? extra.suspensiones : undefined,
-        accordingCreditSemester: extra.semestre != null ? toNum(extra.semestre) : undefined,
-        totalCredits: extra.creditos_plan != null ? toNum(extra.creditos_plan) : undefined,
-        approvedCourses: extra.approvedCourses ?? undefined,
-      };
-      const cleanExtra = Object.fromEntries(Object.entries(updateExtra).filter(([, v]) => v !== undefined));
-      const now = new Date();
-      const existingExtra = await ProfileProgramExtraInfo.findOne({ enrolledProgramId: enrolledDoc._id });
-      if (!existingExtra) {
-        await ProfileProgramExtraInfo.create({
-          enrolledProgramId: enrolledDoc._id,
-          dateCreation: now,
-          userCreator: userLabel,
-          ...cleanExtra,
-        });
-      } else {
-        const setFields = { ...cleanExtra, dateUpdate: now, userUpdater: userLabel };
-        if (Object.keys(cleanExtra).length > 0) {
-          await ProfileProgramExtraInfo.updateOne(
-            { enrolledProgramId: enrolledDoc._id },
-            { $set: setFields }
-          );
-        }
-      }
-    }
-    for (const entry of graduateList) {
-      const exists = await ProfileGraduateProgram.findOne({ profileId: profile._id, programId: entry.programId });
-      if (!exists) {
-        await ProfileGraduateProgram.create({
-          profileId: profile._id,
-          programId: entry.programId,
-          programFacultyId: entry.programFacultyId ?? null,
-        });
-      } else if (entry.programFacultyId != null) {
-        await ProfileGraduateProgram.updateOne(
-          { profileId: profile._id, programId: entry.programId },
-          { $set: { programFacultyId: entry.programFacultyId } }
-        );
-      }
-    }
-
-    const [enrolledPrograms, graduatePrograms] = await Promise.all([
-      ProfileEnrolledProgram.find({ profileId: profile._id }).populate("programId", "name code level").lean(),
-      ProfileGraduateProgram.find({ profileId: profile._id }).populate("programId", "name code level").lean(),
-    ]);
-    const enrolledIds = enrolledPrograms.map((e) => e._id);
-    const programExtraInfo =
-      enrolledIds.length > 0
-        ? await ProfileProgramExtraInfo.find({ enrolledProgramId: { $in: enrolledIds } }).lean()
-        : [];
     res.json({
       message: "Información académica aplicada.",
-      enrolledPrograms,
-      graduatePrograms,
-      programExtraInfo,
+      enrolledPrograms: result.enrolledPrograms,
+      graduatePrograms: result.graduatePrograms,
+      programExtraInfo: result.programExtraInfo,
     });
   } catch (error) {
     const errMsg = (error && (error.message || error.stack)) || String(error) || "Error al aplicar información académica.";
@@ -1597,7 +1615,7 @@ async function checkCanGenerateCartaPresentacion(postulantDocId, userId, identif
       { $or: orConditions },
     ],
   };
-  const habilitado = await EstudianteHabilitado.findOne(filter).select("_id").lean();
+  const habilitado = await EstudianteHabilitado.findOne(filter).select("_id codigoPrograma").lean();
   if (!habilitado) {
     return {
       allowed: false,
@@ -1605,21 +1623,25 @@ async function checkCanGenerateCartaPresentacion(postulantDocId, userId, identif
         "Solo los estudiantes autorizados para práctica en el periodo actual pueden generar carta de presentación. Si ya finalizó su práctica, debe ser habilitado nuevamente para un nuevo periodo académico.",
     };
   }
-  return { allowed: true };
+  const codigoPrograma =
+    habilitado.codigoPrograma != null && String(habilitado.codigoPrograma).trim() !== ""
+      ? String(habilitado.codigoPrograma).trim()
+      : null;
+  return { allowed: true, codigoPrograma };
 }
 
-/** GET /postulants/:id/can-generate-carta-presentacion — Indica si el estudiante puede generar carta (autorizado en periodo actual). */
+/** GET /postulants/:id/can-generate-carta-presentacion — Indica si el estudiante puede generar carta (autorizado en periodo actual). Identificación = studentCode del perfil, no user.code. */
 export const canGenerateCartaPresentacion = async (req, res) => {
   try {
     const { id } = req.params;
     let postulant = await Postulant.findById(id).select("_id postulantId").lean();
     if (!postulant) postulant = await Postulant.findOne({ postulantId: id }).select("_id postulantId").lean();
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
-    let identificacion = null;
-    if (postulant.postulantId) {
-      const user = await User.findById(postulant.postulantId).select("code").lean();
-      if (user?.code) identificacion = String(user.code).trim();
-    }
+    const postulantProfile = await PostulantProfile.findOne({ postulantId: postulant._id }).select("studentCode").lean();
+    const identificacion =
+      postulantProfile?.studentCode != null && String(postulantProfile.studentCode).trim() !== ""
+        ? String(postulantProfile.studentCode).trim()
+        : null;
     const result = await checkCanGenerateCartaPresentacion(
       postulant._id,
       postulant.postulantId ?? null,
@@ -1646,11 +1668,16 @@ export const generateCartaPresentacionPdf = async (req, res) => {
     if (!postulant) postulant = await Postulant.findOne({ postulantId: id }).select("_id postulantId").lean();
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
 
-    let identificacion = null;
-    if (postulant.postulantId) {
-      const user = await User.findById(postulant.postulantId).select("code").lean();
-      if (user?.code) identificacion = String(user.code).trim();
-    }
+    const postulantDocId = postulant._id;
+    const postulantProfile = await PostulantProfile.findOne({ postulantId: postulantDocId })
+      .select("_id studentCode")
+      .lean();
+    if (!postulantProfile) return res.status(404).json({ message: "El postulante no tiene perfil. Debe crear al menos un perfil." });
+
+    const identificacion =
+      postulantProfile.studentCode != null && String(postulantProfile.studentCode).trim() !== ""
+        ? String(postulantProfile.studentCode).trim()
+        : null;
     const check = await checkCanGenerateCartaPresentacion(
       postulant._id,
       postulant.postulantId ?? null,
@@ -1660,16 +1687,33 @@ export const generateCartaPresentacionPdf = async (req, res) => {
       return res.status(403).json({ message: check.message || "No está habilitado para generar carta de presentación." });
     }
 
-    const postulantDocId = postulant._id;
-    const userId = postulant.postulantId ?? null;
-    const profileFilter = userId
-      ? { $or: [{ postulantId: postulantDocId }, { postulantId: userId }] }
-      : { postulantId: postulantDocId };
+    if (!identificacion) {
+      return res.status(400).json({ message: "El perfil del postulante debe tener studentCode (cédula) para actualizar la información académica y generar la carta." });
+    }
 
-    const firstProfile = await PostulantProfile.findOne(profileFilter).select("_id").lean();
-    if (!firstProfile) return res.status(404).json({ message: "El postulante no tiene perfil. Debe crear al menos un perfil." });
+    // Siempre actualizar la información académica con la integración (getInfoAcademica) antes de generar la carta
+    let universitasItems;
+    try {
+      universitasItems = await consultaInfAcademica(identificacion);
+    } catch (err) {
+      return res.status(502).json({
+        message: err.message || "Error al conectar con Universitas al obtener información académica. Intente de nuevo.",
+      });
+    }
+    if (!universitasItems || universitasItems.length === 0) {
+      return res.status(400).json({
+        message: "No se encontró información académica del estudiante en Universitas. Verifique que tenga programa en curso y vuelva a intentar.",
+      });
+    }
+    const userLabel = req.user?.name || req.user?.email || "sistema";
+    const applyResult = await applyUniversitasItemsToProfile(universitasItems, postulantProfile, userLabel);
+    if (!applyResult.ok) {
+      return res.status(400).json({
+        message: applyResult.message || "No se pudo actualizar la información académica. " + (applyResult.detail || ""),
+      });
+    }
 
-    const profileId = firstProfile._id;
+    const profileId = postulantProfile._id;
     const enrolledPrograms = await ProfileEnrolledProgram.find({ profileId })
       .populate("programId", "name code level")
       .populate({
@@ -1689,7 +1733,30 @@ export const generateCartaPresentacionPdf = async (req, res) => {
         ? await ProfileProgramExtraInfo.find({ enrolledProgramId: { $in: enrolledIds } }).lean()
         : [];
 
+    const enrolledWithFaculty = enrolledPrograms.filter((e) => e.programFacultyId != null);
+    if (enrolledWithFaculty.length === 0) {
+      return res.status(400).json({
+        message: "El estudiante no tiene un programa en curso con facultad asociada. Actualice la información académica desde la pestaña correspondiente.",
+      });
+    }
+    const hasValidExtra = enrolledWithFaculty.some((ep) => {
+      const extra = programExtraInfoFiltered.find(
+        (ex) => ex.enrolledProgramId?.toString?.() === ep._id?.toString?.()
+      );
+      return (
+        (extra?.approvedCredits != null && extra.approvedCredits !== "") ||
+        (extra?.totalCredits != null && extra.totalCredits !== "") ||
+        (extra?.cumulativeAverage != null && extra.cumulativeAverage !== "")
+      );
+    });
+    if (!hasValidExtra) {
+      return res.status(400).json({
+        message: "El estudiante no tiene información de créditos o promedio acumulado para el programa en curso. Actualice la información académica desde la pestaña correspondiente.",
+      });
+    }
+
     const profileData = {
+      postulantProfile,
       enrolledPrograms,
       programExtraInfo: programExtraInfoFiltered,
     };
@@ -1711,7 +1778,8 @@ export const generateCartaPresentacionPdf = async (req, res) => {
       };
     }
 
-    const pdfBuffer = await buildCartaPresentacionPdf(postulantFull, profileData, parametrizacion, { empresa, ciudad });
+    const codigoPrograma = check.codigoPrograma || null;
+    const pdfBuffer = await buildCartaPresentacionPdf(postulantFull, profileData, parametrizacion, { empresa, ciudad, codigoPrograma });
     const baseName = (postulantFull?.postulantId?.name || "Carta de presentación").replace(/[^\w\s\u00C0-\u00FF-]/g, "").trim() || "Carta de presentación";
     const displayName = `${baseName}.pdf`;
 
@@ -1873,8 +1941,19 @@ export const updatePostulant = async (req, res) => {
     }
     const mapped = mapProfileBodyToPostulant(body);
     Object.assign(postulant, mapped);
+    if (req.body.full_profile !== undefined) {
+      postulant.filled = req.body.full_profile === true || req.body.full_profile === "true";
+    }
     postulant.fillingPercentage = calculateCompleteness(postulant);
     await postulant.save();
+
+    if (req.body.acept_terms !== undefined) {
+      const aceptTermsVal = req.body.acept_terms === true || req.body.acept_terms === "true";
+      await PostulantProfile.updateMany(
+        { postulantId: postulant._id },
+        { $set: { acceptTerms: aceptTermsVal } }
+      );
+    }
 
     if (newStatus && previousStatus !== newStatus) {
       await PostulantStatusHistory.create({
@@ -1898,7 +1977,10 @@ export const updatePostulant = async (req, res) => {
       .populate("typeOfIdentification", "name value")
       .populate("gender", "name value")
       .lean();
-    res.json(formatPostulantProfileResponse(updated));
+    const response = formatPostulantProfileResponse(updated);
+    const profile = await PostulantProfile.findOne({ postulantId: updated._id }).select("acceptTerms").lean();
+    response.acept_terms = profile?.acceptTerms ?? false;
+    res.json(response);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1962,7 +2044,7 @@ function formatPostulantProfileResponse(p) {
     twitter_url: p.twitter ?? null,
     instagram_url: p.instagram ?? null,
     website_url: p.personalWebsite ?? null,
-    acept_terms: false,
+    acept_terms: false, // Sobrescrito en getPostulantById desde PostulantProfile.acceptTerms
   };
 }
 
