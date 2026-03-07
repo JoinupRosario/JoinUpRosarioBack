@@ -35,16 +35,20 @@ export const loginUser = async (req, res) => {
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ message: "Usuario no encontrado" });
 
-    // Reglas de acceso por formulario:
+    // Reglas de acceso por formulario (login con email/contraseña):
     // - 'entidades': siempre puede usar el formulario
     // - 'administrativo' sin directorioActivo: puede usar el formulario
-    // - 'administrativo' con directorioActivo: debe usar SAML
-    // - 'estudiante' o sin módulo: siempre debe usar SAML
-    const puedeUsarFormulario =
-      user.modulo === "entidades" ||
-      (user.modulo === "administrativo" && !user.directorioActivo);
+    // - 'administrativo' con directorioActivo: debe usar SAML (directorio activo)
+    // - 'estudiante' o módulo vacío/null (migrados mal): SOLO directorio activo (SAML)
+    const modulo = user.modulo != null ? String(user.modulo).trim().toLowerCase() : "";
+    const esEstudianteOModuloVacio =
+      modulo === "estudiante" || modulo === "";
 
-    if (!puedeUsarFormulario) {
+    const puedeUsarFormulario =
+      modulo === "entidades" ||
+      (modulo === "administrativo" && !user.directorioActivo);
+
+    if (esEstudianteOModuloVacio || !puedeUsarFormulario) {
       return res.status(403).json({
         code: "USE_SAML",
         message: "Debe acceder con su cuenta institucional (Office 365). Use el botón 'Ingresar como Comunidad Universitaria'."

@@ -1,6 +1,7 @@
 import express from "express";
 import {
   getPostulants,
+  getPostulantMe,
   getPostulantById,
   getPostulantProfileData,
   generateHojaVidaPdf,
@@ -96,6 +97,9 @@ router.put("/:id/profiles/:profileId/references/:referenceId", updateReference);
 router.delete("/:id/profiles/:profileId/references/:referenceId", deleteReference);
 router.delete("/:id/profiles/:profileId/cvs/:profileCvId", deleteProfileCv);
 router.delete("/:id/profiles/:profileId/supports/:profileSupportId", deleteProfileSupport);
+
+// Ruta "mi postulante" para usuario autenticado (debe ir antes de /:id)
+router.get("/me", getPostulantMe);
 
 // Rutas generales después
 router.get("/", getPostulants);
