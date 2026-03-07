@@ -1,6 +1,8 @@
 import Opportunity from "./opportunity.model.js";
 import Company from "../companies/company.model.js";
 import Student from "../students/student.model.js";
+import EstudianteHabilitado from "../estudiantesHabilitados/estudianteHabilitado.model.js";
+import Postulant from "../postulants/models/postulants.schema.js";
 
 // Obtener todas las oportunidades
 export const getOpportunities = async (req, res) => {
@@ -135,6 +137,144 @@ export const getOpportunities = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /opportunities/para-estudiante-practicas
+ * Ofertas de práctica que el estudiante autenticado puede ver:
+ * 1) Está en estudiantes_habilitados con estadoFinal "AUTORIZADO"
+ * 2) La oportunidad está Activa y en el mismo periodo que el del estudiante autorizado
+ * 3) El programa por el que está habilitado está en formacionAcademica de la oportunidad
+ * 4) Ese programa está aprobado en aprobacionesPorPrograma de la oportunidad (estado "aprobado")
+ */
+export const getOfertasParaEstudiantePracticas = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ message: "No autenticado" });
+    }
+    const page = parseInt(req.query.page) || 1;
+    const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+    const skip = (page - 1) * limit;
+
+    const postulantDoc = await Postulant.findOne({ postulantId: userId }).select("_id").lean();
+    const postulantId = postulantDoc?._id ?? null;
+    const filterAutorizado = {
+      estadoFinal: "AUTORIZADO",
+      $or: [{ user: userId }],
+    };
+    if (postulantId) {
+      filterAutorizado.$or.push({ postulant: postulantId });
+    }
+
+    const autorizados = await EstudianteHabilitado.find(filterAutorizado)
+      .populate("periodo", "codigo")
+      .populate({ path: "programaFacultad", select: "programId code", populate: { path: "programId", select: "name code" } })
+      .lean();
+
+    if (!autorizados.length) {
+      return res.json({
+        opportunities: [],
+        totalPages: 0,
+        currentPage: page,
+        total: 0,
+      });
+    }
+
+    // La oportunidad puede tener periodo como ID (string) o como codigo ("2026-1"); aceptamos ambos
+    const periodIds = [...new Set(autorizados.map((a) => a.periodo?._id?.toString()).filter(Boolean))];
+    const periodCodes = [...new Set(autorizados.map((a) => a.periodo?.codigo).filter(Boolean))];
+    const periodValues = [...new Set([...periodIds, ...periodCodes])];
+
+    const programTerms = new Set();
+    autorizados.forEach((a) => {
+      const pf = a.programaFacultad;
+      if (pf?.programId) {
+        if (pf.programId.name) programTerms.add(pf.programId.name.trim());
+        if (pf.programId.code) programTerms.add(pf.programId.code.trim());
+      }
+      if (pf?.code) programTerms.add(pf.code.trim());
+      // Nombre del programa tal como viene en estudiantes_habilitados
+      if (a.nombrePrograma) programTerms.add(a.nombrePrograma.trim());
+    });
+    const programTermsList = [...programTerms].filter(Boolean);
+    if (!periodValues.length || !programTermsList.length) {
+      return res.json({
+        opportunities: [],
+        totalPages: 0,
+        currentPage: page,
+        total: 0,
+      });
+    }
+
+    const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const filter = {
+      tipo: "practica",
+      estado: "Activa",
+      periodo: { $in: periodValues },
+      $or: programTermsList.map((term) => ({
+        "formacionAcademica.program": { $regex: escapeRegex(term), $options: "i" },
+      })),
+      // Que el programa del estudiante esté aprobado en la oportunidad
+      aprobacionesPorPrograma: {
+        $elemMatch: {
+          estado: "aprobado",
+          $or: programTermsList.map((term) => ({
+            "programa.program": { $regex: escapeRegex(term), $options: "i" },
+          })),
+        },
+      },
+    };
+
+    const allCandidates = await Opportunity.find(filter)
+      .populate("company", "name commercialName sector logo")
+      .populate("creadoPor", "name email")
+      .sort({ fechaCreacion: -1 })
+      .lean();
+
+    // Filtrar por promedio mínimo: si la oportunidad tiene promedioMinimoRequerido,
+    // el estudiante debe tener promedioacumulado >= ese valor (datosAcademicos de su autorización)
+    const parseNum = (v) => {
+      if (v == null || v === "") return NaN;
+      const n = parseFloat(String(v).replace(",", "."));
+      return Number.isFinite(n) ? n : NaN;
+    };
+    const opportunitiesFiltered = allCandidates.filter((opp) => {
+      const minPromedio = parseNum(opp.promedioMinimoRequerido);
+      if (Number.isNaN(minPromedio)) return true; // sin requisito de promedio, se muestra
+
+      const oppPeriodo = opp.periodo ? String(opp.periodo).trim() : "";
+      const oppPrograms = (opp.formacionAcademica || []).map((f) => (f.program || "").trim().toLowerCase()).filter(Boolean);
+      const matchingAuth = autorizados.find((a) => {
+        const periodMatch =
+          oppPeriodo === (a.periodo?._id?.toString?.() || "") || oppPeriodo === (a.periodo?.codigo || "");
+        if (!periodMatch) return false;
+        const prog = (a.nombrePrograma || "").trim().toLowerCase();
+        const code = (a.programaFacultad?.programId?.code || "").trim().toLowerCase();
+        const name = (a.programaFacultad?.programId?.name || "").trim().toLowerCase();
+        return oppPrograms.some(
+          (p) =>
+            p && (prog.includes(p) || p.includes(prog) || code.includes(p) || p.includes(code) || name.includes(p) || p.includes(name))
+        );
+      });
+      if (!matchingAuth) return true; // no hay autorización que matchee, se incluye (no debería pasar)
+      const studentPromedio = parseNum(matchingAuth.datosAcademicos?.promedioacumulado);
+      if (Number.isNaN(studentPromedio)) return true; // sin promedio del estudiante, se muestra
+      return studentPromedio >= minPromedio;
+    });
+
+    const total = opportunitiesFiltered.length;
+    const opportunities = opportunitiesFiltered.slice(skip, skip + limit);
+
+    res.json({
+      opportunities,
+      totalPages: Math.ceil(total / limit),
+      currentPage: page,
+      total,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error al listar ofertas para prácticas", error: error.message });
   }
 };
 

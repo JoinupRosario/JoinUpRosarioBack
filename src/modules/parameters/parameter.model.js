@@ -13,7 +13,8 @@ const parameterSchema = new mongoose.Schema(
         "sectors",
         "company_sizes",
         "internship_types",
-        "evaluation_criteria"
+        "evaluation_criteria",
+        "business_rules"
       ]
     },
     name: { type: String, required: true },

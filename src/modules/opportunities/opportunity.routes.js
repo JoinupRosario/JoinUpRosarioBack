@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from "uuid";
 import {
   getOpportunities,
   getOpportunityById,
+  getOfertasParaEstudiantePracticas,
   createOpportunity,
   updateOpportunity,
   deleteOpportunity,
@@ -80,6 +81,8 @@ router.use(verifyToken);
 
 // Rutas para oportunidades
 router.get("/", getOpportunities);
+// Ofertas de práctica para estudiante autorizado (periodo + programa). Debe ir antes de /:id
+router.get("/para-estudiante-practicas", getOfertasParaEstudiantePracticas);
 router.get("/:id", getOpportunityById);
 router.post("/", authorizeRoles("company", "admin", "superadmin"), uploadMultipleDocuments, createOpportunity);
 router.put("/:id", authorizeRoles("company", "admin", "superadmin"), updateOpportunity);

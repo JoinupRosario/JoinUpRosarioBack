@@ -51,6 +51,20 @@ export const getParametersByCategory = async (req, res) => {
   }
 };
 
+// Obtener parámetro por código (para reglas de negocio, etc.)
+export const getParameterByCode = async (req, res) => {
+  try {
+    const { code } = req.params;
+    const parameter = await Parameter.findOne({ code, "metadata.active": true });
+    if (!parameter) {
+      return res.status(404).json({ message: "Parámetro no encontrado" });
+    }
+    res.json(parameter);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // Obtener parámetro por ID
 export const getParameterById = async (req, res) => {
   try {

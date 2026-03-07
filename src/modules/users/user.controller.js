@@ -191,3 +191,58 @@ export const getMyPermissions = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
+
+/** Campos de preferencias de notificaciones para postulantes. */
+const NOTIF_PREF_FIELDS = [
+  "notifActivacionOfertas",
+  "notifActivacionOfertasPractica",
+  "notifCierreOfertas",
+];
+
+/**
+ * GET /users/notification-preferences
+ * Devuelve las preferencias de notificaciones del usuario (estudiante/postulante).
+ */
+export const getNotificationPreferences = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id)
+      .select(NOTIF_PREF_FIELDS.join(" "))
+      .lean();
+    if (!user) return res.status(404).json({ message: "Usuario no encontrado" });
+    const prefs = {};
+    NOTIF_PREF_FIELDS.forEach((key) => {
+      prefs[key] = user[key] === true;
+    });
+    res.json(prefs);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * PUT /users/notification-preferences
+ * Actualiza las preferencias de notificaciones del usuario (estudiante/postulante).
+ */
+export const updateNotificationPreferences = async (req, res) => {
+  try {
+    const update = {};
+    NOTIF_PREF_FIELDS.forEach((key) => {
+      if (req.body[key] !== undefined) update[key] = !!req.body[key];
+    });
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { $set: update },
+      { new: true }
+    )
+      .select(NOTIF_PREF_FIELDS.join(" "))
+      .lean();
+    if (!user) return res.status(404).json({ message: "Usuario no encontrado" });
+    const prefs = {};
+    NOTIF_PREF_FIELDS.forEach((key) => {
+      prefs[key] = user[key] === true;
+    });
+    res.json(prefs);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};

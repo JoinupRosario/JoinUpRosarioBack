@@ -1,4 +1,5 @@
 import CondicionCurricular, { ACADEMIC_VARIABLES, OPERATORS } from "./condicionCurricular.model.js";
+import ProgramFaculty from "../program/model/programFaculty.model.js";
 import { buildSearchRegex } from "../../utils/searchUtils.js";
 
 const POPULATE_FIELDS = [
@@ -15,6 +16,36 @@ const POPULATE_FIELDS = [
 // ── Devuelve las variables y operadores disponibles (para el builder del front) ─
 export const getVariablesDisponibles = (_req, res) => {
   res.json({ variables: ACADEMIC_VARIABLES, operadores: OPERATORS });
+};
+
+// ── Programas con condición curricular activa para un periodo (para formación académica en oportunidades) ─
+export const getProgramasHabilitadosPorPeriodo = async (req, res) => {
+  try {
+    const { periodo } = req.query;
+    if (!periodo) {
+      return res.status(400).json({ message: "Se requiere el parámetro periodo" });
+    }
+    const reglas = await CondicionCurricular.find({
+      periodo,
+      estado: "ACTIVE",
+    })
+      .select("programas")
+      .lean();
+    const programFacultyIds = [...new Set(reglas.flatMap((r) => (r.programas || []).map((id) => id.toString())))];
+    if (programFacultyIds.length === 0) {
+      return res.json({ programIds: [] });
+    }
+    const pfs = await ProgramFaculty.find({ _id: { $in: programFacultyIds } })
+      .select("programId")
+      .lean();
+    const programIds = [...new Set(pfs.map((pf) => pf.programId?.toString()).filter(Boolean))];
+    res.json({ programIds });
+  } catch (e) {
+    res.status(500).json({
+      message: "Error al obtener programas habilitados para el periodo",
+      error: e.message,
+    });
+  }
 };
 
 // ── Listar (paginado, con filtros) ────────────────────────────────────────────

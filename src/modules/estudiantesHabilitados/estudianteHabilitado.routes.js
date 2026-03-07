@@ -1,5 +1,6 @@
 import express from "express";
 import {
+  getMeAutorizado,
   getEstudiantesHabilitados,
   previewCargueUxxi,
   confirmarCargueUxxi,
@@ -10,6 +11,9 @@ import { verifyToken } from "../../middlewares/auth.js";
 const router = express.Router();
 
 router.use(verifyToken);
+
+// ¿Está el usuario actual autorizado para prácticas? (para home estudiante)
+router.get("/me-autorizado", getMeAutorizado);
 
 // Listar estudiantes habilitados (paginado + filtros)
 router.get("/", getEstudiantesHabilitados);

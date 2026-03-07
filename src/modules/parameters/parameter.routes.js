@@ -2,6 +2,7 @@ import express from "express";
 import { 
   getParameters, 
   getParameterById, 
+  getParameterByCode,
   createParameter, 
   updateParameter, 
   deleteParameter,
@@ -17,6 +18,7 @@ router.use(verifyToken);
 // Rutas para parámetros
 router.get("/", getParameters);
 router.get("/category/:category", getParametersByCategory);
+router.get("/code/:code", getParameterByCode);
 router.get("/:id", getParameterById);
 router.post("/", authorizeRoles("admin", "superadmin"), createParameter);
 router.put("/:id", authorizeRoles("admin", "superadmin"), updateParameter);
