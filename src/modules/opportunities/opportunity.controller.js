@@ -3,6 +3,8 @@ import Company from "../companies/company.model.js";
 import Student from "../students/student.model.js";
 import EstudianteHabilitado from "../estudiantesHabilitados/estudianteHabilitado.model.js";
 import Postulant from "../postulants/models/postulants.schema.js";
+import PostulacionOportunidad from "./postulacionOportunidad.model.js";
+import Periodo from "../periodos/periodo.model.js";
 
 // Obtener todas las oportunidades
 export const getOpportunities = async (req, res) => {
@@ -264,6 +266,19 @@ export const getOfertasParaEstudiantePracticas = async (req, res) => {
       return studentPromedio >= minPromedio;
     });
 
+    // Excluir ofertas a las que el estudiante ya se postuló
+    if (postulantId) {
+      const postulacionesYa = await PostulacionOportunidad.find({ postulant: postulantId })
+        .select("opportunity")
+        .lean();
+      const idsAplicados = new Set(
+        postulacionesYa.map((p) => (p.opportunity != null ? String(p.opportunity) : "")).filter(Boolean)
+      );
+      if (idsAplicados.size > 0) {
+        opportunitiesFiltered = opportunitiesFiltered.filter((opp) => !idsAplicados.has(opp._id.toString()));
+      }
+    }
+
     const total = opportunitiesFiltered.length;
     const opportunities = opportunitiesFiltered.slice(skip, skip + limit);
 
@@ -296,7 +311,16 @@ export const getOpportunityById = async (req, res) => {
       return res.status(404).json({ message: "Oportunidad no encontrada" });
     }
 
-    res.json(opportunity);
+    const payload = opportunity.toObject ? opportunity.toObject() : { ...opportunity };
+    // Si periodo está guardado como ObjectId (string 24 hex), resolver a código legible
+    if (payload.periodo && /^[a-f0-9]{24}$/i.test(String(payload.periodo).trim())) {
+      try {
+        const periodDoc = await Periodo.findById(payload.periodo).select("codigo").lean();
+        if (periodDoc?.codigo) payload.periodo = periodDoc.codigo;
+      } catch (_) { /* dejar periodo como está */ }
+    }
+
+    res.json(payload);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -734,7 +758,119 @@ export const applyToOpportunity = async (req, res) => {
   }
 };
 
-// Obtener postulaciones de una oportunidad
+/**
+ * RQ04_HU002: Postulante (estudiante) se postula a una oportunidad con una hoja de vida.
+ * POST /opportunities/:id/aplicar — body: { profileId } (PostulantProfile._id)
+ */
+export const aplicarOportunidad = async (req, res) => {
+  try {
+    const { id: opportunityId } = req.params;
+    const { profileId } = req.body;
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ message: "No autenticado" });
+    if (!profileId) return res.status(400).json({ message: "Debe seleccionar un perfil (hoja de vida)" });
+
+    const opportunity = await Opportunity.findById(opportunityId).lean();
+    if (!opportunity) return res.status(404).json({ message: "Oportunidad no encontrada" });
+    if (opportunity.estado !== "Activa") {
+      return res.status(400).json({ message: "La oportunidad no está disponible para postulaciones" });
+    }
+    if (opportunity.fechaVencimiento && new Date(opportunity.fechaVencimiento) < new Date()) {
+      return res.status(400).json({ message: "La oportunidad ha vencido" });
+    }
+
+    const postulant = await Postulant.findOne({ postulantId: userId }).select("_id").lean();
+    if (!postulant) {
+      return res.status(400).json({ message: "No tiene un perfil de postulante asociado" });
+    }
+
+    const PostulantProfile = (await import("../postulants/models/profile/profile.schema.js")).default;
+    const profile = await PostulantProfile.findOne({
+      _id: profileId,
+      $or: [{ postulantId: postulant._id }, { postulantId: userId }],
+    }).select("_id").lean();
+    if (!profile) {
+      return res.status(400).json({ message: "El perfil seleccionado no existe o no le pertenece" });
+    }
+
+    const existing = await PostulacionOportunidad.findOne({
+      opportunity: opportunityId,
+      postulant: postulant._id,
+    }).lean();
+    if (existing) {
+      return res.status(400).json({ message: "Ya se ha postulado a esta oportunidad" });
+    }
+
+    const postulacion = await PostulacionOportunidad.create({
+      postulant: postulant._id,
+      opportunity: opportunityId,
+      postulantProfile: profileId,
+      estado: "aplicado",
+    });
+
+    const populated = await PostulacionOportunidad.findById(postulacion._id)
+      .populate("opportunity", "nombreCargo company estado")
+      .populate("postulant", "postulantId")
+      .populate("postulantProfile", "studentCode");
+
+    res.status(201).json({
+      message: "Postulación enviada correctamente",
+      postulacion: populated,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /opportunities/mis-postulaciones — Lista las postulaciones del estudiante (postulante) actual.
+ */
+export const getMisPostulaciones = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ message: "No autenticado" });
+
+    const postulant = await Postulant.findOne({ postulantId: userId }).select("_id").lean();
+    if (!postulant) {
+      return res.json({ data: [], total: 0 });
+    }
+
+    const list = await PostulacionOportunidad.find({ postulant: postulant._id })
+      .populate({
+        path: "opportunity",
+        select: "nombreCargo company periodo fechaVencimiento estado",
+        populate: { path: "company", select: "name commercialName" },
+      })
+      .populate("postulantProfile", "studentCode")
+      .sort({ fechaAplicacion: -1 })
+      .lean();
+
+    const data = list.map((p) => {
+      const opp = p.opportunity;
+      const company = opp?.company;
+      return {
+        _id: p._id,
+        cargo: opp?.nombreCargo,
+        empresa: company?.name || company?.commercialName,
+        fechaAplicacion: p.fechaAplicacion,
+        estadoOportunidad: opp?.estado,
+        estado: p.estado,
+        empresaConsultoPerfil: !!p.empresaConsultoPerfilAt,
+        empresaDescargoHv: !!p.empresaDescargoHvAt,
+        seleccionadoPorEmpresa: p.estado === "seleccionado_empresa" || p.estado === "aceptado_estudiante",
+        aceptadoPorEstudiante: p.estado === "aceptado_estudiante",
+        linkOportunidad: opp?._id ? `/dashboard/ofertas-afines/${opp._id}` : null,
+        opportunityId: opp?._id,
+      };
+    });
+
+    res.json({ data, total: data.length });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Obtener postulaciones de una oportunidad (legacy Student + PostulacionOportunidad de postulantes)
 export const getApplications = async (req, res) => {
   try {
     const opportunity = await Opportunity.findById(req.params.id)
@@ -745,9 +881,33 @@ export const getApplications = async (req, res) => {
       return res.status(404).json({ message: "Oportunidad no encontrada" });
     }
 
+    const postulantesList = await PostulacionOportunidad.find({ opportunity: req.params.id })
+      .populate("postulant", "postulantId")
+      .populate("postulantProfile", "studentCode")
+      .populate({ path: "postulant", populate: { path: "postulantId", select: "name email" } })
+      .lean();
+
+    const postulacionesLegacy = (opportunity.postulaciones || []).map((p) => ({
+      ...p.toObject?.() || p,
+      _source: "legacy",
+      tipo: "student",
+    }));
+    const postulacionesPostulantes = postulantesList.map((p) => ({
+      _id: p._id,
+      postulant: p.postulant,
+      postulantProfile: p.postulantProfile,
+      fechaPostulacion: p.fechaAplicacion,
+      estado: p.estado,
+      comentarios: p.comentarios,
+      revisadoPor: p.revisadoPor,
+      fechaRevision: p.updatedAt,
+      _source: "postulacion_oportunidad",
+      tipo: "postulant",
+    }));
+
     res.json({
-      postulaciones: opportunity.postulaciones,
-      total: opportunity.postulaciones.length
+      postulaciones: [...postulacionesLegacy, ...postulacionesPostulantes],
+      total: postulacionesLegacy.length + postulacionesPostulantes.length,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });

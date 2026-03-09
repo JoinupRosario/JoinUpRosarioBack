@@ -6,6 +6,8 @@ import {
   getOpportunities,
   getOpportunityById,
   getOfertasParaEstudiantePracticas,
+  aplicarOportunidad,
+  getMisPostulaciones,
   createOpportunity,
   updateOpportunity,
   deleteOpportunity,
@@ -83,6 +85,8 @@ router.use(verifyToken);
 router.get("/", getOpportunities);
 // Ofertas de práctica para estudiante autorizado (periodo + programa). Debe ir antes de /:id
 router.get("/para-estudiante-practicas", getOfertasParaEstudiantePracticas);
+// RQ04_HU002: Mis postulaciones del estudiante (postulante). Debe ir antes de /:id
+router.get("/mis-postulaciones", authorizeRoles("student"), getMisPostulaciones);
 router.get("/:id", getOpportunityById);
 router.post("/", authorizeRoles("company", "admin", "superadmin"), uploadMultipleDocuments, createOpportunity);
 router.put("/:id", authorizeRoles("company", "admin", "superadmin"), updateOpportunity);
@@ -93,6 +97,8 @@ router.patch("/:id/status", authorizeRoles("admin", "superadmin", "leader"), cha
 
 // Postulaciones
 router.post("/:id/apply", authorizeRoles("student"), applyToOpportunity);
+// RQ04_HU002: Aplicar a oportunidad con hoja de vida (postulante). Body: { profileId }
+router.post("/:id/aplicar", authorizeRoles("student"), aplicarOportunidad);
 router.get("/:id/applications", authorizeRoles("company", "admin", "superadmin", "leader"), getApplications);
 router.patch("/:id/applications/:postulacionId", authorizeRoles("company", "admin", "superadmin", "leader"), reviewApplication);
 router.post("/:id/applications/select-multiple", authorizeRoles("company", "admin", "superadmin", "leader"), selectMultipleApplications);
