@@ -27,6 +27,7 @@ import condicionCurricularRoutes from '../modules/condicionesCurriculares/condic
 import documentParametrizationRoutes from '../modules/parametrizacionDocumentos/documentParametrization.routes.js';
 import userSucursalRoutes from '../modules/userSucursal/userSucursal.routes.js';
 import estudiantesHabilitadosRoutes from '../modules/estudiantesHabilitados/estudianteHabilitado.routes.js';
+import parametrosPlantillaRoutes from '../modules/parametrosPlantilla/parametroPlantilla.routes.js';
 
 const router = express.Router();
 
@@ -58,5 +59,6 @@ router.use("/condiciones-curriculares", condicionCurricularRoutes);
 router.use("/parametrizacion-documentos", documentParametrizationRoutes);
 router.use("/user-sucursales", userSucursalRoutes);
 router.use("/estudiantes-habilitados", estudiantesHabilitadosRoutes);
+router.use("/parametros-plantilla", parametrosPlantillaRoutes);
 
 export default router;
