@@ -35,14 +35,19 @@ export const loginUser = async (req, res) => {
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ message: "Usuario no encontrado" });
 
-    // Reglas de acceso por formulario:
+    // Reglas de acceso por formulario (login con email/contraseña):
+    // - isLocal === true: permite login normal en local (desarrollo del módulo estudiante sin SAML)
     // - 'entidades': siempre puede usar el formulario
     // - 'administrativo' sin directorioActivo: puede usar el formulario
-    // - 'administrativo' con directorioActivo: debe usar SAML
-    // - 'estudiante' o sin módulo: siempre debe usar SAML
+    // - 'administrativo' con directorioActivo: debe usar SAML (directorio activo)
+    // - 'estudiante' o módulo vacío: SOLO directorio activo (SAML), salvo isLocal
+    const isLocalUser = user && (user.isLocal === true || user.isLocal === "true");
+    const modulo = user.modulo != null ? String(user.modulo).trim().toLowerCase() : "";
+
     const puedeUsarFormulario =
-      user.modulo === "entidades" ||
-      (user.modulo === "administrativo" && !user.directorioActivo);
+      isLocalUser ||
+      modulo === "entidades" ||
+      (modulo === "administrativo" && !user.directorioActivo);
 
     if (!puedeUsarFormulario) {
       return res.status(403).json({

@@ -7,6 +7,8 @@ import {
   updateUserProfile,
   changePassword,
   getMyPermissions,
+  getNotificationPreferences,
+  updateNotificationPreferences,
 } from "./user.controller.js";
 import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
 
@@ -19,6 +21,8 @@ router.use(verifyToken);
 router.get("/", authorizeRoles("admin", "superadmin"), getUsers);
 router.get("/profile", getUserById);
 router.get("/my-permissions", getMyPermissions);
+router.get("/notification-preferences", getNotificationPreferences);
+router.put("/notification-preferences", updateNotificationPreferences);
 router.put("/profile", updateUserProfile);
 router.put("/change-password", changePassword);
 router.get("/:id", getUserById);

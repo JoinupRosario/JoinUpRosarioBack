@@ -37,17 +37,9 @@ const opportunitySchema = new mongoose.Schema(
       default: null
     },
 
-    // Tipo de vinculación y periodo
+    // Tipo de vinculación y periodo (sin enum: se acepta el valor que venga del formulario)
     tipoVinculacion: {
       type: String,
-      enum: [
-        "contrato_laboral_nomina",
-        "contrato_aprendizaje",
-        "convenio_docencia_servicio",
-        "acto_administrativo",
-        "acuerdo_vinculacion",
-        "otro_documento"
-      ],
       default: null
     },
     periodo: {
@@ -83,7 +75,6 @@ const opportunitySchema = new mongoose.Schema(
     },
     dedicacion: {
       type: String,
-      enum: ["tiempo_completo", "medio_tiempo", "por_horas"],
       default: null
     },
     jornadaSemanalPractica: {
@@ -148,11 +139,10 @@ const opportunitySchema = new mongoose.Schema(
       default: null
     },
 
-    // Formación académica requerida
+    // Formación académica requerida (level sin enum: se acepta PREGRADO, Pregrado, etc.)
     formacionAcademica: [{
       level: {
         type: String,
-        enum: ["Pregrado", "Posgrado"],
         required: true
       },
       program: {
@@ -345,12 +335,11 @@ const opportunitySchema = new mongoose.Schema(
       required: true
     },
 
-    // Aprobación por programa académico
+    // Aprobación por programa académico (programa.level sin enum: acepta PREGRADO, Pregrado, etc.)
     aprobacionesPorPrograma: [{
       programa: {
         level: {
           type: String,
-          enum: ["Pregrado", "Posgrado"],
           required: true
         },
         program: {

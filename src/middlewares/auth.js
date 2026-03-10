@@ -18,14 +18,18 @@ export const verifyToken = (req, res, next) => {
   }
 };
 
-// Función para mapear modulo a role
+// Función para mapear modulo a role (módulo vacío o no definido = estudiante, como en el front)
 const mapModuloToRole = (modulo) => {
+  const normalized = modulo != null ? String(modulo).trim().toLowerCase() : '';
   const mapping = {
     'entidades': 'company',
     'administrativo': 'admin',
-    'estudiante': 'student'
+    'estudiante': 'student',
+    'postulante': 'student',
+    '': 'student'  // módulo vacío o migrados sin módulo = estudiante
   };
-  return mapping[modulo] || modulo;
+  if (mapping[normalized] !== undefined) return mapping[normalized];
+  return normalized || 'student';  // valor vacío → student; otro valor se devuelve tal cual
 };
 
 export const authorizeRoles = (...roles) => {

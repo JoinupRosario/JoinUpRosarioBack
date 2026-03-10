@@ -38,6 +38,7 @@ const ALLOWED_ORIGINS = [
   "https://join-up-rosario-front.vercel.app",
   "http://localhost:5173",
   "http://localhost:5174",
+  "localhost:5173",
 ];
 
 const corsOptions = {

@@ -241,6 +241,38 @@ const postulantPopulate = [
   { path: "gender", select: "name value" },
 ];
 
+/**
+ * GET /postulants/me — Devuelve el postulante del usuario autenticado (módulo estudiante).
+ * Requiere verifyToken. req.user.id = User._id.
+ */
+export const getPostulantMe = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ message: "No autenticado" });
+    }
+
+    const postulant = await Postulant.findOne({ postulantId: userId }).populate(postulantPopulate).lean();
+    if (!postulant) {
+      return res.status(404).json({
+        message: "No tiene un perfil de postulante. Contacte al administrador para completar su registro.",
+      });
+    }
+
+    const profile = await PostulantProfile.findOne({ postulantId: postulant._id }).select("acceptTerms").lean();
+    const response = formatPostulantProfileResponse(postulant);
+    response.acept_terms = profile?.acceptTerms ?? false;
+    res.json(response);
+  } catch (error) {
+    console.error("[getPostulantMe]", error?.message || error);
+    res.status(500).json({
+      message: process.env.NODE_ENV === "production"
+        ? "Error al cargar su perfil. Intente de nuevo."
+        : (error?.message || "Error interno"),
+    });
+  }
+};
+
 export const getPostulantById = async (req, res) => {
   try {
     const { id } = req.params;

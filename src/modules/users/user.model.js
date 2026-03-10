@@ -48,7 +48,16 @@ const userSchema = new mongoose.Schema({
   debeCambiarPassword: {
     type: Boolean,
     default: false
-  }
+  },
+  /** Si true, permite login por formulario (email/contraseña) en local aunque sea estudiante o use directorio activo. Solo para desarrollo. */
+  isLocal: {
+    type: Boolean,
+    default: false
+  },
+  /** Preferencias de notificaciones (solo postulantes/estudiantes). */
+  notifActivacionOfertas: { type: Boolean, default: false },
+  notifActivacionOfertasPractica: { type: Boolean, default: false },
+  notifCierreOfertas: { type: Boolean, default: false }
 }, {
   timestamps: true,
   versionKey: false

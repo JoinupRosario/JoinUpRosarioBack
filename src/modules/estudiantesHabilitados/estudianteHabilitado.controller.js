@@ -15,6 +15,34 @@ import { evaluarTodasLasReglas }        from "./reglasEvaluador.service.js";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * GET /estudiantes-habilitados/me-autorizado
+ * Indica si el usuario autenticado (estudiante) está AUTORIZADO en estudiantes habilitados.
+ * Usado en el home del estudiante para mostrar u ocultar el botón "Prácticas y Pasantías".
+ * Busca por user (User._id) o por postulant (Postulant._id del postulante ligado a este User).
+ */
+export const getMeAutorizado = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ message: "No autenticado" });
+    }
+    const postulantDoc = await Postulant.findOne({ postulantId: userId }).select("_id").lean();
+    const postulantId = postulantDoc?._id ?? null;
+    const filter = {
+      estadoFinal: "AUTORIZADO",
+      $or: [{ user: userId }],
+    };
+    if (postulantId) {
+      filter.$or.push({ postulant: postulantId });
+    }
+    const count = await EstudianteHabilitado.countDocuments(filter);
+    res.json({ autorizado: count > 0 });
+  } catch (e) {
+    res.status(500).json({ message: "Error al verificar autorización", error: e.message });
+  }
+};
+
+/**
  * GET /estudiantes-habilitados
  * Listado paginado con filtros.
  */
