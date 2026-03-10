@@ -1,10 +1,129 @@
+import mongoose from "mongoose";
 import Opportunity from "./opportunity.model.js";
 import Company from "../companies/company.model.js";
 import Student from "../students/student.model.js";
 import EstudianteHabilitado from "../estudiantesHabilitados/estudianteHabilitado.model.js";
 import Postulant from "../postulants/models/postulants.schema.js";
 import PostulacionOportunidad from "./postulacionOportunidad.model.js";
+import { ProfileEnrolledProgram, ProfileGraduateProgram, ProfileSkill, ProfileCv } from "../postulants/models/profile/index.js";
 import Periodo from "../periodos/periodo.model.js";
+import Country from "../shared/location/models/country.schema.js";
+import City from "../shared/location/models/city.schema.js";
+import Item from "../shared/reference-data/models/item.schema.js";
+
+const OBJECTID_REGEX = /^[a-f0-9]{24}$/i;
+const LIST_ID_INTEREST_AREA = "L_INTEREST_AREA";
+const LIST_ID_EMOTIONAL_SALARY = "L_EMOTIONAL_SALARY";
+const LIST_ID_DEDICATION_JOB_OFFER = "L_DEDICATION_JOB_OFFER";
+
+/** Normaliza periodo, pais y ciudad a ObjectId (refs). Acepta código o id. Modifica data in-place. */
+async function normalizeOpportunityRefs(data) {
+  if (data.periodo != null && data.periodo !== "") {
+    const v = String(data.periodo).trim();
+    if (OBJECTID_REGEX.test(v)) {
+      data.periodo = new mongoose.Types.ObjectId(v);
+    } else {
+      const doc = await Periodo.findOne({ codigo: v }).select("_id").lean();
+      data.periodo = doc ? doc._id : null;
+    }
+  }
+  if (data.pais != null && data.pais !== "") {
+    const v = String(data.pais).trim();
+    if (OBJECTID_REGEX.test(v)) {
+      data.pais = new mongoose.Types.ObjectId(v);
+    } else {
+      const doc = await Country.findOne({
+        $or: [{ sortname: v }, { isoAlpha2: v }, { name: new RegExp(`^${escapeRegex(v)}$`, "i") }
+        ]
+      }).select("_id").lean();
+      data.pais = doc ? doc._id : null;
+    }
+  }
+  if (data.ciudad != null && data.ciudad !== "") {
+    const v = String(data.ciudad).trim();
+    if (OBJECTID_REGEX.test(v)) {
+      data.ciudad = new mongoose.Types.ObjectId(v);
+    } else {
+      const doc = await City.findOne({ name: new RegExp(`^${escapeRegex(v)}$`, "i") }).select("_id").lean();
+      data.ciudad = doc ? doc._id : null;
+    }
+  }
+
+  // Área de desempeño: ref Item (L_INTEREST_AREA)
+  if (data.areaDesempeno != null && data.areaDesempeno !== "") {
+    const v = data.areaDesempeno;
+    if (v._id && OBJECTID_REGEX.test(String(v._id))) {
+      data.areaDesempeno = new mongoose.Types.ObjectId(v._id);
+    } else {
+      const s = String(v).trim();
+      if (OBJECTID_REGEX.test(s)) {
+        data.areaDesempeno = new mongoose.Types.ObjectId(s);
+      } else {
+        const doc = await Item.findOne({
+          listId: LIST_ID_INTEREST_AREA,
+          $or: [
+            { value: new RegExp(`^${escapeRegex(s)}$`, "i") },
+            { description: new RegExp(`^${escapeRegex(s)}$`, "i") }
+          ]
+        }).select("_id").lean();
+        data.areaDesempeno = doc ? doc._id : null;
+      }
+    }
+  }
+
+  // Salario emocional: array de refs Item (L_EMOTIONAL_SALARY)
+  if (Array.isArray(data.salarioEmocional)) {
+    const resolved = [];
+    for (const entry of data.salarioEmocional) {
+      if (entry == null || entry === "") continue;
+      const v = entry;
+      if (v._id && OBJECTID_REGEX.test(String(v._id))) {
+        resolved.push(new mongoose.Types.ObjectId(v._id));
+      } else {
+        const s = String(v).trim();
+        if (OBJECTID_REGEX.test(s)) {
+          resolved.push(new mongoose.Types.ObjectId(s));
+        } else {
+          const doc = await Item.findOne({
+            listId: LIST_ID_EMOTIONAL_SALARY,
+            $or: [
+              { value: new RegExp(`^${escapeRegex(s)}$`, "i") },
+              { description: new RegExp(`^${escapeRegex(s)}$`, "i") }
+            ]
+          }).select("_id").lean();
+          if (doc) resolved.push(doc._id);
+        }
+      }
+    }
+    data.salarioEmocional = resolved;
+  }
+
+  // Dedicación: ref Item (L_DEDICATION_JOB_OFFER)
+  if (data.dedicacion != null && data.dedicacion !== "") {
+    const v = data.dedicacion;
+    if (v._id && OBJECTID_REGEX.test(String(v._id))) {
+      data.dedicacion = new mongoose.Types.ObjectId(v._id);
+    } else {
+      const s = String(v).trim();
+      if (OBJECTID_REGEX.test(s)) {
+        data.dedicacion = new mongoose.Types.ObjectId(s);
+      } else {
+        const doc = await Item.findOne({
+          listId: LIST_ID_DEDICATION_JOB_OFFER,
+          $or: [
+            { value: new RegExp(`^${escapeRegex(s)}$`, "i") },
+            { description: new RegExp(`^${escapeRegex(s)}$`, "i") }
+          ]
+        }).select("_id").lean();
+        data.dedicacion = doc ? doc._id : null;
+      }
+    }
+  }
+}
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 // Obtener todas las oportunidades
 export const getOpportunities = async (req, res) => {
@@ -131,8 +250,21 @@ export const getOpportunities = async (req, res) => {
 
     const total = await Opportunity.countDocuments(filter);
 
+    // Conteo de aplicaciones: postulaciones embebidas + PostulacionOportunidad
+    const opportunityIds = opportunities.map((o) => o._id);
+    const countsFromPO = await PostulacionOportunidad.aggregate([
+      { $match: { opportunity: { $in: opportunityIds } } },
+      { $group: { _id: "$opportunity", count: { $sum: 1 } } },
+    ]);
+    const countMap = new Map(countsFromPO.map((c) => [c._id.toString(), c.count]));
+    const opportunitiesWithCount = opportunities.map((opp) => {
+      const legacy = opp.postulaciones?.length || 0;
+      const fromPO = countMap.get(opp._id.toString()) || 0;
+      return { ...opp.toObject(), aplicacionesCount: legacy + fromPO };
+    });
+
     res.json({
-      opportunities,
+      opportunities: opportunitiesWithCount,
       totalPages: Math.ceil(total / limit),
       currentPage: parseInt(page),
       total
@@ -184,10 +316,18 @@ export const getOfertasParaEstudiantePracticas = async (req, res) => {
       });
     }
 
-    // La oportunidad puede tener periodo como ID (string) o como codigo ("2026-1"); aceptamos ambos
-    const periodIds = [...new Set(autorizados.map((a) => a.periodo?._id?.toString()).filter(Boolean))];
+    // Oportunidad.periodo es ObjectId; usar solo IDs para el filtro (resolver códigos si hace falta)
+    const OBJECTID_REGEX = /^[a-f0-9]{24}$/i;
+    const periodIdsFromAuth = [...new Set(autorizados.map((a) => a.periodo?._id?.toString()).filter(Boolean))];
     const periodCodes = [...new Set(autorizados.map((a) => a.periodo?.codigo).filter(Boolean))];
-    const periodValues = [...new Set([...periodIds, ...periodCodes])];
+    const periodIdsResolved = [...periodIdsFromAuth];
+    if (periodCodes.length) {
+      const periodosByCode = await Periodo.find({ codigo: { $in: periodCodes } }).select("_id").lean();
+      periodosByCode.forEach((p) => {
+        if (p._id) periodIdsResolved.push(p._id.toString());
+      });
+    }
+    const periodObjectIds = [...new Set(periodIdsResolved)].filter((id) => OBJECTID_REGEX.test(id)).map((id) => new mongoose.Types.ObjectId(id));
 
     const programTerms = new Set();
     autorizados.forEach((a) => {
@@ -201,7 +341,7 @@ export const getOfertasParaEstudiantePracticas = async (req, res) => {
       if (a.nombrePrograma) programTerms.add(a.nombrePrograma.trim());
     });
     const programTermsList = [...programTerms].filter(Boolean);
-    if (!periodValues.length || !programTermsList.length) {
+    if (!periodObjectIds.length || !programTermsList.length) {
       return res.json({
         opportunities: [],
         totalPages: 0,
@@ -214,7 +354,7 @@ export const getOfertasParaEstudiantePracticas = async (req, res) => {
     const filter = {
       tipo: "practica",
       estado: "Activa",
-      periodo: { $in: periodValues },
+      periodo: { $in: periodObjectIds },
       $or: programTermsList.map((term) => ({
         "formacionAcademica.program": { $regex: escapeRegex(term), $options: "i" },
       })),
@@ -242,7 +382,7 @@ export const getOfertasParaEstudiantePracticas = async (req, res) => {
       const n = parseFloat(String(v).replace(",", "."));
       return Number.isFinite(n) ? n : NaN;
     };
-    const opportunitiesFiltered = allCandidates.filter((opp) => {
+    let opportunitiesFiltered = allCandidates.filter((opp) => {
       const minPromedio = parseNum(opp.promedioMinimoRequerido);
       if (Number.isNaN(minPromedio)) return true; // sin requisito de promedio, se muestra
 
@@ -266,16 +406,22 @@ export const getOfertasParaEstudiantePracticas = async (req, res) => {
       return studentPromedio >= minPromedio;
     });
 
-    // Excluir ofertas a las que el estudiante ya se postuló
+    // Excluir solo las ofertas a las que ya aplicó (comparación estricta por _id de oportunidad)
     if (postulantId) {
       const postulacionesYa = await PostulacionOportunidad.find({ postulant: postulantId })
         .select("opportunity")
         .lean();
-      const idsAplicados = new Set(
-        postulacionesYa.map((p) => (p.opportunity != null ? String(p.opportunity) : "")).filter(Boolean)
-      );
+      const idsAplicados = new Set();
+      for (const p of postulacionesYa) {
+        if (p.opportunity == null) continue;
+        const idStr = String(p.opportunity).trim();
+        if (idStr.length === 24) idsAplicados.add(idStr);
+      }
       if (idsAplicados.size > 0) {
-        opportunitiesFiltered = opportunitiesFiltered.filter((opp) => !idsAplicados.has(opp._id.toString()));
+        opportunitiesFiltered = opportunitiesFiltered.filter((opp) => {
+          const oppId = opp._id != null ? String(opp._id).trim() : "";
+          return oppId.length !== 24 || !idsAplicados.has(oppId);
+        });
       }
     }
 
@@ -298,6 +444,12 @@ export const getOpportunityById = async (req, res) => {
   try {
     const opportunity = await Opportunity.findById(req.params.id)
       .populate("company", "name commercialName sector logo contact")
+      .populate("periodo", "codigo tipo estado")
+      .populate("pais", "name sortname isoAlpha2")
+      .populate("ciudad", "name codDian")
+      .populate("dedicacion", "value description listId")
+      .populate("areaDesempeno", "value description listId")
+      .populate("salarioEmocional", "value description listId")
       .populate("creadoPor", "name email")
       .populate("postulaciones.estudiante", "studentId faculty program user")
       .populate("postulaciones.revisadoPor", "name email")
@@ -312,14 +464,17 @@ export const getOpportunityById = async (req, res) => {
     }
 
     const payload = opportunity.toObject ? opportunity.toObject() : { ...opportunity };
-    // Si periodo está guardado como ObjectId (string 24 hex), resolver a código legible
-    if (payload.periodo && /^[a-f0-9]{24}$/i.test(String(payload.periodo).trim())) {
-      try {
-        const periodDoc = await Periodo.findById(payload.periodo).select("codigo").lean();
-        if (periodDoc?.codigo) payload.periodo = periodDoc.codigo;
-      } catch (_) { /* dejar periodo como está */ }
+    // Si dedicacion viene como string (legacy), resolver a Item para que el front reciba objeto
+    if (payload.dedicacion && typeof payload.dedicacion === "string") {
+      const doc = await Item.findOne({
+        listId: LIST_ID_DEDICATION_JOB_OFFER,
+        $or: [
+          { value: new RegExp(`^${escapeRegex(payload.dedicacion.trim())}$`, "i") },
+          { description: new RegExp(`^${escapeRegex(payload.dedicacion.trim())}$`, "i") }
+        ]
+      }).select("_id value description").lean();
+      if (doc) payload.dedicacion = doc;
     }
-
     res.json(payload);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -364,6 +519,8 @@ export const createOpportunity = async (req, res) => {
         message: "Las funciones deben tener al menos 60 caracteres" 
       });
     }
+
+    await normalizeOpportunityRefs(restData);
 
     // Procesar documentos si vienen en FormData
     const documentos = [];
@@ -441,10 +598,11 @@ export const updateOpportunity = async (req, res) => {
       });
     }
 
-    // No permitir cambiar el estado directamente desde aquí (usar changeStatus)
-    if (updateData.estado) {
-      delete updateData.estado;
-    }
+    // No permitir cambiar el estado ni el historial desde el body
+    if (updateData.estado) delete updateData.estado;
+    if (updateData.historialEstados) delete updateData.historialEstados;
+
+    await normalizeOpportunityRefs(updateData);
 
     const updatedOpportunity = await Opportunity.findByIdAndUpdate(
       id,
@@ -454,9 +612,27 @@ export const updateOpportunity = async (req, res) => {
       .populate("company", "name commercialName sector logo")
       .populate("creadoPor", "name email");
 
+    // Registrar edición en historial de estados (mismo estado = edición)
+    if (updatedOpportunity) {
+      const historialEntry = {
+        estadoAnterior: opportunity.estado,
+        estadoNuevo: opportunity.estado,
+        cambiadoPor: req.user.id,
+        fechaCambio: new Date(),
+        comentarios: "Oportunidad editada"
+      };
+      updatedOpportunity.historialEstados.push(historialEntry);
+      await updatedOpportunity.save();
+    }
+
+    const finalOpportunity = await Opportunity.findById(id)
+      .populate("company", "name commercialName sector logo")
+      .populate("creadoPor", "name email")
+      .populate("historialEstados.cambiadoPor", "name email");
+
     res.json({
       message: "Oportunidad actualizada correctamente",
-      opportunity: updatedOpportunity
+      opportunity: finalOpportunity
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -657,15 +833,25 @@ export const duplicateOpportunity = async (req, res) => {
     delete opportunityData.motivoRechazo;
     delete opportunityData.motivoRechazoOtro;
 
-    // Establecer estado inicial
+    // Establecer estado inicial e historial como "Creada" (igual que crear de cero)
     opportunityData.estado = "Creada";
     opportunityData.creadoPor = req.user.id;
     opportunityData.fechaCreacion = new Date();
+    opportunityData.historialEstados = [{
+      estadoAnterior: null,
+      estadoNuevo: "Creada",
+      cambiadoPor: req.user.id,
+      fechaCambio: new Date(),
+      comentarios: "Oportunidad creada"
+    }];
+
+    await normalizeOpportunityRefs(opportunityData);
 
     const newOpportunity = await Opportunity.create(opportunityData);
 
     await newOpportunity.populate("company", "name commercialName sector logo");
     await newOpportunity.populate("creadoPor", "name email");
+    await newOpportunity.populate("historialEstados.cambiadoPor", "name email");
 
     res.status(201).json({
       message: "Oportunidad duplicada correctamente",
@@ -874,7 +1060,11 @@ export const getMisPostulaciones = async (req, res) => {
 export const getApplications = async (req, res) => {
   try {
     const opportunity = await Opportunity.findById(req.params.id)
-      .populate("postulaciones.estudiante", "studentId faculty program user")
+      .populate({
+        path: "postulaciones.estudiante",
+        select: "studentId faculty program user",
+        populate: { path: "user", select: "name email" },
+      })
       .populate("postulaciones.revisadoPor", "name email");
 
     if (!opportunity) {
@@ -883,32 +1073,235 @@ export const getApplications = async (req, res) => {
 
     const postulantesList = await PostulacionOportunidad.find({ opportunity: req.params.id })
       .populate("postulant", "postulantId")
-      .populate("postulantProfile", "studentCode")
+      .populate("postulantProfile", "studentCode yearsExperience totalTimeExperience")
       .populate({ path: "postulant", populate: { path: "postulantId", select: "name email" } })
       .lean();
 
-    const postulacionesLegacy = (opportunity.postulaciones || []).map((p) => ({
-      ...p.toObject?.() || p,
-      _source: "legacy",
-      tipo: "student",
-    }));
-    const postulacionesPostulantes = postulantesList.map((p) => ({
-      _id: p._id,
-      postulant: p.postulant,
-      postulantProfile: p.postulantProfile,
-      fechaPostulacion: p.fechaAplicacion,
-      estado: p.estado,
-      comentarios: p.comentarios,
-      revisadoPor: p.revisadoPor,
-      fechaRevision: p.updatedAt,
-      _source: "postulacion_oportunidad",
-      tipo: "postulant",
-    }));
+    const profileIds = postulantesList
+      .map((p) => p.postulantProfile?._id)
+      .filter(Boolean);
+
+    const [enrolledByProfile, graduateByProfile] = await Promise.all([
+      profileIds.length
+        ? ProfileEnrolledProgram.find({ profileId: { $in: profileIds } })
+            .populate("programId", "name level")
+            .lean()
+        : [],
+      profileIds.length
+        ? ProfileGraduateProgram.find({ profileId: { $in: profileIds } })
+            .populate("programId", "name level")
+            .lean()
+        : [],
+    ]);
+
+    const enrolledMap = new Map();
+    enrolledByProfile.forEach((e) => {
+      if (!e.profileId) return;
+      const key = e.profileId.toString();
+      if (!enrolledMap.has(key)) enrolledMap.set(key, []);
+      enrolledMap.get(key).push(e.programId?.name || e.programId?.level || "—");
+    });
+    const graduateMap = new Map();
+    graduateByProfile.forEach((g) => {
+      if (!g.profileId) return;
+      const key = g.profileId.toString();
+      if (!graduateMap.has(key)) graduateMap.set(key, []);
+      graduateMap.get(key).push(g.programId?.name || g.programId?.level || "—");
+    });
+
+    const estadoLabel = (est) => {
+      const map = {
+        aplicado: "Enviado",
+        empresa_consulto_perfil: "Revisado",
+        empresa_descargo_hv: "HV descargada",
+        seleccionado_empresa: "Seleccionado",
+        aceptado_estudiante: "Aceptado",
+        rechazado: "Rechazado",
+      };
+      return map[est] || est || "—";
+    };
+
+    const postulacionesLegacy = (opportunity.postulaciones || []).map((p) => {
+      const po = p.toObject?.() || p;
+      const estudiante = po.estudiante || {};
+      const name = estudiante.user?.name || estudiante.name || "";
+      const [nombres = "", ...rest] = (name || "").trim().split(/\s+/);
+      const apellidos = rest.join(" ") || "—";
+      return {
+        ...po,
+        _source: "legacy",
+        tipo: "student",
+        nombres: nombres || "—",
+        apellidos,
+        programasEnCurso: estudiante.program ? [estudiante.program] : [],
+        programasFinalizados: [],
+        añosExperiencia: null,
+        revisada: !!po.revisadoPor,
+        descargada: false,
+        estadoLabel: "Enviado",
+      };
+    });
+
+    const postulacionesPostulantes = postulantesList.map((p) => {
+      const profileId = p.postulantProfile?._id?.toString();
+      const name = (p.postulant?.postulantId?.name || p.postulant?.name || "").trim();
+      const [nombres = "", ...rest] = name ? name.split(/\s+/) : [];
+      const apellidos = rest.join(" ") || "—";
+      const years = p.postulantProfile?.yearsExperience ?? p.postulantProfile?.totalTimeExperience;
+      const añosExperiencia =
+        years != null ? `${years} Año(s) de experiencia` : null;
+      return {
+        _id: p._id,
+        postulant: p.postulant,
+        postulantProfile: p.postulantProfile,
+        fechaPostulacion: p.fechaAplicacion,
+        estado: p.estado,
+        estadoLabel: estadoLabel(p.estado),
+        comentarios: p.comentarios,
+        revisadoPor: p.revisadoPor,
+        fechaRevision: p.updatedAt,
+        _source: "postulacion_oportunidad",
+        tipo: "postulant",
+        nombres: nombres || "—",
+        apellidos,
+        programasEnCurso: profileId ? enrolledMap.get(profileId) || [] : [],
+        programasFinalizados: profileId ? graduateMap.get(profileId) || [] : [],
+        añosExperiencia,
+        revisada: !!p.empresaConsultoPerfilAt,
+        descargada: !!p.empresaDescargoHvAt,
+      };
+    });
 
     res.json({
       postulaciones: [...postulacionesLegacy, ...postulacionesPostulantes],
       total: postulacionesLegacy.length + postulacionesPostulantes.length,
     });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** GET /opportunities/:id/applications/detail/:postulacionId — Detalle de un postulante (perfil, competencias, CVs). Al entrar se marca empresa_consulto_perfil. */
+export const getApplicationDetail = async (req, res) => {
+  try {
+    const { id: opportunityId, postulacionId } = req.params;
+    const opportunity = await Opportunity.findById(opportunityId);
+    if (!opportunity) {
+      return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+
+    let po = await PostulacionOportunidad.findOne({
+      _id: postulacionId,
+      opportunity: opportunityId,
+    })
+      .populate("postulant", "postulantId")
+      .populate("postulantProfile", "studentCode yearsExperience totalTimeExperience")
+      .populate({ path: "postulant", populate: { path: "postulantId", select: "name email" } })
+      .lean();
+
+    if (po) {
+      if (po.estado === "aplicado" && !po.empresaConsultoPerfilAt) {
+        await PostulacionOportunidad.updateOne(
+          { _id: postulacionId },
+          {
+            $set: {
+              estado: "empresa_consulto_perfil",
+              empresaConsultoPerfilAt: new Date(),
+            },
+          }
+        );
+      }
+      // Perfil con el que se postuló: solo CVs y datos de ESE perfil, no de otros perfiles del estudiante
+      const profileIdRaw = po.postulantProfile?._id ?? po.postulantProfile;
+      const profileId = profileIdRaw
+        ? mongoose.Types.ObjectId.isValid(profileIdRaw)
+          ? typeof profileIdRaw === "string"
+            ? new mongoose.Types.ObjectId(profileIdRaw)
+            : profileIdRaw
+          : null
+        : null;
+      const postulantDocId = po.postulant?._id?.toString();
+      const postulantDoc = postulantDocId
+        ? await Postulant.findById(postulantDocId).select("_id phone alternateEmail linkedinLink").lean()
+        : null;
+
+      const [skills, cvs] = await Promise.all([
+        profileId
+          ? ProfileSkill.find({ profileId }).populate("skillId", "name").lean()
+          : [],
+        profileId
+          ? ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").lean()
+          : [],
+      ]);
+
+      const name = (po.postulant?.postulantId?.name || po.postulant?.name || "").trim();
+      const [nombres = "", ...rest] = name ? name.split(/\s+/) : [];
+      const apellidos = rest.join(" ") || "—";
+      const years = po.postulantProfile?.yearsExperience ?? po.postulantProfile?.totalTimeExperience;
+      const añosExperiencia = years != null ? `${years} Año(s) de experiencia` : null;
+
+      const [enrolledList, graduateList] = await Promise.all([
+        profileId ? ProfileEnrolledProgram.find({ profileId }).populate("programId", "name level").lean() : [],
+        profileId ? ProfileGraduateProgram.find({ profileId }).populate("programId", "name level").lean() : [],
+      ]);
+
+      res.json({
+        _id: po._id,
+        _source: "postulacion_oportunidad",
+        nombres: nombres || "—",
+        apellidos,
+        email: po.postulant?.postulantId?.email || postulantDoc?.alternateEmail || "—",
+        telefono: postulantDoc?.phone || "—",
+        linkedin: postulantDoc?.linkedinLink || null,
+        fechaAplicacion: po.fechaAplicacion,
+        estado: po.estado,
+        estadoLabel: { aplicado: "Enviado", empresa_consulto_perfil: "Revisado", empresa_descargo_hv: "HV descargada", seleccionado_empresa: "Seleccionado", aceptado_estudiante: "Aceptado", rechazado: "Rechazado" }[po.estado] || po.estado,
+        programasEnCurso: enrolledList.map((e) => e.programId?.name || e.programId?.level || "—"),
+        programasFinalizados: graduateList.map((g) => g.programId?.name || g.programId?.level || "—"),
+        añosExperiencia,
+        competencias: skills.map((s) => s.skillId?.name).filter(Boolean),
+        hojasDeVida: cvs.map((c) => ({
+          attachmentId: c.attachmentId?._id,
+          name: c.attachmentId?.name || "Hoja de vida",
+          postulantDocId: postulantDocId || postulantDoc?._id?.toString(),
+        })),
+      });
+      return;
+    }
+
+    const oppWithLegacy = await Opportunity.findById(opportunityId)
+      .populate({ path: "postulaciones.estudiante", select: "studentId faculty program user", populate: { path: "user", select: "name email" } })
+      .lean();
+    const legacy = (oppWithLegacy?.postulaciones || []).find(
+      (p) => p._id && p._id.toString() === postulacionId
+    );
+    if (legacy) {
+      const leg = legacy;
+      const estudiante = leg.estudiante || {};
+      const name = (estudiante.user?.name || estudiante.name || "").trim();
+      const [nombres = "", ...rest] = name ? name.split(/\s+/) : [];
+      const apellidos = rest.join(" ") || "—";
+      res.json({
+        _id: leg._id,
+        _source: "legacy",
+        nombres: nombres || "—",
+        apellidos,
+        email: estudiante.user?.email || "—",
+        telefono: "—",
+        linkedin: null,
+        fechaAplicacion: leg.fechaPostulacion,
+        estado: leg.estado,
+        estadoLabel: "Enviado",
+        programasEnCurso: estudiante.program ? [estudiante.program] : [],
+        programasFinalizados: [],
+        añosExperiencia: null,
+        competencias: [],
+        hojasDeVida: [],
+      });
+      return;
+    }
+
+    return res.status(404).json({ message: "Postulación no encontrada" });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

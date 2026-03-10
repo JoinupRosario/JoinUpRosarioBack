@@ -42,8 +42,10 @@ const opportunitySchema = new mongoose.Schema(
       type: String,
       default: null
     },
+    /** Referencia al período académico (Periodo). Siempre guardar ObjectId para consistencia. */
     periodo: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Periodo",
       default: null
     },
     vacantes: {
@@ -56,13 +58,16 @@ const opportunitySchema = new mongoose.Schema(
       default: null
     },
 
-    // Ubicación
+    /** Referencia al país (Country). Siempre guardar ObjectId. */
     pais: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Country",
       default: null
     },
+    /** Referencia a la ciudad (City). Siempre guardar ObjectId. */
     ciudad: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "City",
       default: null
     },
 
@@ -73,8 +78,10 @@ const opportunitySchema = new mongoose.Schema(
       min: 0,
       max: 48
     },
+    /** Referencia a Item (listId L_DEDICATION_JOB_OFFER). */
     dedicacion: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "items",
       default: null
     },
     jornadaSemanalPractica: {
@@ -95,9 +102,10 @@ const opportunitySchema = new mongoose.Schema(
       default: null
     },
 
-    // Área de desempeño y enlaces
+    // Área de desempeño: referencia a Item (listId L_INTEREST_AREA)
     areaDesempeno: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "items",
       default: null
     },
     enlacesFormatoEspecificos: {
@@ -129,11 +137,11 @@ const opportunitySchema = new mongoose.Schema(
       }
     }],
 
-    // Salario emocional y promedio
-    salarioEmocional: {
-      type: [String],
-      default: []
-    },
+    // Salario emocional: referencias a Item (listId L_EMOTIONAL_SALARY)
+    salarioEmocional: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "items"
+    }],
     promedioMinimoRequerido: {
       type: String,
       default: null

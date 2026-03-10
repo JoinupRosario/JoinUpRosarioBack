@@ -14,6 +14,7 @@ import {
   changeStatus,
   applyToOpportunity,
   getApplications,
+  getApplicationDetail,
   reviewApplication,
   selectMultipleApplications,
   approveProgram,
@@ -100,6 +101,7 @@ router.post("/:id/apply", authorizeRoles("student"), applyToOpportunity);
 // RQ04_HU002: Aplicar a oportunidad con hoja de vida (postulante). Body: { profileId }
 router.post("/:id/aplicar", authorizeRoles("student"), aplicarOportunidad);
 router.get("/:id/applications", authorizeRoles("company", "admin", "superadmin", "leader"), getApplications);
+router.get("/:id/applications/detail/:postulacionId", authorizeRoles("company", "admin", "superadmin", "leader"), getApplicationDetail);
 router.patch("/:id/applications/:postulacionId", authorizeRoles("company", "admin", "superadmin", "leader"), reviewApplication);
 router.post("/:id/applications/select-multiple", authorizeRoles("company", "admin", "superadmin", "leader"), selectMultipleApplications);
 
