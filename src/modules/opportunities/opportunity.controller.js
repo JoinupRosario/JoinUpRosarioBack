@@ -457,7 +457,11 @@ export const getOpportunityById = async (req, res) => {
       .populate("activadoPor", "name email")
       .populate("rechazadoPor", "name email")
       .populate("aprobacionesPorPrograma.aprobadoPor", "name email")
-      .populate("historialEstados.cambiadoPor", "name email");
+      .populate("historialEstados.cambiadoPor", "name email")
+      .populate({
+        path: "cierrePostulantesSeleccionados",
+        populate: { path: "postulant", select: "postulantId", populate: { path: "postulantId", select: "name email" } },
+      });
 
     if (!opportunity) {
       return res.status(404).json({ message: "Oportunidad no encontrada" });
@@ -716,6 +720,59 @@ export const changeStatus = async (req, res) => {
     res.json({
       message: `Estado cambiado a "${estado}" correctamente`,
       opportunity: finalOpportunity
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** POST /opportunities/:id/close — Cerrar oportunidad (solo si está Activa). Body: contrató (boolean), motivoNoContrato? (string), postulantesSeleccionados? ([id]), datosTutor? ([{ postulacionId, nombreTutor, ... }]). */
+export const closeOpportunity = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { contrató, motivoNoContrato, postulantesSeleccionados, datosTutor } = req.body;
+
+    const opportunity = await Opportunity.findById(id);
+    if (!opportunity) {
+      return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+    if (opportunity.estado !== "Activa") {
+      return res.status(400).json({ message: "Solo se puede cerrar una oportunidad en estado Activa" });
+    }
+
+    const estadoAnterior = opportunity.estado;
+    opportunity.estado = "Cerrada";
+    opportunity.fechaCierre = new Date();
+    opportunity.motivoCierreNoContrato = contrató === false ? (motivoNoContrato || null) : null;
+    opportunity.cierrePostulantesSeleccionados = Array.isArray(postulantesSeleccionados) ? postulantesSeleccionados : [];
+    opportunity.cierreDatosTutor = Array.isArray(datosTutor) ? datosTutor : [];
+
+    if (opportunity.cierrePostulantesSeleccionados.length > 0) {
+      await PostulacionOportunidad.updateMany(
+        { _id: { $in: opportunity.cierrePostulantesSeleccionados }, opportunity: id },
+        { $set: { estado: "seleccionado_empresa", seleccionadoAt: new Date() } }
+      );
+    }
+
+    opportunity.historialEstados.push({
+      estadoAnterior,
+      estadoNuevo: "Cerrada",
+      cambiadoPor: req.user.id,
+      fechaCambio: new Date(),
+      comentarios: contrató === false ? motivoNoContrato : "Oportunidad cerrada con postulante(s) seleccionado(s)",
+    });
+    await opportunity.save();
+
+    const updated = await Opportunity.findById(id)
+      .populate("company", "name commercialName sector logo")
+      .populate("revisadoPor", "name email")
+      .populate("activadoPor", "name email")
+      .populate("rechazadoPor", "name email")
+      .populate("historialEstados.cambiadoPor", "name email");
+
+    res.json({
+      message: "Oportunidad cerrada correctamente",
+      opportunity: updated,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1302,6 +1359,46 @@ export const getApplicationDetail = async (req, res) => {
     }
 
     return res.status(404).json({ message: "Postulación no encontrada" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** PATCH /opportunities/:id/applications/:postulacionId/state — Rechazar postulante o revertir rechazo (solo PostulacionOportunidad). */
+export const updateApplicationState = async (req, res) => {
+  try {
+    const { id: opportunityId, postulacionId } = req.params;
+    const { estado } = req.body;
+
+    if (!estado || !["rechazado", "empresa_consulto_perfil"].includes(estado)) {
+      return res.status(400).json({
+        message: "estado debe ser 'rechazado' o 'empresa_consulto_perfil' (para deshacer rechazo)",
+      });
+    }
+
+    const po = await PostulacionOportunidad.findOne({
+      _id: postulacionId,
+      opportunity: opportunityId,
+    });
+    if (!po) {
+      return res.status(404).json({ message: "Postulación no encontrada" });
+    }
+
+    if (estado === "rechazado") {
+      po.estado = "rechazado";
+      po.rechazadoAt = new Date();
+    } else {
+      po.estado = "empresa_consulto_perfil";
+      po.rechazadoAt = null;
+    }
+    await po.save();
+
+    const estadoLabel = estado === "rechazado" ? "Rechazado" : "Revisado";
+    res.json({
+      message: estado === "rechazado" ? "Postulante rechazado" : "Rechazo revertido",
+      estado: po.estado,
+      estadoLabel,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

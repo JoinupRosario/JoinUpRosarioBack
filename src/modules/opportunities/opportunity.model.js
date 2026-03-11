@@ -248,6 +248,21 @@ const opportunitySchema = new mongoose.Schema(
       type: String,
       default: null
     },
+
+    // Cierre de oportunidad (cuando estaba Activa)
+    motivoCierreNoContrato: { type: String, default: null },
+    cierrePostulantesSeleccionados: [{ type: mongoose.Schema.Types.ObjectId, ref: "PostulacionOportunidad" }],
+    cierreDatosTutor: [{
+      postulacionId: { type: mongoose.Schema.Types.ObjectId, ref: "PostulacionOportunidad" },
+      nombreTutor: String,
+      apellidoTutor: String,
+      emailTutor: String,
+      cargoTutor: String,
+      tipoIdentTutor: String,
+      arlEmpresa: String,
+      identificacionTutor: String,
+      fechaInicioPractica: Date,
+    }],
     
     // Historial de cambios de estado
     historialEstados: [{
