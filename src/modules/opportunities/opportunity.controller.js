@@ -1003,12 +1003,12 @@ export const applyToOpportunity = async (req, res) => {
 
 /**
  * RQ04_HU002: Postulante (estudiante) se postula a una oportunidad con una hoja de vida.
- * POST /opportunities/:id/aplicar — body: { profileId } (PostulantProfile._id)
+ * POST /opportunities/:id/aplicar — body: { profileId } (PostulantProfile._id), opcional { profileVersionId } (ProfileProfileVersion._id)
  */
 export const aplicarOportunidad = async (req, res) => {
   try {
     const { id: opportunityId } = req.params;
-    const { profileId } = req.body;
+    const { profileId, profileVersionId } = req.body;
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ message: "No autenticado" });
     if (!profileId) return res.status(400).json({ message: "Debe seleccionar un perfil (hoja de vida)" });
@@ -1036,6 +1036,19 @@ export const aplicarOportunidad = async (req, res) => {
       return res.status(400).json({ message: "El perfil seleccionado no existe o no le pertenece" });
     }
 
+    let resolvedProfileVersionId = null;
+    if (profileVersionId) {
+      const { ProfileProfileVersion } = await import("../postulants/models/profile/index.js");
+      const version = await ProfileProfileVersion.findOne({
+        _id: profileVersionId,
+        profileId: profile._id,
+      }).select("_id").lean();
+      if (!version) {
+        return res.status(400).json({ message: "La versión de perfil no existe o no pertenece al perfil seleccionado" });
+      }
+      resolvedProfileVersionId = version._id;
+    }
+
     const existing = await PostulacionOportunidad.findOne({
       opportunity: opportunityId,
       postulant: postulant._id,
@@ -1048,6 +1061,7 @@ export const aplicarOportunidad = async (req, res) => {
       postulant: postulant._id,
       opportunity: opportunityId,
       postulantProfile: profileId,
+      profileVersionId: resolvedProfileVersionId || undefined,
       estado: "aplicado",
     });
 
@@ -1268,7 +1282,7 @@ export const getApplicationDetail = async (req, res) => {
           }
         );
       }
-      // Perfil con el que se postuló: solo CVs y datos de ESE perfil, no de otros perfiles del estudiante
+      // Perfil (y versión) con el que se postuló: solo CVs de ESE perfil/versión
       const profileIdRaw = po.postulantProfile?._id ?? po.postulantProfile;
       const profileId = profileIdRaw
         ? mongoose.Types.ObjectId.isValid(profileIdRaw)
@@ -1277,17 +1291,35 @@ export const getApplicationDetail = async (req, res) => {
             : profileIdRaw
           : null
         : null;
+      const profileVersionIdRaw = po.profileVersionId;
+      const profileVersionId = profileVersionIdRaw && mongoose.Types.ObjectId.isValid(profileVersionIdRaw)
+        ? (typeof profileVersionIdRaw === "string" ? new mongoose.Types.ObjectId(profileVersionIdRaw) : profileVersionIdRaw)
+        : null;
+      const cvFilter = { profileId };
+      if (profileVersionId) {
+        cvFilter.profileVersionId = profileVersionId;
+      } else {
+        // Postulación sin versión (legacy o aplicó sin elegir versión): mostrar solo HV sin versión asignada; si no hay ninguna, mostrar todas del perfil.
+        cvFilter.$or = [{ profileVersionId: null }, { profileVersionId: { $exists: false } }];
+      }
       const postulantDocId = po.postulant?._id?.toString();
       const postulantDoc = postulantDocId
         ? await Postulant.findById(postulantDocId).select("_id phone alternateEmail linkedinLink").lean()
         : null;
 
-      const [skills, cvs] = await Promise.all([
+      let cvs = [];
+      if (profileId) {
+        cvs = await ProfileCv.find(cvFilter).populate("attachmentId", "name filepath contentType").lean();
+        if (cvs.length === 0 && !profileVersionId) {
+          const allCvs = await ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").sort({ _id: -1 }).lean();
+          if (allCvs.length > 0) {
+            cvs = [allCvs[0]];
+          }
+        }
+      }
+      const [skills] = await Promise.all([
         profileId
           ? ProfileSkill.find({ profileId }).populate("skillId", "name").lean()
-          : [],
-        profileId
-          ? ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").lean()
           : [],
       ]);
 
@@ -1398,6 +1430,33 @@ export const updateApplicationState = async (req, res) => {
       message: estado === "rechazado" ? "Postulante rechazado" : "Rechazo revertido",
       estado: po.estado,
       estadoLabel,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** PATCH /opportunities/:id/applications/:postulacionId/descargo-hv — Marca que la empresa descargó la HV (empresaDescargoHvAt, estado empresa_descargo_hv). */
+export const markApplicationDescargoHv = async (req, res) => {
+  try {
+    const { id: opportunityId, postulacionId } = req.params;
+    const po = await PostulacionOportunidad.findOne({
+      _id: postulacionId,
+      opportunity: opportunityId,
+    });
+    if (!po) {
+      return res.status(404).json({ message: "Postulación no encontrada" });
+    }
+    po.empresaDescargoHvAt = new Date();
+    if (po.estado !== "empresa_descargo_hv") {
+      po.estado = "empresa_descargo_hv";
+    }
+    await po.save();
+    res.json({
+      message: "HV marcada como descargada",
+      empresaDescargoHvAt: po.empresaDescargoHvAt,
+      estado: po.estado,
+      estadoLabel: "HV descargada",
     });
   } catch (error) {
     res.status(500).json({ message: error.message });

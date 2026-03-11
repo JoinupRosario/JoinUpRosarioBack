@@ -36,7 +36,7 @@ import Periodo from "../../periodos/periodo.model.js";
 import EstudianteHabilitado from "../../estudiantesHabilitados/estudianteHabilitado.model.js";
 import { buildHojaVidaPdf } from "../../../services/hojaVidaPdf.service.js";
 import { buildCartaPresentacionPdf } from "../../../services/cartaPresentacionPdf.service.js";
-import { s3Config, uploadToS3, getSignedDownloadUrl } from "../../../config/s3.config.js";
+import { s3Config, uploadToS3, getObjectFromS3 } from "../../../config/s3.config.js";
 import mongoose from "mongoose";
 
 /** Prefijo S3 para hojas de vida: hojas-vida/{postulantId}/{profileId}/archivo.pdf */
@@ -1583,7 +1583,8 @@ export const generateHojaVidaPdf = async (req, res) => {
     }
 
     const pdfBuffer = await buildHojaVidaPdf(postulantFull, profileData, parametrizacion);
-    const baseName = (selectedProfileVersion?.profileName || postulantFull?.postulantId?.name || "Hoja de vida").replace(/[^\w\s\u00C0-\u00FF-]/g, "").trim() || "Hoja de vida";
+    const profileNameForPdf = selectedProfileVersion?.profileName || profileProfileVersions?.[0]?.profileName || postulantProfile?.studentCode || postulantFull?.postulantId?.name || "Hoja de vida";
+    const baseName = String(profileNameForPdf).replace(/[^\w\s\u00C0-\u00FF-]/g, "").trim() || "Hoja de vida";
     const displayName = `${baseName}.pdf`;
     const safeFileName = `hoja-vida-${String(profileId).slice(-8)}-${Date.now()}.pdf`;
 
@@ -1613,6 +1614,7 @@ export const generateHojaVidaPdf = async (req, res) => {
     await ProfileCv.create({
       profileId,
       attachmentId: attachment._id,
+      profileVersionId: selectedProfileVersion?._id ?? undefined,
     });
 
     res.setHeader("Content-Type", "application/pdf");
@@ -1887,9 +1889,18 @@ export const downloadAttachment = async (req, res) => {
     }
 
     const filepath = attachment.filepath;
-    if (s3Config.isConfigured && filepath.startsWith(`${S3_PREFIX_HOJAS_VIDA}/`)) {
-      const signedUrl = await getSignedDownloadUrl(filepath, 3600);
-      return res.redirect(302, signedUrl);
+    const isS3Key = filepath.startsWith(`${S3_PREFIX_HOJAS_VIDA}/`);
+    if (isS3Key) {
+      if (!s3Config.isConfigured) {
+        return res.status(503).json({
+          message: "El archivo está en S3 pero el servidor no tiene AWS S3 configurado. Configure las variables de AWS en el servidor.",
+        });
+      }
+      const { body, contentType } = await getObjectFromS3(filepath);
+      const downloadName = attachment.name || path.basename(filepath);
+      res.setHeader("Content-Type", contentType || "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${downloadName.replace(/"/g, '\\"')}"`);
+      return res.send(body);
     }
 
     const uploadsDir = getUploadsRoot();

@@ -16,6 +16,7 @@ import {
   getApplications,
   getApplicationDetail,
   updateApplicationState,
+  markApplicationDescargoHv,
   reviewApplication,
   selectMultipleApplications,
   approveProgram,
@@ -105,6 +106,7 @@ router.post("/:id/aplicar", authorizeRoles("student"), aplicarOportunidad);
 router.get("/:id/applications", authorizeRoles("company", "admin", "superadmin", "leader"), getApplications);
 router.get("/:id/applications/detail/:postulacionId", authorizeRoles("company", "admin", "superadmin", "leader"), getApplicationDetail);
 router.patch("/:id/applications/:postulacionId/state", authorizeRoles("company", "admin", "superadmin", "leader"), updateApplicationState);
+router.patch("/:id/applications/:postulacionId/descargo-hv", authorizeRoles("company", "admin", "superadmin", "leader"), markApplicationDescargoHv);
 router.patch("/:id/applications/:postulacionId", authorizeRoles("company", "admin", "superadmin", "leader"), reviewApplication);
 router.post("/:id/applications/select-multiple", authorizeRoles("company", "admin", "superadmin", "leader"), selectMultipleApplications);
 

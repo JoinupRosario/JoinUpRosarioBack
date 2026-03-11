@@ -76,6 +76,33 @@ export async function uploadToS3(key, body, options = {}) {
 }
 
 /**
+ * Obtiene el contenido de un objeto de S3 como Buffer (para enviarlo al cliente desde el backend).
+ * Así la descarga va contra tu API y no hay problemas de CORS con S3.
+ * @param {string} key - Ruta del objeto en el bucket
+ * @returns {Promise<{ body: Buffer, contentType?: string }>}
+ */
+export async function getObjectFromS3(key) {
+  const client = getS3Client();
+  if (!client) {
+    throw new Error("S3 no está configurado");
+  }
+  const command = new GetObjectCommand({
+    Bucket: s3Config.bucket,
+    Key: key,
+  });
+  const response = await client.send(command);
+  const chunks = [];
+  for await (const chunk of response.Body) {
+    chunks.push(chunk);
+  }
+  const body = Buffer.concat(chunks);
+  return {
+    body,
+    contentType: response.ContentType,
+  };
+}
+
+/**
  * Genera una URL firmada para descargar un objeto (GET) con expiración en segundos.
  * Requiere: npm install @aws-sdk/s3-request-presigner
  * @param {string} key - Ruta del objeto en el bucket

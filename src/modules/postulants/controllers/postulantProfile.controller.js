@@ -12,6 +12,8 @@ import ProfileAward from "../models/profile/profileAward.schema.js";
 import ProfileReference from "../models/profile/profileReference.schema.js";
 import ProfileCv from "../models/profile/profileCv.schema.js";
 import ProfileSupport from "../models/profile/profileSupport.schema.js";
+import Attachment from "../../shared/attachment/attachment.schema.js";
+import { s3Config, deleteFromS3 } from "../../../config/s3.config.js";
 
 /** RQ03_HU001: Máximo de perfiles (hojas de vida) por postulante */
 export const MAX_PROFILES_PER_POSTULANT = 5;
@@ -40,8 +42,10 @@ async function resolvePostulant(id) {
 
 /**
  * GET /postulants/:id/profiles
- * Lista solo las versiones de perfil (profile_profile_version) del postulante.
- * El perfil principal (postulant_profile) no se lista ni se elimina desde aquí.
+ * Lista las versiones de perfil (profile_profile_version) del postulante y los perfiles base (postulant_profile).
+ * - baseProfiles: perfiles base (postulant_profile) de este postulante; se devuelve para que la UI muestre al menos
+ *   un perfil cuando no hay versiones (p. ej. migración o tras borrar todas las versiones).
+ * - profiles: solo versiones (profile_profile_version). Crear "nuevo perfil" crea una versión; eliminar elimina una versión.
  */
 export const getProfilesByPostulantId = async (req, res) => {
   try {
@@ -51,13 +55,14 @@ export const getProfilesByPostulantId = async (req, res) => {
       return res.status(404).json({ message: "Postulante no encontrado" });
     }
     const { postulantDocId, userId } = postulant;
-    const baseProfiles = await PostulantProfile.find({
+    const postulantMatch = {
       $or: [
         { postulantId: postulantDocId },
         ...(userId ? [{ postulantId: userId }] : []),
       ],
-    })
-      .select("_id")
+    };
+    const baseProfiles = await PostulantProfile.find(postulantMatch)
+      .select("_id studentCode profileName")
       .lean();
     const profileIds = baseProfiles.map((p) => p._id);
     const versions =
@@ -79,11 +84,18 @@ export const getProfilesByPostulantId = async (req, res) => {
       createdAt: v.dateCreation || v.createdAt,
     }));
 
+    const baseProfilesForClient = baseProfiles.map((p) => ({
+      _id: p._id,
+      studentCode: p.studentCode,
+      profileName: p.profileName,
+    }));
+
     res.json({
       postulantId: postulantDocId,
       count: profiles.length,
       totalVersions: profiles.length,
       maxAllowed: MAX_PROFILES_PER_POSTULANT,
+      baseProfiles: baseProfilesForClient,
       profiles,
     });
   } catch (error) {
@@ -94,7 +106,9 @@ export const getProfilesByPostulantId = async (req, res) => {
 /**
  * POST /postulants/:id/profiles
  * Crea una nueva versión de perfil (profile_profile_version). No crea perfil base (postulant_profile).
- * Usa o crea un perfil base del postulante como padre. Máximo MAX_PROFILES_PER_POSTULANT versiones.
+ * - Si el postulante no tiene ningún perfil base, se crea uno (PostulantProfile) y luego la versión.
+ * - Si ya tiene al menos uno, se usa el primero encontrado como padre. Máximo MAX_PROFILES_PER_POSTULANT versiones.
+ * Modelos: PostulantProfile (postulant_profile) = perfil base; ProfileProfileVersion (profile_profile_version) = versión "hoja de vida".
  */
 export const createProfile = async (req, res) => {
   try {
@@ -233,7 +247,8 @@ export const updateProfile = async (req, res) => {
 
 /**
  * DELETE /postulants/:id/profiles/:profileId
- * Elimina solo una versión (profile_profile_version). No se elimina nunca el perfil principal (postulant_profile).
+ * Elimina solo una versión (profile_profile_version). No se elimina nunca el perfil base (postulant_profile).
+ * Tras borrar, GET /profiles sigue devolviendo baseProfiles para que la UI muestre al menos el perfil base (p. ej. "1107517662").
  */
 export const deleteProfile = async (req, res) => {
   try {
@@ -268,7 +283,7 @@ export const deleteProfile = async (req, res) => {
     if (!deletedVersion) {
       return res.status(404).json({ message: "Versión de perfil no encontrada" });
     }
-    return res.json({ message: "Versión de perfil eliminada correctamente", deleted: deletedVersion._id });
+    return res.json({ message: "Versión de perfil eliminada correctamente", deleted: deletedVersion._id, isVersion: true });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1017,9 +1032,11 @@ export const deleteReference = async (req, res) => {
   }
 };
 
+const S3_PREFIX_HOJAS_VIDA = "hojas-vida";
+
 /**
  * DELETE /postulants/:id/profiles/:profileId/cvs/:profileCvId
- * Elimina una hoja de vida (documento CV) del perfil.
+ * Elimina una hoja de vida (documento CV) del perfil: borra ProfileCv, el Attachment y el archivo en S3 si aplica.
  */
 export const deleteProfileCv = async (req, res) => {
   try {
@@ -1030,6 +1047,20 @@ export const deleteProfileCv = async (req, res) => {
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
     const deleted = await ProfileCv.findOneAndDelete({ _id: profileCvId, profileId: profile._id });
     if (!deleted) return res.status(404).json({ message: "Hoja de vida no encontrada" });
+
+    const attachmentId = deleted.attachmentId;
+    if (attachmentId) {
+      const attachment = await Attachment.findById(attachmentId).lean();
+      if (attachment?.filepath && s3Config.isConfigured && attachment.filepath.startsWith(`${S3_PREFIX_HOJAS_VIDA}/`)) {
+        try {
+          await deleteFromS3(attachment.filepath);
+        } catch (err) {
+          console.error("[deleteProfileCv] Error eliminando archivo en S3:", err);
+        }
+      }
+      await Attachment.findByIdAndDelete(attachmentId);
+    }
+
     res.json({ message: "Eliminado correctamente", deleted: deleted._id });
   } catch (error) {
     res.status(500).json({ message: error.message });
