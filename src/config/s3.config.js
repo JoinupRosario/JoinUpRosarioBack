@@ -5,17 +5,29 @@
  */
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 
-const region = process.env.AWS_REGION || "us-east-1";
-const bucket = process.env.AWS_S3_BUCKET || "";
-const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
-const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+/** Configuración S3 leída en tiempo de ejecución (tras dotenv.config()) para que las variables estén disponibles. */
+function getEnvConfig() {
+  return {
+    region: process.env.AWS_REGION || "us-east-1",
+    bucket: (process.env.AWS_S3_BUCKET || "").trim(),
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  };
+}
 
-/** Configuración S3 (solo lectura) */
-export const s3Config = Object.freeze({
-  region,
-  bucket,
-  isConfigured: Boolean(accessKeyId && secretAccessKey && bucket),
-});
+/** Configuración S3 (se lee cada vez para no depender del orden de carga de dotenv). */
+export const s3Config = new Proxy(
+  {},
+  {
+    get(_, prop) {
+      const c = getEnvConfig();
+      if (prop === "region") return c.region;
+      if (prop === "bucket") return c.bucket;
+      if (prop === "isConfigured") return Boolean(c.accessKeyId && c.secretAccessKey && c.bucket);
+      return undefined;
+    },
+  }
+);
 
 let s3ClientInstance = null;
 
@@ -28,11 +40,12 @@ export function getS3Client() {
     return null;
   }
   if (!s3ClientInstance) {
+    const c = getEnvConfig();
     s3ClientInstance = new S3Client({
       region: s3Config.region,
       credentials: {
-        accessKeyId: accessKeyId,
-        secretAccessKey: secretAccessKey,
+        accessKeyId: c.accessKeyId,
+        secretAccessKey: c.secretAccessKey,
       },
     });
   }
