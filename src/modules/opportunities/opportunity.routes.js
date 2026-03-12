@@ -14,11 +14,15 @@ import {
   changeStatus,
   applyToOpportunity,
   getApplications,
+  getApplicationDetail,
+  updateApplicationState,
+  markApplicationDescargoHv,
   reviewApplication,
   selectMultipleApplications,
   approveProgram,
   rejectProgram,
   rejectOpportunity,
+  closeOpportunity,
   getStatusHistory,
   duplicateOpportunity
 } from "./opportunity.controller.js";
@@ -100,6 +104,9 @@ router.post("/:id/apply", authorizeRoles("student"), applyToOpportunity);
 // RQ04_HU002: Aplicar a oportunidad con hoja de vida (postulante). Body: { profileId }
 router.post("/:id/aplicar", authorizeRoles("student"), aplicarOportunidad);
 router.get("/:id/applications", authorizeRoles("company", "admin", "superadmin", "leader"), getApplications);
+router.get("/:id/applications/detail/:postulacionId", authorizeRoles("company", "admin", "superadmin", "leader"), getApplicationDetail);
+router.patch("/:id/applications/:postulacionId/state", authorizeRoles("company", "admin", "superadmin", "leader"), updateApplicationState);
+router.patch("/:id/applications/:postulacionId/descargo-hv", authorizeRoles("company", "admin", "superadmin", "leader"), markApplicationDescargoHv);
 router.patch("/:id/applications/:postulacionId", authorizeRoles("company", "admin", "superadmin", "leader"), reviewApplication);
 router.post("/:id/applications/select-multiple", authorizeRoles("company", "admin", "superadmin", "leader"), selectMultipleApplications);
 
@@ -109,6 +116,9 @@ router.post("/:id/reject-program", authorizeRoles("admin", "superadmin", "leader
 
 // Rechazar oportunidad con motivo
 router.post("/:id/reject", authorizeRoles("admin", "superadmin", "leader"), rejectOpportunity);
+
+// Cerrar oportunidad (solo Activa; body: contrató, motivoNoContrato?, postulantesSeleccionados?, datosTutor?)
+router.post("/:id/close", authorizeRoles("company", "admin", "superadmin", "leader"), closeOpportunity);
 
 // Historial de estados
 router.get("/:id/history", authorizeRoles("admin", "superadmin", "leader"), getStatusHistory);

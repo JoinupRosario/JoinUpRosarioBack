@@ -24,6 +24,12 @@ const postulacionOportunidadSchema = new mongoose.Schema(
       ref: "PostulantProfile",
       required: true,
     },
+    /** Versión del perfil (profile_profile_version) con la que aplicó; opcional. Si existe, las HV mostradas se filtran por esta versión. */
+    profileVersionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ProfileProfileVersion",
+      default: null,
+    },
     /** Estado principal del flujo: aplicado → empresa_consulto_perfil | empresa_descargo_hv | seleccionado_empresa | aceptado_estudiante | rechazado */
     estado: {
       type: String,

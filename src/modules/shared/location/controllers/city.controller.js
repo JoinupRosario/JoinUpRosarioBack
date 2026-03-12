@@ -1,13 +1,18 @@
 import City from "../models/city.schema.js";
+import State from "../models/state.schema.js";
 
-// Obtener todas las ciudades
+// Obtener todas las ciudades (filtro por state o por country)
 export const getCities = async (req, res) => {
   try {
-    const { page = 1, limit = 10, search, state } = req.query;
+    const { page = 1, limit = 10, search, state, country } = req.query;
     const filter = {};
 
     if (state) {
       filter.state = state;
+    }
+    if (country) {
+      const stateIds = await State.find({ country }).select("_id").lean();
+      filter.state = { $in: stateIds.map((s) => s._id) };
     }
 
     if (search) {
