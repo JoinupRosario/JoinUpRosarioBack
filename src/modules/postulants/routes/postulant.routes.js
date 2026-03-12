@@ -42,12 +42,18 @@ import {
   createWorkExperience,
   updateWorkExperience,
   deleteWorkExperience,
+  getAvailableWorkExperiences,
+  copyWorkExperienceToProfile,
   createAward,
   updateAward,
   deleteAward,
+  getAvailableAwards,
+  copyAwardToProfile,
   createReference,
   updateReference,
   deleteReference,
+  getAvailableReferences,
+  copyReferenceToProfile,
   deleteProfileCv,
   deleteProfileSupport,
 } from "../controllers/postulantProfile.controller.js";
@@ -87,12 +93,18 @@ router.delete("/:id/profiles/:profileId/skills/:skillId", deleteSkill);
 router.post("/:id/profiles/:profileId/languages", createLanguage);
 router.delete("/:id/profiles/:profileId/languages/:languageId", deleteLanguage);
 router.post("/:id/profiles/:profileId/work-experiences", createWorkExperience);
+router.get("/:id/profiles/:profileId/available-work-experiences", getAvailableWorkExperiences);
+router.post("/:id/profiles/:profileId/work-experiences/copy-from/:sourceWorkExperienceId", copyWorkExperienceToProfile);
 router.put("/:id/profiles/:profileId/work-experiences/:workExperienceId", updateWorkExperience);
 router.delete("/:id/profiles/:profileId/work-experiences/:workExperienceId", deleteWorkExperience);
 router.post("/:id/profiles/:profileId/awards", createAward);
+router.get("/:id/profiles/:profileId/available-awards", getAvailableAwards);
+router.post("/:id/profiles/:profileId/awards/copy-from/:sourceAwardId", copyAwardToProfile);
 router.put("/:id/profiles/:profileId/awards/:awardId", updateAward);
 router.delete("/:id/profiles/:profileId/awards/:awardId", deleteAward);
 router.post("/:id/profiles/:profileId/references", createReference);
+router.get("/:id/profiles/:profileId/available-references", getAvailableReferences);
+router.post("/:id/profiles/:profileId/references/copy-from/:sourceReferenceId", copyReferenceToProfile);
 router.put("/:id/profiles/:profileId/references/:referenceId", updateReference);
 router.delete("/:id/profiles/:profileId/references/:referenceId", deleteReference);
 router.delete("/:id/profiles/:profileId/cvs/:profileCvId", deleteProfileCv);

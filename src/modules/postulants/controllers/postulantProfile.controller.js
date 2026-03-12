@@ -14,6 +14,7 @@ import ProfileCv from "../models/profile/profileCv.schema.js";
 import ProfileSupport from "../models/profile/profileSupport.schema.js";
 import Attachment from "../../shared/attachment/attachment.schema.js";
 import { s3Config, deleteFromS3 } from "../../../config/s3.config.js";
+import { recalcAndSaveProfileCompleteness } from "../services/profileCompleteness.service.js";
 
 /** RQ03_HU001: Máximo de perfiles (hojas de vida) por postulante */
 export const MAX_PROFILES_PER_POSTULANT = 5;
@@ -811,9 +812,21 @@ export const createWorkExperience = async (req, res) => {
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
     const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
+    let profileVersionId = null;
+    const versionId = req.body.versionId;
+    if (versionId) {
+      try {
+        const resolved = await resolveProfileVersionId(profile._id, versionId, res);
+        profileVersionId = resolved.profileVersionId;
+      } catch (e) {
+        if (e.message === "INVALID_VERSION") return;
+        throw e;
+      }
+    }
     const body = req.body;
     const doc = await ProfileWorkExperience.create({
       profileId: profile._id,
+      profileVersionId: profileVersionId || undefined,
       experienceType: body.experienceType || "JOB_EXP",
       companyName: body.companyName || undefined,
       companySector: body.companySector || undefined,
@@ -902,6 +915,133 @@ export const deleteWorkExperience = async (req, res) => {
   }
 };
 
+/** Obtiene los profileId (base) del postulante excluyendo el actual. */
+async function getOtherProfileIdsForPostulant(postulantDocId, userId, currentProfileId) {
+  const match = {
+    $or: [
+      { postulantId: postulantDocId },
+      ...(userId ? [{ postulantId: userId }] : []),
+    ],
+    _id: { $ne: currentProfileId },
+  };
+  const others = await PostulantProfile.find(match).select("_id").lean();
+  return others.map((p) => p._id);
+}
+
+/**
+ * Filtro para listar ítems "disponibles" (traer de otro perfil): otros perfiles base Y otras versiones del mismo perfil.
+ * versionIdActual = req.query.versionId (null si se está viendo el perfil base).
+ */
+function buildAvailableFilter(profileId, otherProfileIds, versionIdActual) {
+  const conditions = [];
+  if (otherProfileIds.length > 0) {
+    conditions.push({ profileId: { $in: otherProfileIds } });
+  }
+  if (versionIdActual) {
+    conditions.push({
+      profileId,
+      $or: [
+        { profileVersionId: null },
+        { profileVersionId: { $exists: false } },
+        { profileVersionId: { $ne: versionIdActual } },
+      ],
+    });
+  } else {
+    conditions.push({
+      profileId,
+      profileVersionId: { $exists: true, $ne: null },
+    });
+  }
+  return conditions.length === 0 ? { _id: null } : { $or: conditions };
+}
+
+/**
+ * GET /postulants/:id/profiles/:profileId/available-work-experiences
+ * Lista experiencias de otros perfiles base o de otras versiones del mismo perfil (para traer/copiar al actual).
+ * Query opcional: versionId — si se envía, se excluyen las del perfil base y otras versiones; si no, se listan las de las versiones.
+ */
+export const getAvailableWorkExperiences = async (req, res) => {
+  try {
+    const { id, profileId } = req.params;
+    const versionIdActual = req.query.versionId || null;
+    const postulant = await resolvePostulant(id);
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
+    if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
+    const otherIds = await getOtherProfileIdsForPostulant(postulant.postulantDocId, postulant.userId, profile._id);
+    const filter = buildAvailableFilter(profile._id, otherIds, versionIdActual);
+    if (filter._id === null) return res.json([]);
+    const list = await ProfileWorkExperience.find(filter)
+      .populate("companySector", "value name")
+      .populate("countryId", "name")
+      .populate("stateId", "name")
+      .populate("cityId", "name")
+      .sort({ startDate: -1 })
+      .lean();
+    res.json(list);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /postulants/:id/profiles/:profileId/work-experiences/copy-from/:sourceWorkExperienceId
+ * Duplica una experiencia del perfil origen (A) al perfil actual (B). Se crea un NUEVO documento
+ * con profileId = B (perfil destino), para que pertenezca solo a B y no se comparta el registro con A.
+ */
+export const copyWorkExperienceToProfile = async (req, res) => {
+  try {
+    const { id, profileId, sourceWorkExperienceId } = req.params;
+    const postulant = await resolvePostulant(id);
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
+    if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
+    const source = await ProfileWorkExperience.findById(sourceWorkExperienceId).lean();
+    if (!source) return res.status(404).json({ message: "Experiencia origen no encontrada" });
+    const sourceProfile = await PostulantProfile.findOne({
+      _id: source.profileId,
+      $or: [
+        { postulantId: postulant.postulantDocId },
+        ...(postulant.userId ? [{ postulantId: postulant.userId }] : []),
+      ],
+    });
+    if (!sourceProfile) return res.status(403).json({ message: "La experiencia no pertenece a sus perfiles" });
+    const versionId = req.body.versionId;
+    const sameProfile = source.profileId.toString() === profile._id.toString();
+    const sourceVersionStr = source.profileVersionId ? source.profileVersionId.toString() : null;
+    const sameVersion = (sourceVersionStr == null && !versionId) || (sourceVersionStr && versionId && sourceVersionStr === (typeof versionId === "string" ? versionId : versionId?.toString?.()));
+    if (sameProfile && sameVersion) {
+      return res.status(400).json({ message: "La experiencia ya pertenece a este perfil" });
+    }
+    let profileVersionId = null;
+    if (versionId) {
+      try {
+        const resolved = await resolveProfileVersionId(profile._id, versionId, res);
+        profileVersionId = resolved.profileVersionId;
+      } catch (e) {
+        if (e.message === "INVALID_VERSION") return;
+        throw e;
+      }
+    }
+    const { _id, profileId: _p, profileVersionId: _pv, mysqlId, creationDate, updateDate, ...rest } = source;
+    const doc = await ProfileWorkExperience.create({
+      ...rest,
+      profileId: profile._id,
+      profileVersionId: profileVersionId || undefined,
+      creationDate: new Date(),
+    });
+    const populated = await ProfileWorkExperience.findById(doc._id)
+      .populate("companySector", "value name")
+      .populate("countryId", "name")
+      .populate("stateId", "name")
+      .populate("cityId", "name")
+      .lean();
+    res.status(201).json(populated);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // ---------- Logros (awards) ----------
 export const createAward = async (req, res) => {
   try {
@@ -967,6 +1107,67 @@ export const deleteAward = async (req, res) => {
   }
 };
 
+/**
+ * GET /postulants/:id/profiles/:profileId/available-awards
+ * Lista logros de otros perfiles del mismo postulante (para traer/copiar al perfil actual).
+ */
+export const getAvailableAwards = async (req, res) => {
+  try {
+    const { id, profileId } = req.params;
+    const postulant = await resolvePostulant(id);
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
+    if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
+    const otherIds = await getOtherProfileIdsForPostulant(postulant.postulantDocId, postulant.userId, profile._id);
+    if (otherIds.length === 0) return res.json([]);
+    const list = await ProfileAward.find({ profileId: { $in: otherIds } })
+      .populate("awardType", "value name")
+      .sort({ awardDate: -1 })
+      .lean();
+    res.json(list);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /postulants/:id/profiles/:profileId/awards/copy-from/:sourceAwardId
+ * Duplica un logro del perfil origen (A) al perfil actual (B). Nuevo documento con profileId = B.
+ */
+export const copyAwardToProfile = async (req, res) => {
+  try {
+    const { id, profileId, sourceAwardId } = req.params;
+    const postulant = await resolvePostulant(id);
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
+    if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
+    const source = await ProfileAward.findById(sourceAwardId).lean();
+    if (!source) return res.status(404).json({ message: "Logro origen no encontrado" });
+    const sourceProfile = await PostulantProfile.findOne({
+      _id: source.profileId,
+      $or: [
+        { postulantId: postulant.postulantDocId },
+        ...(postulant.userId ? [{ postulantId: postulant.userId }] : []),
+      ],
+    });
+    if (!sourceProfile) return res.status(403).json({ message: "El logro no pertenece a sus perfiles" });
+    if (source.profileId.toString() === profile._id.toString()) {
+      return res.status(400).json({ message: "El logro ya pertenece a este perfil" });
+    }
+    const { _id, profileId: _p, mysqlId, dateCreation, dateUpdate, ...rest } = source;
+    const doc = await ProfileAward.create({
+      ...rest,
+      profileId: profile._id,
+      dateCreation: new Date(),
+      userCreator: req.user?.name || req.user?.email || "api",
+    });
+    const populated = await ProfileAward.findById(doc._id).populate("awardType", "value name").lean();
+    res.status(201).json(populated);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // ---------- Referencias ----------
 export const createReference = async (req, res) => {
   try {
@@ -975,12 +1176,24 @@ export const createReference = async (req, res) => {
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
     const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
+    let profileVersionId = null;
+    const versionId = req.body.versionId;
+    if (versionId) {
+      try {
+        const resolved = await resolveProfileVersionId(profile._id, versionId, res);
+        profileVersionId = resolved.profileVersionId;
+      } catch (e) {
+        if (e.message === "INVALID_VERSION") return;
+        throw e;
+      }
+    }
     const { firstname, lastname, occupation, phone } = req.body;
     if (!firstname || !lastname || !occupation || !phone) {
       return res.status(400).json({ message: "firstname, lastname, occupation y phone son requeridos" });
     }
     const doc = await ProfileReference.create({
       profileId: profile._id,
+      profileVersionId: profileVersionId || undefined,
       firstname: String(firstname).trim(),
       lastname: String(lastname).trim(),
       occupation: String(occupation).trim(),
@@ -1027,6 +1240,81 @@ export const deleteReference = async (req, res) => {
     const deleted = await ProfileReference.findOneAndDelete({ _id: referenceId, profileId: profile._id });
     if (!deleted) return res.status(404).json({ message: "Referencia no encontrada" });
     res.json({ message: "Eliminado correctamente", deleted: deleted._id });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /postulants/:id/profiles/:profileId/available-references
+ * Lista referencias de otros perfiles base o de otras versiones del mismo perfil (para traer/copiar al actual).
+ * Query opcional: versionId — si se envía, se excluyen las del perfil base y otras versiones; si no, se listan las de las versiones.
+ */
+export const getAvailableReferences = async (req, res) => {
+  try {
+    const { id, profileId } = req.params;
+    const versionIdActual = req.query.versionId || null;
+    const postulant = await resolvePostulant(id);
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
+    if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
+    const otherIds = await getOtherProfileIdsForPostulant(postulant.postulantDocId, postulant.userId, profile._id);
+    const filter = buildAvailableFilter(profile._id, otherIds, versionIdActual);
+    if (filter._id === null) return res.json([]);
+    const list = await ProfileReference.find(filter).lean();
+    res.json(list);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /postulants/:id/profiles/:profileId/references/copy-from/:sourceReferenceId
+ * Duplica una referencia del perfil origen (A) al perfil actual (B). Nuevo documento con profileId = B.
+ */
+export const copyReferenceToProfile = async (req, res) => {
+  try {
+    const { id, profileId, sourceReferenceId } = req.params;
+    const postulant = await resolvePostulant(id);
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
+    if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
+    const source = await ProfileReference.findById(sourceReferenceId).lean();
+    if (!source) return res.status(404).json({ message: "Referencia origen no encontrada" });
+    const sourceProfile = await PostulantProfile.findOne({
+      _id: source.profileId,
+      $or: [
+        { postulantId: postulant.postulantDocId },
+        ...(postulant.userId ? [{ postulantId: postulant.userId }] : []),
+      ],
+    });
+    if (!sourceProfile) return res.status(403).json({ message: "La referencia no pertenece a sus perfiles" });
+    const versionId = req.body.versionId;
+    const sameProfile = source.profileId.toString() === profile._id.toString();
+    const sourceVersionStr = source.profileVersionId ? source.profileVersionId.toString() : null;
+    const sameVersion = (sourceVersionStr == null && !versionId) || (sourceVersionStr && versionId && sourceVersionStr === (typeof versionId === "string" ? versionId : versionId?.toString?.()));
+    if (sameProfile && sameVersion) {
+      return res.status(400).json({ message: "La referencia ya pertenece a este perfil" });
+    }
+    let profileVersionId = null;
+    if (versionId) {
+      try {
+        const resolved = await resolveProfileVersionId(profile._id, versionId, res);
+        profileVersionId = resolved.profileVersionId;
+      } catch (e) {
+        if (e.message === "INVALID_VERSION") return;
+        throw e;
+      }
+    }
+    const { _id, profileId: _p, profileVersionId: _pv, mysqlId, dateCreation, dateUpdate, ...rest } = source;
+    const doc = await ProfileReference.create({
+      ...rest,
+      profileId: profile._id,
+      profileVersionId: profileVersionId || undefined,
+      dateCreation: new Date(),
+      userCreator: req.user?.name || req.user?.email || "api",
+    });
+    res.status(201).json(doc);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

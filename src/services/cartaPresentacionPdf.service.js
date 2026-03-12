@@ -1,6 +1,7 @@
 /**
  * Genera el PDF de la carta de presentación según parametrización.
  * Variables: [FECHA], [NOMBRE_COMPLETO], [NUMERO_DOCUMENTO], [NOMBRE_PROGRAMA], [CREDITOS_CURSADOS], [CREDITOS_TOTAL], [PROMEDIO], [NOMBRE_EMPRESA], [CIUDAD_EMPRESA]
+ * Multi-programa: [TEXTO_PROGRAMA_ACADEMICO] (del programa X / de los programas X y Y), [CREDITOS_POR_PROGRAMAS] (créditos por cada programa).
  */
 import PDFDocument from "pdfkit";
 import path from "path";
@@ -92,6 +93,82 @@ function replaceVars(text, vars) {
   return out;
 }
 
+/** Escapa caracteres especiales para usarlos en RegExp. */
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Obtiene rangos [inicio, fin] de posiciones donde hay que poner negrita (por frase buscada).
+ * Busca sin distinguir mayúsculas/minúsculas para que negrilla aplique aunque la plantilla tenga el texto en MAYÚSCULAS.
+ * Fusiona rangos solapados.
+ */
+function getBoldRanges(text, phrases) {
+  if (!text || typeof text !== "string") return [];
+  const ranges = [];
+  for (const phrase of phrases) {
+    if (phrase == null || String(phrase).trim() === "" || String(phrase) === "—") continue;
+    const p = String(phrase).trim();
+    if (p.length === 0) continue;
+    try {
+      const re = new RegExp(escapeRegex(p), "gi");
+      let match;
+      while ((match = re.exec(text)) !== null) {
+        ranges.push([match.index, match.index + match[0].length]);
+      }
+    } catch (_) {
+      const idx = text.indexOf(p);
+      if (idx !== -1) ranges.push([idx, idx + p.length]);
+    }
+  }
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [s, e] of ranges) {
+    if (merged.length && s <= merged[merged.length - 1][1]) {
+      merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], e);
+    } else {
+      merged.push([s, e]);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Divide el texto en segmentos { text, bold } para dibujar con negrita donde corresponda.
+ */
+function getSegments(text, boldRanges) {
+  if (!text || typeof text !== "string") return [];
+  const segments = [];
+  let last = 0;
+  for (const [s, e] of boldRanges) {
+    if (s > last) segments.push({ text: text.slice(last, s), bold: false });
+    segments.push({ text: text.slice(s, e), bold: true });
+    last = e;
+  }
+  if (last < text.length) segments.push({ text: text.slice(last), bold: false });
+  return segments.filter((seg) => seg.text.length > 0);
+}
+
+/**
+ * Dibuja un bloque de texto con negrita en nombre, cédula y programas (segmentos según phrasesToBold).
+ */
+function drawMixedText(doc, text, phrasesToBold, textOpts) {
+  if (!text || typeof text !== "string") return;
+  const ranges = getBoldRanges(text, phrasesToBold);
+  const segments = getSegments(text, ranges);
+  if (segments.length === 0) return;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    doc.font(seg.bold ? "Helvetica-Bold" : "Helvetica").fontSize(textOpts.fontSize ?? FONT_SIZE_BODY).fillColor(textOpts.fillColor ?? COLOR_BODY);
+    doc.text(seg.text, {
+      continued: i < segments.length - 1,
+      width: textOpts.width ?? TEXT_WIDTH,
+      lineGap: textOpts.lineGap ?? LINE_GAP,
+      align: textOpts.align ?? "left",
+    });
+  }
+}
+
 /**
  * Elige el programa en curso a usar para la carta: si hay codigoPrograma (habilitado para práctica), el que coincida; si no, el primero.
  */
@@ -131,7 +208,43 @@ function getCartaDataFromPostulant(postulant, profileData, preferProgramCode) {
     nombrePrograma = programNames.length === 1 ? programNames[0] : programNames.join(" y ");
   }
 
+  // Texto para "como estudiante del programa X" o "de los programas X y Y"
+  let textoProgramaAcademico = "del programa académico";
+  if (programNames.length === 1) {
+    textoProgramaAcademico = "del programa " + programNames[0];
+  } else if (programNames.length >= 2) {
+    const ultimo = programNames[programNames.length - 1];
+    const restantes = programNames.slice(0, -1);
+    textoProgramaAcademico = "de los programas " + restantes.join(", ") + " y " + ultimo;
+  }
+
+  // Créditos y promedio por cada programa (para estudiantes con 2 o más programas)
   const extraList = profileData?.programExtraInfo || [];
+  const partesCreditos = [];
+  const partesPromedio = [];
+  for (const enrolled of enrolledList) {
+    const extra = extraList.find((e) => e.enrolledProgramId?.toString?.() === enrolled._id?.toString?.());
+    const nombreProg = safeStr(enrolled.programId?.name || enrolled.programId?.code) || "—";
+    const cursados = extra?.approvedCredits != null ? String(extra.approvedCredits) : null;
+    const total = extra?.totalCredits != null ? String(extra.totalCredits) : null;
+    const avg = extra?.cumulativeAverage;
+    const avgStr =
+      avg != null && avg !== "" && !Number.isNaN(parseFloat(avg)) ? parseFloat(avg).toFixed(2) : null;
+    if (cursados != null || total != null) {
+      const c = cursados ?? "—";
+      const t = total ?? "—";
+      const promedioFrase = avgStr ? `, promedio acumulado ${avgStr}` : "";
+      partesCreditos.push(`${c} créditos del programa ${nombreProg} (total ${t} créditos del programa${promedioFrase})`);
+    }
+    if (avgStr) partesPromedio.push(`${avgStr} en el programa ${nombreProg}`);
+  }
+  const creditosPorProgramas =
+    partesCreditos.length === 0
+      ? "—"
+      : "ha cursado y aprobado " + partesCreditos.join(" y ");
+  const textoPromedioPorProgramas =
+    partesPromedio.length === 0 ? "—" : "promedio acumulado de " + partesPromedio.join(" y de ");
+
   const firstEnrolled = selectEnrolledForCarta(enrolledList, preferProgramCode);
   if (firstEnrolled) {
     const extra = extraList.find((e) => e.enrolledProgramId?.toString?.() === firstEnrolled._id?.toString?.());
@@ -154,9 +267,12 @@ function getCartaDataFromPostulant(postulant, profileData, preferProgramCode) {
     NOMBRE_COMPLETO: nombreCompleto,
     NUMERO_DOCUMENTO: numeroDocumento,
     NOMBRE_PROGRAMA: nombrePrograma,
+    TEXTO_PROGRAMA_ACADEMICO: textoProgramaAcademico,
     CREDITOS_CURSADOS: creditosCursados,
     CREDITOS_TOTAL: creditosTotal,
+    CREDITOS_POR_PROGRAMAS: creditosPorProgramas,
     PROMEDIO: promedio,
+    TEXTO_PROMEDIO_POR_PROGRAMAS: textoPromedioPorProgramas,
     universidadNombre,
   };
 }
@@ -191,9 +307,12 @@ export async function buildCartaPresentacionPdf(postulant, profileData, parametr
     NOMBRE_COMPLETO: cartaData.NOMBRE_COMPLETO,
     NUMERO_DOCUMENTO: cartaData.NUMERO_DOCUMENTO,
     NOMBRE_PROGRAMA: cartaData.NOMBRE_PROGRAMA,
+    TEXTO_PROGRAMA_ACADEMICO: cartaData.TEXTO_PROGRAMA_ACADEMICO,
     CREDITOS_CURSADOS: cartaData.CREDITOS_CURSADOS,
     CREDITOS_TOTAL: cartaData.CREDITOS_TOTAL,
+    CREDITOS_POR_PROGRAMAS: cartaData.CREDITOS_POR_PROGRAMAS,
     PROMEDIO: cartaData.PROMEDIO,
+    TEXTO_PROMEDIO_POR_PROGRAMAS: cartaData.TEXTO_PROMEDIO_POR_PROGRAMAS,
     NOMBRE_EMPRESA: empresa,
     CIUDAD_EMPRESA: ciudad,
   };
@@ -238,6 +357,39 @@ export async function buildCartaPresentacionPdf(postulant, profileData, parametr
   encabezado = fixLiteralInText(encabezado);
   cuerpo = fixLiteralInText(cuerpo);
   cierre = fixLiteralInText(cierre);
+
+  // Cuando el estudiante tiene 2 o más programas: reemplazar en el texto ya procesado para que salga plural, créditos y promedio por programa
+  if (enrolledList.length >= 2) {
+    const applyMultiProgram = (text) => {
+      if (!text || typeof text !== "string") return text;
+      let t = text;
+      // "del programa académico de X y Y" → "de los programas X y Y" (sirve aunque el nombre venga en mayúsculas en la plantilla)
+      if (t.includes("del programa académico de ")) {
+        t = t.replace(/del programa académico de /gi, "de los programas ");
+      }
+      // Frase de créditos de un solo programa → texto con créditos (y promedio) por cada programa
+      const fraseCreditosVieja1 =
+        "ha cursado y aprobado " + cartaData.CREDITOS_CURSADOS + " créditos, de un total de " + cartaData.CREDITOS_TOTAL + " créditos académicos";
+      const fraseCreditosVieja2 =
+        "ha cursado y aprobado " + cartaData.CREDITOS_CURSADOS + " créditos, de un total de " + cartaData.CREDITOS_TOTAL + " créditos";
+      if (cartaData.CREDITOS_POR_PROGRAMAS !== "—" && (t.includes(fraseCreditosVieja1) || t.includes(fraseCreditosVieja2))) {
+        t = t.split(fraseCreditosVieja1).join(cartaData.CREDITOS_POR_PROGRAMAS);
+        t = t.split(fraseCreditosVieja2).join(cartaData.CREDITOS_POR_PROGRAMAS);
+      }
+      // "cuenta con un promedio acumulado de X.XX" → promedio por programa (ej: "cuenta con un promedio acumulado de 4.28 en el programa X y de 4.50 en el programa Y")
+      if (cartaData.TEXTO_PROMEDIO_POR_PROGRAMAS !== "—") {
+        const frasePromedioVieja = "cuenta con un promedio acumulado de " + cartaData.PROMEDIO;
+        if (t.includes(frasePromedioVieja)) {
+          t = t.split(frasePromedioVieja).join("cuenta con un " + cartaData.TEXTO_PROMEDIO_POR_PROGRAMAS);
+        }
+      }
+      return t;
+    };
+    encabezado = applyMultiProgram(encabezado);
+    cuerpo = applyMultiProgram(cuerpo);
+    cierre = applyMultiProgram(cierre);
+  }
+
   // Asegurar salto de línea después de "Señores" en el encabezado final (por si el template no lo tenía)
   encabezado = normalizeEncabezadoSaltos(encabezado);
 
@@ -270,22 +422,22 @@ export async function buildCartaPresentacionPdf(postulant, profileData, parametr
 
     doc.x = MARGIN;
     doc.y = y;
-    const textOpts = { width: TEXT_WIDTH, lineGap: LINE_GAP, align: "left" };
-    doc.fontSize(FONT_SIZE_BODY).font("Helvetica").fillColor(COLOR_BODY);
+    const textOpts = { width: TEXT_WIDTH, lineGap: LINE_GAP, align: "left", fontSize: FONT_SIZE_BODY, fillColor: COLOR_BODY };
+    const phrasesToBold = [cartaData.NOMBRE_COMPLETO, cartaData.NUMERO_DOCUMENTO, cartaData.NOMBRE_PROGRAMA].filter(
+      (p) => p != null && String(p).trim() !== "" && String(p) !== "—"
+    );
     if (encabezado) {
-      doc.text(encabezado, doc.x, doc.y, textOpts);
+      drawMixedText(doc, encabezado, phrasesToBold, textOpts);
       doc.moveDown(0.5);
     }
     doc.x = MARGIN;
-    doc.fontSize(FONT_SIZE_BODY).font("Helvetica").fillColor(COLOR_BODY);
     if (cuerpo) {
-      doc.text(cuerpo, doc.x, doc.y, textOpts);
+      drawMixedText(doc, cuerpo, phrasesToBold, textOpts);
       doc.moveDown(0.5);
     }
     doc.x = MARGIN;
-    doc.fontSize(FONT_SIZE_BODY).font("Helvetica").fillColor(COLOR_BODY);
     if (cierre) {
-      doc.text(cierre, doc.x, doc.y, textOpts);
+      drawMixedText(doc, cierre, phrasesToBold, textOpts);
       doc.moveDown(0.8);
     }
 

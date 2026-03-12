@@ -6,6 +6,7 @@ import mongoose from "mongoose";
 const schema = new mongoose.Schema(
   {
     profileId: { type: mongoose.Schema.Types.ObjectId, ref: "PostulantProfile", required: true, index: true },
+    profileVersionId: { type: mongoose.Schema.Types.ObjectId, ref: "ProfileProfileVersion", default: null, index: true },
     mysqlId: { type: Number, unique: true, sparse: true },
     firstname: { type: String, required: true },
     lastname: { type: String, required: true },
@@ -20,4 +21,5 @@ const schema = new mongoose.Schema(
 );
 
 schema.index({ profileId: 1 });
+schema.index({ profileId: 1, profileVersionId: 1 });
 export default mongoose.model("ProfileReference", schema, "profile_references");

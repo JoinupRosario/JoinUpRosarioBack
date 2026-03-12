@@ -38,6 +38,7 @@ import { buildHojaVidaPdf } from "../../../services/hojaVidaPdf.service.js";
 import { buildCartaPresentacionPdf } from "../../../services/cartaPresentacionPdf.service.js";
 import { s3Config, uploadToS3, getObjectFromS3 } from "../../../config/s3.config.js";
 import mongoose from "mongoose";
+import { calculateFullCompleteness, recalcAndSaveProfileCompleteness } from "../services/profileCompleteness.service.js";
 
 /** Prefijo S3 para hojas de vida: hojas-vida/{postulantId}/{profileId}/archivo.pdf */
 const S3_PREFIX_HOJAS_VIDA = "hojas-vida";
@@ -1325,9 +1326,7 @@ export const getPostulantProfileData = async (req, res) => {
     }
 
     const profileId = postulantProfile._id;
-    const allBaseProfiles = await PostulantProfile.find(profileFilter).select("_id").lean();
-    const allProfileIds = allBaseProfiles.map((p) => p._id);
-
+    // Cada perfil es único e independiente: solo cargar datos de ESTE perfil (no mezclar con otros perfiles del postulante)
     let selectedProfileVersion = null;
     if (queryVersionId && profileId) {
       const versionDoc = await ProfileProfileVersion.findOne({
@@ -1339,6 +1338,9 @@ export const getPostulantProfileData = async (req, res) => {
     const versionFilter = selectedProfileVersion
       ? { profileId, profileVersionId: selectedProfileVersion._id }
       : { profileId, $or: [{ profileVersionId: null }, { profileVersionId: { $exists: false } }] };
+
+    // Experiencias y referencias son por perfil Y por versión: base (profileVersionId null) o versión concreta
+    const expRefFilter = versionFilter;
 
     const [
       enrolledPrograms,
@@ -1371,7 +1373,7 @@ export const getPostulantProfileData = async (req, res) => {
         .populate("stateId", "name")
         .populate("cityId", "name")
         .lean(),
-      ProfileWorkExperience.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId })
+      ProfileWorkExperience.find(expRefFilter)
         .populate("companySector", "value name")
         .populate("countryId", "name")
         .populate("stateId", "name")
@@ -1383,11 +1385,11 @@ export const getPostulantProfileData = async (req, res) => {
         .populate("language", "value name")
         .populate("level", "value name")
         .lean(),
-      ProfileAward.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId })
+      ProfileAward.find({ profileId })
         .populate("awardType", "value name")
         .sort({ awardDate: -1, dateCreation: -1 })
         .lean(),
-      ProfileReference.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId }).lean(),
+      ProfileReference.find(expRefFilter).lean(),
       ProfileOtherStudy.find({ profileId }).lean(),
       ProfileInterestArea.find(versionFilter).populate("area", "value name").lean(),
       ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").lean(),
@@ -1402,7 +1404,7 @@ export const getPostulantProfileData = async (req, res) => {
         ? await ProfileProgramExtraInfo.find({ enrolledProgramId: { $in: enrolledIds } }).lean()
         : [];
 
-    // Recalcular y guardar completitud completa (21 ítems: datos + perfil + referencias + académica)
+    // Completitud solo con datos de ESTE perfil (cada perfil es independiente)
     try {
       const postulantFull = await Postulant.findById(postulantDocId)
         .select("typeOfIdentification gender dateBirth phone address alternateEmail countryBirthId stateBirthId cityBirthId countryResidenceId stateResidenceId cityResidenceId")
@@ -1416,6 +1418,11 @@ export const getPostulantProfileData = async (req, res) => {
         programExtraInfo: programExtraInfoFiltered,
       });
       await Postulant.updateOne({ _id: postulantDocId }, { fillingPercentage: fullPct });
+
+      // Persistir perfilCompleto en el perfil (para bloquear HV si está incompleto)
+      const perfilCompleto = fullPct === 100;
+      await PostulantProfile.updateOne({ _id: profileId }, { perfilCompleto });
+      postulantProfile.perfilCompleto = perfilCompleto;
     } catch (err) {
       console.error("[getPostulantProfileData] recalc completeness:", err?.message || err);
     }
@@ -1475,9 +1482,15 @@ export const generateHojaVidaPdf = async (req, res) => {
     if (!postulantProfile) return res.status(404).json({ message: "Perfil no encontrado" });
 
     const profileId = postulantProfile._id;
-    const allBaseProfiles = await PostulantProfile.find(profileFilter).select("_id").lean();
-    const allProfileIds = allBaseProfiles.map((p) => p._id);
 
+    const { perfilCompleto, missingLabels } = await recalcAndSaveProfileCompleteness(postulantDocId, userId, profileId, queryVersionId || null);
+    if (!perfilCompleto) {
+      const message = missingLabels?.length > 0
+        ? `Faltan los siguientes campos por completar: ${missingLabels.join(", ")}`
+        : "El perfil no está completo. Complete los datos personales, áreas de interés, competencias, idiomas y al menos una referencia.";
+      return res.status(400).json({ message, missing: missingLabels || [] });
+    }
+    // Datos solo del perfil seleccionado (cada perfil es independiente)
     let selectedProfileVersion = null;
     if (queryVersionId && profileId) {
       const versionDoc = await ProfileProfileVersion.findOne({
@@ -1489,6 +1502,8 @@ export const generateHojaVidaPdf = async (req, res) => {
     const versionFilter = selectedProfileVersion
       ? { profileId, profileVersionId: selectedProfileVersion._id }
       : { profileId, $or: [{ profileVersionId: null }, { profileVersionId: { $exists: false } }] };
+
+    const expRefFilter = versionFilter;
 
     const [
       enrolledPrograms,
@@ -1521,7 +1536,7 @@ export const generateHojaVidaPdf = async (req, res) => {
         .populate("stateId", "name")
         .populate("cityId", "name")
         .lean(),
-      ProfileWorkExperience.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId })
+      ProfileWorkExperience.find(expRefFilter)
         .populate("companySector", "value name")
         .populate("countryId", "name")
         .populate("stateId", "name")
@@ -1533,11 +1548,11 @@ export const generateHojaVidaPdf = async (req, res) => {
         .populate("language", "value name")
         .populate("level", "value name")
         .lean(),
-      ProfileAward.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId })
+      ProfileAward.find({ profileId })
         .populate("awardType", "value name")
         .sort({ awardDate: -1, dateCreation: -1 })
         .lean(),
-      ProfileReference.find({ profileId: allProfileIds.length ? { $in: allProfileIds } : profileId }).lean(),
+      ProfileReference.find(expRefFilter).lean(),
       ProfileOtherStudy.find({ profileId }).lean(),
       ProfileInterestArea.find(versionFilter).populate("area", "value name").lean(),
       ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").lean(),
@@ -2147,64 +2162,6 @@ function calculateCompleteness(postulant) {
   ];
   const completed = fields.filter(Boolean).length;
   return Math.min(100, Math.round((completed / fields.length) * 100));
-}
-
-/**
- * Completitud completa: mismas 21 variables que el front (datos personales + perfil + referencias + académica).
- * Devuelve 0-100. Se persiste en Postulant.fillingPercentage al cargar profile-data.
- */
-function calculateFullCompleteness(postulant, postulantProfile, profileData) {
-  const isFilled = (v) => {
-    if (v == null || v === "") return false;
-    if (typeof v !== "object") return true;
-    if (v._id != null) return true;
-    if (v.constructor && v.constructor.name === "ObjectId") return true;
-    return false;
-  };
-  const datosFields = [
-    "typeOfIdentification",
-    "gender",
-    "dateBirth",
-    "phone",
-    "address",
-    "alternateEmail",
-    "countryBirthId",
-    "stateBirthId",
-    "cityBirthId",
-    "countryResidenceId",
-    "stateResidenceId",
-    "cityResidenceId",
-  ];
-  const itemsDatos = datosFields.map((key) => ({ ok: isFilled(postulant?.[key]) }));
-  const pp = postulantProfile;
-  const hasRefs = (profileData?.references?.length ?? 0) > 0;
-  const hasInterest = (profileData?.interestAreas?.length ?? 0) > 0;
-  const hasSkills = (profileData?.skills?.length ?? 0) > 0;
-  const hasLangs = (profileData?.languages?.length ?? 0) > 0;
-  const hasStudentCode = pp?.studentCode != null && String(pp.studentCode).trim() !== "";
-  const itemsPerfil = [
-    { ok: hasStudentCode },
-    { ok: hasInterest },
-    { ok: hasSkills },
-    { ok: hasLangs },
-    { ok: hasRefs },
-  ];
-  const enrolled = (profileData?.enrolledPrograms || []).filter((e) => e.programFacultyId != null);
-  const firstEnrolled = enrolled[0];
-  const extraList = profileData?.programExtraInfo || [];
-  const firstExtra = firstEnrolled
-    ? extraList.find((e) => e.enrolledProgramId?.toString?.() === firstEnrolled._id?.toString?.())
-    : null;
-  const itemsAcademica = [
-    { ok: enrolled.length > 0 },
-    { ok: firstExtra?.approvedCredits != null && firstExtra?.approvedCredits !== "" },
-    { ok: firstExtra?.totalCredits != null && firstExtra?.totalCredits !== "" },
-    { ok: firstExtra?.cumulativeAverage != null && firstExtra?.cumulativeAverage !== "" },
-  ];
-  const allItems = [...itemsDatos, ...itemsPerfil, ...itemsAcademica];
-  const completed = allItems.filter((i) => i.ok).length;
-  const total = allItems.length;
-  return total ? Math.min(100, Math.round((completed / total) * 100)) : 0;
 }
 
 export const uploadProfilePicture = async (req, res) => {

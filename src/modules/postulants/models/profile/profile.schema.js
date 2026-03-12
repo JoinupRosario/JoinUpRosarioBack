@@ -32,6 +32,8 @@ const postulantProfileSchema = new mongoose.Schema(
     emphasis: { type: String, maxlength: 100 },
 
     yearsExperience: { type: Number },
+    /** Indica si el perfil cumple todos los requisitos para generar hoja de vida (21 ítems: datos + perfil + referencias + académica). Se actualiza al cargar profile-data y tras cada mutación del perfil. */
+    perfilCompleto: { type: Boolean, default: false },
     filled: { type: Boolean, default: false },
     lastTimeExperience: { type: Number, default: 0 },
     totalTimeExperience: { type: Number, default: 0 },
