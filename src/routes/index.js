@@ -27,7 +27,11 @@ import condicionCurricularRoutes from '../modules/condicionesCurriculares/condic
 import documentParametrizationRoutes from '../modules/parametrizacionDocumentos/documentParametrization.routes.js';
 import userSucursalRoutes from '../modules/userSucursal/userSucursal.routes.js';
 import estudiantesHabilitadosRoutes from '../modules/estudiantesHabilitados/estudianteHabilitado.routes.js';
-import parametrosPlantillaRoutes from '../modules/parametrosPlantilla/parametroPlantilla.routes.js';
+// Notificación: rutas directas desde cada módulo (sin archivo agregador)
+import eventosRoutes from '../modules/notificacion/eventos/evento.routes.js';
+import plantillasNotificacionRoutes from '../modules/notificacion/plantillasNotificacion/plantillaNotificacion.routes.js';
+import variablesNotificacionRoutes from '../modules/notificacion/variablesNotificacion/variableNotificacion.routes.js';
+import destinatariosNotificacionRoutes from '../modules/notificacion/destinatariosNotificacion/destinatarioNotificacion.routes.js';
 
 const router = express.Router();
 
@@ -59,6 +63,14 @@ router.use("/condiciones-curriculares", condicionCurricularRoutes);
 router.use("/parametrizacion-documentos", documentParametrizationRoutes);
 router.use("/user-sucursales", userSucursalRoutes);
 router.use("/estudiantes-habilitados", estudiantesHabilitadosRoutes);
-router.use("/parametros-plantilla", parametrosPlantillaRoutes);
+// Notificación: cada submódulo montado bajo /notificacion y en URLs legacy
+router.use("/notificacion/eventos", eventosRoutes);
+router.use("/notificacion/plantillas", plantillasNotificacionRoutes);
+router.use("/notificacion/variables", variablesNotificacionRoutes);
+router.use("/notificacion/destinatarios", destinatariosNotificacionRoutes);
+router.use("/parametros-plantilla", eventosRoutes);
+router.use("/plantillas-notificacion", plantillasNotificacionRoutes);
+router.use("/notification-variables", variablesNotificacionRoutes);
+router.use("/destinatarios-notificacion", destinatariosNotificacionRoutes);
 
 export default router;

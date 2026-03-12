@@ -1,6 +1,10 @@
 import mongoose from "mongoose";
 
-const parametroPlantillaSchema = new mongoose.Schema(
+/**
+ * Evento de notificación. Cada evento dispara una notificación y tiene una plantilla asociada.
+ * Colección en MongoDB: eventos
+ */
+const eventoSchema = new mongoose.Schema(
   {
     value: {
       type: String,
@@ -12,7 +16,6 @@ const parametroPlantillaSchema = new mongoose.Schema(
       type: String,
       required: true,
       enum: ["practica", "monitoria", "general"],
-      index: true,
     },
     nombre: {
       type: String,
@@ -26,13 +29,13 @@ const parametroPlantillaSchema = new mongoose.Schema(
         variable: { type: String, trim: true, maxlength: 80 },
         desc: { type: String, trim: true, maxlength: 120 },
       },
-    ], // opcional; si no viene, el front puede usar una lista por defecto por tipo
+    ],
   },
   { timestamps: true }
 );
 
-// Un mismo value puede repetirse solo si cambia el tipo (ej. aceptacion_oferta en practica y en monitoria)
-parametroPlantillaSchema.index({ value: 1, tipo: 1 }, { unique: true });
-parametroPlantillaSchema.index({ tipo: 1 });
+eventoSchema.index({ value: 1, tipo: 1 }, { unique: true });
+eventoSchema.index({ tipo: 1 });
 
-export default mongoose.model("ParametroPlantilla", parametroPlantillaSchema);
+// Modelo "Evento" → colección "eventos" en MongoDB
+export default mongoose.model("Evento", eventoSchema, "eventos");
