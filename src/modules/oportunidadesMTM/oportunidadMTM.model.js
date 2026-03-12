@@ -139,6 +139,12 @@ const oportunidadMTMSchema = new mongoose.Schema(
       default: []
     },
 
+    // Trazabilidad de cierre (igual que en prácticas: quién, cuándo, a quiénes seleccionó)
+    fechaCierre: { type: Date, default: null },
+    cerradoPor: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    motivoCierreNoContrato: { type: String, default: null },
+    cierrePostulantesSeleccionados: [{ type: mongoose.Schema.Types.ObjectId, ref: "PostulacionMTM" }],
+
     // Auditoría
     creadoPor: {
       type: mongoose.Schema.Types.ObjectId,

@@ -1116,7 +1116,7 @@ export const getMisPostulaciones = async (req, res) => {
         empresaDescargoHv: !!p.empresaDescargoHvAt,
         seleccionadoPorEmpresa: p.estado === "seleccionado_empresa" || p.estado === "aceptado_estudiante",
         aceptadoPorEstudiante: p.estado === "aceptado_estudiante",
-        linkOportunidad: opp?._id ? `/dashboard/ofertas-afines/${opp._id}` : null,
+        linkOportunidad: opp?._id ? `/dashboard/oportunidades-practica` : null,
         opportunityId: opp?._id,
       };
     });
@@ -1295,11 +1295,11 @@ export const getApplicationDetail = async (req, res) => {
       const profileVersionId = profileVersionIdRaw && mongoose.Types.ObjectId.isValid(profileVersionIdRaw)
         ? (typeof profileVersionIdRaw === "string" ? new mongoose.Types.ObjectId(profileVersionIdRaw) : profileVersionIdRaw)
         : null;
+      // Solo la HV con la que aplicó: mismo perfil y misma versión (si aplicó con versión).
       const cvFilter = { profileId };
       if (profileVersionId) {
         cvFilter.profileVersionId = profileVersionId;
       } else {
-        // Postulación sin versión (legacy o aplicó sin elegir versión): mostrar solo HV sin versión asignada; si no hay ninguna, mostrar todas del perfil.
         cvFilter.$or = [{ profileVersionId: null }, { profileVersionId: { $exists: false } }];
       }
       const postulantDocId = po.postulant?._id?.toString();
@@ -1309,12 +1309,14 @@ export const getApplicationDetail = async (req, res) => {
 
       let cvs = [];
       if (profileId) {
-        cvs = await ProfileCv.find(cvFilter).populate("attachmentId", "name filepath contentType").lean();
+        cvs = await ProfileCv.find(cvFilter)
+          .populate("attachmentId", "name filepath contentType")
+          .sort({ _id: -1 })
+          .limit(1)
+          .lean();
         if (cvs.length === 0 && !profileVersionId) {
-          const allCvs = await ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").sort({ _id: -1 }).lean();
-          if (allCvs.length > 0) {
-            cvs = [allCvs[0]];
-          }
+          const fallback = await ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").sort({ _id: -1 }).limit(1).lean();
+          if (fallback.length > 0) cvs = fallback;
         }
       }
       const [skills] = await Promise.all([

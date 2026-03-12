@@ -73,6 +73,22 @@ export const getProfilesByPostulantId = async (req, res) => {
             .lean()
         : [];
 
+    // ProfileCv: profileId (base) + profileVersionId (opcional). Si profileVersionId es null, la HV es del perfil base.
+    // Base tiene HV si existe al menos un ProfileCv con ese profileId. Versión tiene HV solo si existe ProfileCv con profileVersionId = esa versión.
+    const cvDocs =
+      profileIds.length > 0
+        ? await ProfileCv.find({ profileId: { $in: profileIds } })
+            .select("profileId profileVersionId")
+            .lean()
+        : [];
+    const hasCvByBaseId = new Map(profileIds.map((id) => [String(id), cvDocs.some((c) => String(c.profileId) === String(id))]));
+    const hasCvByVersionId = new Map(
+      versions.map((v) => [
+        String(v._id),
+        cvDocs.some((c) => String(c.profileId) === String(v.profileId) && c.profileVersionId != null && String(c.profileVersionId) === String(v._id)),
+      ])
+    );
+
     const profiles = versions.map((v) => ({
       type: "version",
       _id: v._id,
@@ -83,12 +99,14 @@ export const getProfilesByPostulantId = async (req, res) => {
       dateCreation: v.dateCreation,
       dateUpdate: v.dateUpdate,
       createdAt: v.dateCreation || v.createdAt,
+      hasCv: hasCvByVersionId.get(String(v._id)) === true,
     }));
 
     const baseProfilesForClient = baseProfiles.map((p) => ({
       _id: p._id,
       studentCode: p.studentCode,
       profileName: p.profileName,
+      hasCv: hasCvByBaseId.get(String(p._id)) === true,
     }));
 
     res.json({
