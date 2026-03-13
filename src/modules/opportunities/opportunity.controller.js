@@ -1127,6 +1127,57 @@ export const getMisPostulaciones = async (req, res) => {
   }
 };
 
+/**
+ * PATCH /opportunities/:id/applications/:postulacionId/estudiante-responder
+ * El estudiante (postulante) confirma o rechaza la selección. Body: { accion: 'confirmar' | 'rechazar' }
+ * Actualiza estado (aceptado_estudiante/rechazado) y aceptadoEstudianteAt/rechazadoAt.
+ */
+export const estudianteResponderPostulacion = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ message: "No autenticado" });
+    const { id: opportunityId, postulacionId } = req.params;
+    const { accion } = req.body || {};
+    if (!accion || !["confirmar", "rechazar"].includes(accion)) {
+      return res.status(400).json({ message: "accion debe ser 'confirmar' o 'rechazar'" });
+    }
+
+    const postulant = await Postulant.findOne({ postulantId: userId }).select("_id").lean();
+    if (!postulant) return res.status(403).json({ message: "No es postulante" });
+
+    const po = await PostulacionOportunidad.findOne({
+      _id: postulacionId,
+      opportunity: opportunityId,
+      postulant: postulant._id,
+    });
+    if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
+    if (po.estado !== "seleccionado_empresa") {
+      return res.status(400).json({ message: "Solo puede responder cuando fue seleccionado por la empresa" });
+    }
+
+    const now = new Date();
+    if (accion === "confirmar") {
+      po.estado = "aceptado_estudiante";
+      po.aceptadoEstudianteAt = now;
+      po.rechazadoAt = null;
+    } else {
+      po.estado = "rechazado";
+      po.rechazadoAt = now;
+      po.aceptadoEstudianteAt = null;
+    }
+    await po.save();
+
+    res.json({
+      message: accion === "confirmar" ? "Has confirmado la selección" : "Has rechazado la selección",
+      estado: po.estado,
+      aceptadoEstudianteAt: po.aceptadoEstudianteAt,
+      rechazadoAt: po.rechazadoAt,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // Obtener postulaciones de una oportunidad (legacy Student + PostulacionOportunidad de postulantes)
 export const getApplications = async (req, res) => {
   try {

@@ -86,7 +86,13 @@ const oportunidadMTMSchema = new mongoose.Schema(
       max: 5
     },
 
-    // Información del responsable / ofertante
+    // Información del responsable / ofertante (coordinador/profesor)
+    /** Usuario administrativo seleccionado como profesor responsable (coordinador). Trae nombre y correo. */
+    profesorResponsable: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "UserAdministrativo",
+      default: null
+    },
     nombreProfesor: {
       type: String,
       trim: true,
