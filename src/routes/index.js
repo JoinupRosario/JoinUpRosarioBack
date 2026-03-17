@@ -32,10 +32,12 @@ import eventosRoutes from '../modules/notificacion/eventos/evento.routes.js';
 import plantillasNotificacionRoutes from '../modules/notificacion/plantillasNotificacion/plantillaNotificacion.routes.js';
 import variablesNotificacionRoutes from '../modules/notificacion/variablesNotificacion/variableNotificacion.routes.js';
 import destinatariosNotificacionRoutes from '../modules/notificacion/destinatariosNotificacion/destinatarioNotificacion.routes.js';
+import accessRoutes from '../modules/access/presentation/routes/access.routes.js';
 
 const router = express.Router();
 
 router.use("/auth", authRoutes);
+router.use("/access", accessRoutes);
 router.use("/users", userRoutes);
 router.use("/students", studentRoutes);
 router.use("/companies", companyRoutes);

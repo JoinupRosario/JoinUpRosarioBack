@@ -9,11 +9,17 @@ import {
   removerPermiso,
   cambiarEstadoPermiso,
   eliminarRol,
-  obtenerPermisos, // Agrega esta importación
+  obtenerPermisos,
   actualizarPermisos
 } from './roles.controller.js';
+import { verifyToken } from '../../middlewares/auth.js';
+import { requirePermission } from '../access/presentation/middlewares/requirePermission.js';
 
 const router = express.Router();
+
+// Todas las rutas de roles requieren autenticación y permiso AMRO (Acceso al módulo Roles)
+router.use(verifyToken);
+router.use(requirePermission('AMRO'));
 
 // Rutas para roles
 router.post('/', crearRol);

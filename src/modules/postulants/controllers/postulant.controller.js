@@ -39,6 +39,7 @@ import { buildCartaPresentacionPdf } from "../../../services/cartaPresentacionPd
 import { s3Config, uploadToS3, getObjectFromS3 } from "../../../config/s3.config.js";
 import mongoose from "mongoose";
 import { calculateFullCompleteness, recalcAndSaveProfileCompleteness } from "../services/profileCompleteness.service.js";
+import { userHasPermission } from "../../access/presentation/helpers/checkPermission.js";
 
 /** Prefijo S3 para hojas de vida: hojas-vida/{postulantId}/{profileId}/archivo.pdf */
 const S3_PREFIX_HOJAS_VIDA = "hojas-vida";
@@ -2008,12 +2009,34 @@ function mapProfileBodyToPostulant(body) {
 export const updatePostulant = async (req, res) => {
   try {
     const { id } = req.params;
-    const userId = req.user.id;
+    const userId = req.user?.id;
 
     const postulant = await Postulant.findById(id);
 
     if (!postulant) {
       return res.status(404).json({ message: "postulant not found" });
+    }
+
+    // EMIP = solo puede editar su propio postulante; EPOS = puede editar cualquier postulante
+    const hasEPOS = await userHasPermission(userId, "EPOS");
+    if (!hasEPOS) {
+      const hasEMIP = await userHasPermission(userId, "EMIP");
+      const postulantUserId = postulant.postulantId?.toString?.() ?? postulant.postulantId;
+      if (!hasEMIP || postulantUserId !== userId) {
+        return res.status(403).json({ message: "No tiene permiso para editar este postulante" });
+      }
+    }
+
+    // EFEN = puede editar fecha de nacimiento; si no tiene permiso, no aplicar el campo
+    const body = { ...req.body };
+    if (body.date_nac_postulant !== undefined) {
+      const hasEFEN = await userHasPermission(userId, "EFEN");
+      if (!hasEFEN) delete body.date_nac_postulant;
+    }
+    // EIDE = puede editar identificación (tipo doc); si no tiene permiso, no aplicar el campo
+    if (body.type_doc_postulant !== undefined) {
+      const hasEIDE = await userHasPermission(userId, "EIDE");
+      if (!hasEIDE) delete body.type_doc_postulant;
     }
 
     // Activar / inactivar el User asociado (toggle de la tabla)
@@ -2026,7 +2049,6 @@ export const updatePostulant = async (req, res) => {
     const previousStatus = postulant.estatePostulant;
     const newStatus = req.body.estate_postulant ?? req.body.estatePostulant;
 
-    const body = { ...req.body };
     if (body.estate_postulant !== undefined) {
       body.estatePostulant = body.estate_postulant;
       delete body.estate_postulant;
