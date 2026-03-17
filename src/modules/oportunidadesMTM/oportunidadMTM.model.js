@@ -86,7 +86,13 @@ const oportunidadMTMSchema = new mongoose.Schema(
       max: 5
     },
 
-    // Información del responsable / ofertante
+    // Información del responsable / ofertante (coordinador/profesor)
+    /** Usuario administrativo seleccionado como profesor responsable (coordinador). Trae nombre y correo. */
+    profesorResponsable: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "UserAdministrativo",
+      default: null
+    },
     nombreProfesor: {
       type: String,
       trim: true,
@@ -138,6 +144,12 @@ const oportunidadMTMSchema = new mongoose.Schema(
       type: [historialEstadoSchema],
       default: []
     },
+
+    // Trazabilidad de cierre (igual que en prácticas: quién, cuándo, a quiénes seleccionó)
+    fechaCierre: { type: Date, default: null },
+    cerradoPor: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    motivoCierreNoContrato: { type: String, default: null },
+    cierrePostulantesSeleccionados: [{ type: mongoose.Schema.Types.ObjectId, ref: "PostulacionMTM" }],
 
     // Auditoría
     creadoPor: {

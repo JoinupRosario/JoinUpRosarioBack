@@ -272,6 +272,66 @@ export const consultaInfAcademica = async (documento) => {
   }
 };
 
+/**
+ * Consulta asignaturas cursadas por el estudiante en un plan de estudio (UXXI).
+ * URL = URL_OSB + /uxxi-URO/Proxy/Consulta_asignatura
+ * POST body: { documento, planestudio }. Basic Auth con USS_URJOB y PASS_URJOB.
+ * Respuesta esperada: { items: [ { resultSet: { items: [ { identificador_asignatura, codigo_asignatura, nombre_asignatura, programa, ... } ] } } ] }
+ * @returns {Promise<Array<{ identificador_asignatura?: string, codigo_asignatura?: number, nombre_asignatura?: string, programa?: string }>>}
+ */
+export const consultaAsignatura = async (documento, planestudio) => {
+  const baseUrl = (process.env.URL_OSB || "").trim().replace(/\/$/, "");
+  const creds = getOSBCredentials();
+  const docStr = documento != null ? String(documento).trim() : "";
+  const planStr = planestudio != null ? String(planestudio).trim() : "";
+  if (!baseUrl) {
+    const err = new Error("URL_OSB no está configurado. No se puede llamar a Consulta_asignatura.");
+    err.code = "CONFIG_MISSING";
+    throw err;
+  }
+  if (!docStr || !planStr) return [];
+
+  const headers = { "Content-Type": "application/json", Accept: "application/json" };
+  if (creds) {
+    headers.Authorization = "Basic " + Buffer.from(`${creds.user}:${creds.pass}`).toString("base64");
+  }
+
+  const url = baseUrl + "/uxxi-URO/Proxy/Consulta_asignatura";
+  const body = JSON.stringify({ documento: docStr, planestudio: planStr });
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), getTimeout());
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body,
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error(`Universitas (Consulta_asignatura): ${res.status}`);
+    const data = await res.json().catch(() => null);
+    if (!data) return [];
+    const statements = data.items;
+    if (Array.isArray(statements) && statements.length > 0) {
+      const first = statements[0];
+      const resultSet = first?.resultSet;
+      const items = resultSet?.items;
+      if (Array.isArray(items)) return items;
+    }
+    if (data.resultSet && Array.isArray(data.resultSet.items)) return data.resultSet.items;
+    return [];
+  } catch (err) {
+    if (err.name === "AbortError") {
+      const e = new Error("Timeout al conectar con Universitas (Consulta_asignatura).");
+      e.code = "TIMEOUT";
+      throw e;
+    }
+    console.error("UXXI consultaAsignatura:", err.message);
+    throw err;
+  }
+};
+
 function tryParseJson(str) {
   if (str == null || typeof str !== "string") return str == null ? null : str;
   const trimmed = str.trim();

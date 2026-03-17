@@ -1116,12 +1116,63 @@ export const getMisPostulaciones = async (req, res) => {
         empresaDescargoHv: !!p.empresaDescargoHvAt,
         seleccionadoPorEmpresa: p.estado === "seleccionado_empresa" || p.estado === "aceptado_estudiante",
         aceptadoPorEstudiante: p.estado === "aceptado_estudiante",
-        linkOportunidad: opp?._id ? `/dashboard/ofertas-afines/${opp._id}` : null,
+        linkOportunidad: opp?._id ? `/dashboard/oportunidades-practica` : null,
         opportunityId: opp?._id,
       };
     });
 
     res.json({ data, total: data.length });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * PATCH /opportunities/:id/applications/:postulacionId/estudiante-responder
+ * El estudiante (postulante) confirma o rechaza la selección. Body: { accion: 'confirmar' | 'rechazar' }
+ * Actualiza estado (aceptado_estudiante/rechazado) y aceptadoEstudianteAt/rechazadoAt.
+ */
+export const estudianteResponderPostulacion = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ message: "No autenticado" });
+    const { id: opportunityId, postulacionId } = req.params;
+    const { accion } = req.body || {};
+    if (!accion || !["confirmar", "rechazar"].includes(accion)) {
+      return res.status(400).json({ message: "accion debe ser 'confirmar' o 'rechazar'" });
+    }
+
+    const postulant = await Postulant.findOne({ postulantId: userId }).select("_id").lean();
+    if (!postulant) return res.status(403).json({ message: "No es postulante" });
+
+    const po = await PostulacionOportunidad.findOne({
+      _id: postulacionId,
+      opportunity: opportunityId,
+      postulant: postulant._id,
+    });
+    if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
+    if (po.estado !== "seleccionado_empresa") {
+      return res.status(400).json({ message: "Solo puede responder cuando fue seleccionado por la empresa" });
+    }
+
+    const now = new Date();
+    if (accion === "confirmar") {
+      po.estado = "aceptado_estudiante";
+      po.aceptadoEstudianteAt = now;
+      po.rechazadoAt = null;
+    } else {
+      po.estado = "rechazado";
+      po.rechazadoAt = now;
+      po.aceptadoEstudianteAt = null;
+    }
+    await po.save();
+
+    res.json({
+      message: accion === "confirmar" ? "Has confirmado la selección" : "Has rechazado la selección",
+      estado: po.estado,
+      aceptadoEstudianteAt: po.aceptadoEstudianteAt,
+      rechazadoAt: po.rechazadoAt,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1295,11 +1346,11 @@ export const getApplicationDetail = async (req, res) => {
       const profileVersionId = profileVersionIdRaw && mongoose.Types.ObjectId.isValid(profileVersionIdRaw)
         ? (typeof profileVersionIdRaw === "string" ? new mongoose.Types.ObjectId(profileVersionIdRaw) : profileVersionIdRaw)
         : null;
+      // Solo la HV con la que aplicó: mismo perfil y misma versión (si aplicó con versión).
       const cvFilter = { profileId };
       if (profileVersionId) {
         cvFilter.profileVersionId = profileVersionId;
       } else {
-        // Postulación sin versión (legacy o aplicó sin elegir versión): mostrar solo HV sin versión asignada; si no hay ninguna, mostrar todas del perfil.
         cvFilter.$or = [{ profileVersionId: null }, { profileVersionId: { $exists: false } }];
       }
       const postulantDocId = po.postulant?._id?.toString();
@@ -1309,12 +1360,14 @@ export const getApplicationDetail = async (req, res) => {
 
       let cvs = [];
       if (profileId) {
-        cvs = await ProfileCv.find(cvFilter).populate("attachmentId", "name filepath contentType").lean();
+        cvs = await ProfileCv.find(cvFilter)
+          .populate("attachmentId", "name filepath contentType")
+          .sort({ _id: -1 })
+          .limit(1)
+          .lean();
         if (cvs.length === 0 && !profileVersionId) {
-          const allCvs = await ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").sort({ _id: -1 }).lean();
-          if (allCvs.length > 0) {
-            cvs = [allCvs[0]];
-          }
+          const fallback = await ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").sort({ _id: -1 }).limit(1).lean();
+          if (fallback.length > 0) cvs = fallback;
         }
       }
       const [skills] = await Promise.all([
