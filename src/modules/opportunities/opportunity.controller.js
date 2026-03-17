@@ -10,11 +10,13 @@ import Periodo from "../periodos/periodo.model.js";
 import Country from "../shared/location/models/country.schema.js";
 import City from "../shared/location/models/city.schema.js";
 import Item from "../shared/reference-data/models/item.schema.js";
+import { esAcuerdoDeVinculacion, iniciarFlujoAcuerdoVinculacion } from "../../services/acuerdoVinculacion.service.js";
 
 const OBJECTID_REGEX = /^[a-f0-9]{24}$/i;
 const LIST_ID_INTEREST_AREA = "L_INTEREST_AREA";
 const LIST_ID_EMOTIONAL_SALARY = "L_EMOTIONAL_SALARY";
 const LIST_ID_DEDICATION_JOB_OFFER = "L_DEDICATION_JOB_OFFER";
+const LIST_ID_CONTRACT_TYPE_ACADEMIC_PRACTICE = "L_CONTRACT_TYPE_ACADEMIC_PRACTICE";
 
 /** Normaliza periodo, pais y ciudad a ObjectId (refs). Acepta código o id. Modifica data in-place. */
 async function normalizeOpportunityRefs(data) {
@@ -116,6 +118,28 @@ async function normalizeOpportunityRefs(data) {
           ]
         }).select("_id").lean();
         data.dedicacion = doc ? doc._id : null;
+      }
+    }
+  }
+
+  // Tipo de vinculación: ref Item (L_CONTRACT_TYPE_ACADEMIC_PRACTICE)
+  if (data.tipoVinculacion != null && data.tipoVinculacion !== "") {
+    const v = data.tipoVinculacion;
+    if (v._id && OBJECTID_REGEX.test(String(v._id))) {
+      data.tipoVinculacion = new mongoose.Types.ObjectId(v._id);
+    } else {
+      const s = String(v).trim();
+      if (OBJECTID_REGEX.test(s)) {
+        data.tipoVinculacion = new mongoose.Types.ObjectId(s);
+      } else {
+        const doc = await Item.findOne({
+          listId: LIST_ID_CONTRACT_TYPE_ACADEMIC_PRACTICE,
+          $or: [
+            { value: new RegExp(`^${escapeRegex(s)}$`, "i") },
+            { description: new RegExp(`^${escapeRegex(s)}$`, "i") }
+          ]
+        }).select("_id").lean();
+        data.tipoVinculacion = doc ? doc._id : null;
       }
     }
   }
@@ -242,6 +266,7 @@ export const getOpportunities = async (req, res) => {
     const opportunities = await Opportunity.find(filter)
       .populate("company", "name commercialName sector logo")
       .populate("creadoPor", "name email")
+      .populate("tipoVinculacion", "value description listId")
       .populate("postulaciones.estudiante", "studentId faculty program")
       .populate("revisadoPor", "name email")
       .limit(limit * 1)
@@ -448,6 +473,7 @@ export const getOpportunityById = async (req, res) => {
       .populate("pais", "name sortname isoAlpha2")
       .populate("ciudad", "name codDian")
       .populate("dedicacion", "value description listId")
+      .populate("tipoVinculacion", "value description listId")
       .populate("areaDesempeno", "value description listId")
       .populate("salarioEmocional", "value description listId")
       .populate("creadoPor", "name email")
@@ -478,6 +504,17 @@ export const getOpportunityById = async (req, res) => {
         ]
       }).select("_id value description").lean();
       if (doc) payload.dedicacion = doc;
+    }
+    // Si tipoVinculacion viene como string (legacy), resolver a Item
+    if (payload.tipoVinculacion && typeof payload.tipoVinculacion === "string") {
+      const doc = await Item.findOne({
+        listId: LIST_ID_CONTRACT_TYPE_ACADEMIC_PRACTICE,
+        $or: [
+          { value: new RegExp(`^${escapeRegex(payload.tipoVinculacion.trim())}$`, "i") },
+          { description: new RegExp(`^${escapeRegex(payload.tipoVinculacion.trim())}$`, "i") }
+        ]
+      }).select("_id value description").lean();
+      if (doc) payload.tipoVinculacion = doc;
     }
     res.json(payload);
   } catch (error) {
@@ -572,6 +609,7 @@ export const createOpportunity = async (req, res) => {
 
     await opportunity.populate("company", "name commercialName sector logo");
     await opportunity.populate("creadoPor", "name email");
+    await opportunity.populate("tipoVinculacion", "value description listId");
     await opportunity.populate("historialEstados.cambiadoPor", "name email");
 
     res.status(201).json({
@@ -614,7 +652,8 @@ export const updateOpportunity = async (req, res) => {
       { new: true, runValidators: true }
     )
       .populate("company", "name commercialName sector logo")
-      .populate("creadoPor", "name email");
+      .populate("creadoPor", "name email")
+      .populate("tipoVinculacion", "value description listId");
 
     // Registrar edición en historial de estados (mismo estado = edición)
     if (updatedOpportunity) {
@@ -632,6 +671,7 @@ export const updateOpportunity = async (req, res) => {
     const finalOpportunity = await Opportunity.findById(id)
       .populate("company", "name commercialName sector logo")
       .populate("creadoPor", "name email")
+      .populate("tipoVinculacion", "value description listId")
       .populate("historialEstados.cambiadoPor", "name email");
 
     res.json({
@@ -1258,6 +1298,16 @@ export const estudianteResponderPostulacion = async (req, res) => {
       po.comentarios = "Rechazada por el estudiante";
     }
     await po.save();
+
+    // RQ04_HU006: Si el estudiante confirmó y la oportunidad es tipo "Acuerdo de vinculación", iniciar flujo de generación de acuerdo
+    if (accion === "confirmar") {
+      const opp = await Opportunity.findById(opportunityId).populate("tipoVinculacion", "value").lean();
+      if (opp && esAcuerdoDeVinculacion(opp.tipoVinculacion)) {
+        iniciarFlujoAcuerdoVinculacion(po._id.toString(), opportunityId, opp).catch((err) => {
+          console.error("[RQ04_HU006] Error iniciando flujo acuerdo de vinculación:", err);
+        });
+      }
+    }
 
     res.json({
       message: accion === "confirmar" ? "Has confirmado la selección" : "Has rechazado la selección",

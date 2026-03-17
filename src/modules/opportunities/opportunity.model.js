@@ -37,9 +37,10 @@ const opportunitySchema = new mongoose.Schema(
       default: null
     },
 
-    // Tipo de vinculación y periodo (sin enum: se acepta el valor que venga del formulario)
+    /** Referencia al tipo de vinculación (Item con listId L_CONTRACT_TYPE_ACADEMIC_PRACTICE). */
     tipoVinculacion: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "items",
       default: null
     },
     /** Referencia al período académico (Periodo). Siempre guardar ObjectId para consistencia. */
