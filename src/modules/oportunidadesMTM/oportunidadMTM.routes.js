@@ -29,6 +29,7 @@ import {
   getLegalizacionesMTMAdmin,
   getLegalizacionMTMAdmin,
   getDocumentoLegalizacionUrlAdmin,
+  getDocumentoLegalizacionDownloadAdmin,
   patchDocumentoLegalizacionMTM,
   postAprobarLegalizacionMTM,
   postRechazarLegalizacionMTM,
@@ -39,6 +40,25 @@ import {
   enviarRevisionPlanTrabajoMTM,
   aprobarPlanTrabajoMTM,
   rechazarPlanTrabajoMTM,
+  getReportesEstadisticasMTM,
+  getEstadisticasLegalizacionMTM,
+  getSeguimientosMTM,
+  createSeguimientoMTM,
+  updateSeguimientoMTM,
+  deleteSeguimientoMTM,
+  aprobarSeguimientoMTM,
+  rechazarSeguimientoMTM,
+  accionMasivaSeguimientosMTM,
+  getTotalHorasSeguimientosMTM,
+  uploadDocumentoSeguimientoMTM,
+  getDocumentoSeguimientoUrl,
+  getDocumentoSeguimientoUrlAdmin,
+  getDocumentoSeguimientoDownloadAdmin,
+  getOrCreateLinkAsistenciaMTM,
+  getAsistenciaFormByToken,
+  postRegistrarAsistenciaMTM,
+  getReporteAsistenciaMTM,
+  getReporteAsistenciaMTMStudent,
 } from "./oportunidadMTM.controller.js";
 
 const router = express.Router();
@@ -52,7 +72,15 @@ const uploadLegalizacion = multer({
   },
 });
 
+// RQ04_HU010: Asistencia MTM — rutas públicas (sin token) para registro por link
+router.get("/asistencia-publica/:token/form", getAsistenciaFormByToken);
+router.post("/asistencia-publica/:token/registrar", postRegistrarAsistenciaMTM);
+
 router.use(verifyToken);
+
+// RQ04_HU010: Link y reporte desde módulo legalización
+router.get("/legalizaciones-admin/:postulacionId/link-asistencia", authorizeRoles("admin", "superadmin", "leader"), getOrCreateLinkAsistenciaMTM);
+router.get("/legalizaciones-admin/reporte-asistencia", authorizeRoles("admin", "superadmin", "leader"), getReporteAsistenciaMTM);
 
 // RQ04_HU001: rutas para estudiante (deben ir antes de /:id)
 router.get("/para-estudiante", authorizeRoles("student"), getOportunidadesMTMParaEstudiante);
@@ -67,11 +95,15 @@ router.delete("/legalizaciones/:postulacionId/documentos/:tipo", authorizeRoles(
 router.put("/legalizaciones/:postulacionId", authorizeRoles("student"), updateLegalizacionMTM);
 router.post("/legalizaciones/:postulacionId/documentos", authorizeRoles("student"), uploadLegalizacion.single("file"), uploadDocLegalizacionMTM);
 router.post("/legalizaciones/:postulacionId/remitir-revision", authorizeRoles("student"), remitirRevisionLegalizacionMTM);
+router.get("/legalizaciones/:postulacionId/link-asistencia", authorizeRoles("student"), getOrCreateLinkAsistenciaMTM);
+router.get("/legalizaciones/:postulacionId/reporte-asistencia", authorizeRoles("student"), getReporteAsistenciaMTMStudent);
 
 // RQ04_HU006: Legalización MTM — coordinación (admin)
 router.get("/legalizaciones-admin", authorizeRoles("admin", "superadmin", "leader"), getLegalizacionesMTMAdmin);
+router.get("/legalizaciones-admin/estadisticas", authorizeRoles("admin", "superadmin", "leader"), getEstadisticasLegalizacionMTM);
 router.get("/legalizaciones-admin/:postulacionId", authorizeRoles("admin", "superadmin", "leader"), getLegalizacionMTMAdmin);
 router.get("/legalizaciones-admin/:postulacionId/documentos/:tipo/url", authorizeRoles("admin", "superadmin", "leader"), getDocumentoLegalizacionUrlAdmin);
+router.get("/legalizaciones-admin/:postulacionId/documentos/:tipo/descarga", authorizeRoles("admin", "superadmin", "leader"), getDocumentoLegalizacionDownloadAdmin);
 router.patch("/legalizaciones-admin/:postulacionId/documentos/:tipo", authorizeRoles("admin", "superadmin", "leader"), patchDocumentoLegalizacionMTM);
 router.post("/legalizaciones-admin/:postulacionId/aprobar", authorizeRoles("admin", "superadmin", "leader"), postAprobarLegalizacionMTM);
 router.post("/legalizaciones-admin/:postulacionId/rechazar", authorizeRoles("admin", "superadmin", "leader"), postRechazarLegalizacionMTM);
@@ -85,7 +117,22 @@ router.post("/plan-trabajo/:postulacionId/enviar-revision", authorizeRoles("stud
 router.post("/plan-trabajo/:postulacionId/aprobar", authorizeRoles("admin", "superadmin", "leader"), aprobarPlanTrabajoMTM);
 router.post("/plan-trabajo/:postulacionId/rechazar", authorizeRoles("admin", "superadmin", "leader"), rechazarPlanTrabajoMTM);
 
+// RQ04_HU008: Seguimientos MTM (estudiante: registro; admin: aprobar/rechazar, total horas)
+router.get("/seguimientos/:postulacionId", authorizeRoles("student", "admin", "superadmin", "leader"), getSeguimientosMTM);
+router.get("/seguimientos/:postulacionId/total-horas", authorizeRoles("admin", "superadmin", "leader"), getTotalHorasSeguimientosMTM);
+router.post("/seguimientos/:postulacionId", authorizeRoles("student", "admin", "superadmin", "leader"), createSeguimientoMTM);
+router.put("/seguimientos/:postulacionId/:seguimientoId", authorizeRoles("student", "admin", "superadmin", "leader"), updateSeguimientoMTM);
+router.delete("/seguimientos/:postulacionId/:seguimientoId", authorizeRoles("student", "admin", "superadmin", "leader"), deleteSeguimientoMTM);
+router.patch("/seguimientos/:postulacionId/:seguimientoId/aprobar", authorizeRoles("admin", "superadmin", "leader"), aprobarSeguimientoMTM);
+router.patch("/seguimientos/:postulacionId/:seguimientoId/rechazar", authorizeRoles("admin", "superadmin", "leader"), rechazarSeguimientoMTM);
+router.post("/seguimientos/:postulacionId/accion-masiva", authorizeRoles("admin", "superadmin", "leader"), accionMasivaSeguimientosMTM);
+router.post("/seguimientos/:postulacionId/:seguimientoId/documento", authorizeRoles("student"), uploadLegalizacion.single("file"), uploadDocumentoSeguimientoMTM);
+router.get("/seguimientos/:postulacionId/:seguimientoId/documento/url", authorizeRoles("student"), getDocumentoSeguimientoUrl);
+router.get("/seguimientos/:postulacionId/:seguimientoId/documento/url-admin", authorizeRoles("admin", "superadmin", "leader"), getDocumentoSeguimientoUrlAdmin);
+router.get("/seguimientos/:postulacionId/:seguimientoId/documento/descarga", authorizeRoles("admin", "superadmin", "leader"), getDocumentoSeguimientoDownloadAdmin);
+
 router.get("/", getOportunidadesMTM);
+router.get("/reportes/estadisticas", authorizeRoles("admin", "superadmin", "leader"), getReportesEstadisticasMTM);
 router.get("/:id/history", authorizeRoles("admin", "superadmin", "leader"), getStatusHistoryMTM);
 router.get("/:id/applications", authorizeRoles("admin", "superadmin", "leader"), getApplicationsMTM);
 router.get("/:id/applications/detail/:postulacionId", authorizeRoles("admin", "superadmin", "leader"), getApplicationDetailMTM);

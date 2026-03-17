@@ -61,24 +61,42 @@ export const crearRol = async (req, res) => {
   }
 };
 
-// Obtener todos los roles
+// Obtener todos los roles (con búsqueda y paginación)
 export const obtenerRoles = async (req, res) => {
   try {
-    const { estado } = req.query;
+    const { estado, search, page = 1, limit = 12 } = req.query;
     let filtro = {};
 
-    if (estado !== undefined) {
-      filtro.estado = estado === 'true';
+    if (estado !== undefined && estado !== '' && estado !== 'todos') {
+      filtro.estado = estado === 'true' || estado === 'activos';
     }
 
-    const roles = await Rol.find(filtro)
-      .populate('permisos.permiso')
-      .sort({ createdAt: -1 });
+    if (search && String(search).trim()) {
+      filtro.nombre = { $regex: String(search).trim(), $options: 'i' };
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 12));
+    const skip = (pageNum - 1) * limitNum;
+
+    const [total, roles] = await Promise.all([
+      Rol.countDocuments(filtro),
+      Rol.find(filtro)
+        .populate('permisos.permiso')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+    ]);
+
+    const pages = Math.ceil(total / limitNum) || 1;
 
     res.json({
       success: true,
       data: roles,
-      total: roles.length
+      total,
+      page: pageNum,
+      limit: limitNum,
+      pages
     });
 
   } catch (error) {

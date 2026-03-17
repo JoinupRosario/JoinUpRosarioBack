@@ -3,7 +3,10 @@ import OportunidadMTM from "./oportunidadMTM.model.js";
 import PostulacionMTM from "./postulacionMTM.model.js";
 import LegalizacionMTM from "./legalizacionMTM.model.js";
 import PlanDeTrabajoMTM from "./planDeTrabajoMTM.model.js";
-import { uploadToS3, getSignedDownloadUrl, deleteFromS3 } from "../../config/s3.config.js";
+import SeguimientoMTM from "./seguimientoMTM.model.js";
+import AsistenciaMTM from "./asistenciaMTM.model.js";
+import crypto from "crypto";
+import { uploadToS3, getSignedDownloadUrl, getObjectFromS3, deleteFromS3 } from "../../config/s3.config.js";
 import Item from "../shared/reference-data/models/item.schema.js"; // asegura registro del modelo "items"
 import { buildSearchRegex } from "../../utils/searchUtils.js";
 import Postulant from "../postulants/models/postulants.schema.js";
@@ -98,6 +101,146 @@ export const getOportunidadesMTM = async (req, res) => {
   }
 };
 
+// ─── GET /oportunidades-mtm/reportes/estadisticas ───────────────────────────────
+// RQ04_HU003: Reportes y estadísticas MTM para coordinación (admin).
+export const getReportesEstadisticasMTM = async (req, res) => {
+  try {
+    const [porEstadoOp, porEstadoPost, totales, porPeriodo] = await Promise.all([
+      OportunidadMTM.aggregate([{ $group: { _id: "$estado", count: { $sum: 1 } } }]),
+      PostulacionMTM.aggregate([{ $group: { _id: "$estado", count: { $sum: 1 } } }]),
+      Promise.all([
+        OportunidadMTM.countDocuments(),
+        PostulacionMTM.countDocuments(),
+        PostulacionMTM.countDocuments({ estado: "aceptado_estudiante" }),
+        PostulacionMTM.countDocuments({ estado: "rechazado" }),
+        PostulacionMTM.countDocuments({ estado: "seleccionado_empresa" }),
+        PostulacionMTM.countDocuments({ estado: "aplicado" }).then((n) => n),
+        PostulacionMTM.countDocuments({ $or: [{ estado: "empresa_consulto_perfil" }, { estado: "empresa_descargo_hv" }] }).then((n) => n),
+      ]).then(([op, post, aceptadas, rechazadas, pendientesRespuesta, aplicadas, enRevision]) => ({
+        totalOportunidades: op,
+        totalPostulaciones: post,
+        aceptadas,
+        rechazadas,
+        pendientesRespuesta,
+        aplicadas,
+        enRevision,
+      })),
+      PostulacionMTM.aggregate([
+        { $lookup: { from: "oportunidadmtms", localField: "oportunidadMTM", foreignField: "_id", as: "op" } },
+        { $unwind: "$op" },
+        { $lookup: { from: "periodos", localField: "op.periodo", foreignField: "_id", as: "periodoDoc" } },
+        { $unwind: { path: "$periodoDoc", preserveNullAndEmptyArrays: true } },
+        {
+          $group: {
+            _id: "$periodoDoc.codigo",
+            periodoId: { $first: "$op.periodo" },
+            totalPostulaciones: { $sum: 1 },
+            aceptadas: { $sum: { $cond: [{ $eq: ["$estado", "aceptado_estudiante"] }, 1, 0] } },
+            rechazadas: { $sum: { $cond: [{ $eq: ["$estado", "rechazado"] }, 1, 0] } },
+            seleccionadasPendientes: { $sum: { $cond: [{ $eq: ["$estado", "seleccionado_empresa"] }, 1, 0] } },
+          },
+        },
+        { $sort: { _id: -1 } },
+        { $limit: 12 },
+      ]),
+    ]);
+
+    const resumen = {
+      ...totales,
+      oportunidadesPorEstado: Object.fromEntries(porEstadoOp.map((e) => [e._id || "sin_estado", e.count])),
+      postulacionesPorEstado: Object.fromEntries(porEstadoPost.map((e) => [e._id || "sin_estado", e.count])),
+    };
+
+    const porPeriodoFormato = porPeriodo.map((p) => ({
+      periodo: p._id || "—",
+      totalPostulaciones: p.totalPostulaciones,
+      aceptadas: p.aceptadas,
+      rechazadas: p.rechazadas,
+      seleccionadasPendientes: p.seleccionadasPendientes,
+    }));
+
+    res.json({
+      success: true,
+      resumen,
+      porPeriodo: porPeriodoFormato,
+      generadoAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("[MTM] getReportesEstadisticasMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** GET estadísticas específicas de legalización MTM (por estado, periodo, plazos). */
+export const getEstadisticasLegalizacionMTM = async (req, res) => {
+  try {
+    const [porEstado, porPeriodo, totales] = await Promise.all([
+      LegalizacionMTM.aggregate([{ $group: { _id: "$estado", count: { $sum: 1 } } }]),
+      LegalizacionMTM.aggregate([
+        { $lookup: { from: "postulacionmtms", localField: "postulacionMTM", foreignField: "_id", as: "po" } },
+        { $unwind: "$po" },
+        { $lookup: { from: "oportunidadmtms", localField: "po.oportunidadMTM", foreignField: "_id", as: "op" } },
+        { $unwind: { path: "$op", preserveNullAndEmptyArrays: true } },
+        { $lookup: { from: "periodos", localField: "op.periodo", foreignField: "_id", as: "periodoDoc" } },
+        { $unwind: { path: "$periodoDoc", preserveNullAndEmptyArrays: true } },
+        {
+          $group: {
+            _id: "$periodoDoc.codigo",
+            total: { $sum: 1 },
+            borrador: { $sum: { $cond: [{ $eq: ["$estado", "borrador"] }, 1, 0] } },
+            en_revision: { $sum: { $cond: [{ $eq: ["$estado", "en_revision"] }, 1, 0] } },
+            aprobada: { $sum: { $cond: [{ $eq: ["$estado", "aprobada"] }, 1, 0] } },
+            rechazada: { $sum: { $cond: [{ $eq: ["$estado", "rechazada"] }, 1, 0] } },
+            en_ajuste: { $sum: { $cond: [{ $eq: ["$estado", "en_ajuste"] }, 1, 0] } },
+          },
+        },
+        { $sort: { _id: -1 } },
+        { $limit: 15 },
+      ]),
+      LegalizacionMTM.aggregate([
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            borrador: { $sum: { $cond: [{ $eq: ["$estado", "borrador"] }, 1, 0] } },
+            en_revision: { $sum: { $cond: [{ $eq: ["$estado", "en_revision"] }, 1, 0] } },
+            aprobada: { $sum: { $cond: [{ $eq: ["$estado", "aprobada"] }, 1, 0] } },
+            rechazada: { $sum: { $cond: [{ $eq: ["$estado", "rechazada"] }, 1, 0] } },
+            en_ajuste: { $sum: { $cond: [{ $eq: ["$estado", "en_ajuste"] }, 1, 0] } },
+          },
+        },
+      ]),
+    ]);
+
+    const porEstadoMap = Object.fromEntries((porEstado || []).map((e) => [e._id || "sin_estado", e.count]));
+    const totalesLeg = totales?.[0] || { total: 0, borrador: 0, en_revision: 0, aprobada: 0, rechazada: 0, en_ajuste: 0 };
+
+    res.json({
+      success: true,
+      porEstado: porEstadoMap,
+      total: totalesLeg.total,
+      borrador: totalesLeg.borrador,
+      en_revision: totalesLeg.en_revision,
+      aprobada: totalesLeg.aprobada,
+      rechazada: totalesLeg.rechazada,
+      en_ajuste: totalesLeg.en_ajuste,
+      porPeriodo: (porPeriodo || []).map((p) => ({
+        periodo: p._id || "—",
+        total: p.total,
+        borrador: p.borrador,
+        en_revision: p.en_revision,
+        aprobada: p.aprobada,
+        rechazada: p.rechazada,
+        en_ajuste: p.en_ajuste,
+      })),
+      generadoAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("[MTM] getEstadisticasLegalizacionMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
 // ─── Obtener una oportunidad MTM por ID ───────────────────────────────────────
 export const getOportunidadMTMById = async (req, res) => {
   try {
@@ -119,6 +262,9 @@ export const createOportunidadMTM = async (req, res) => {
       company,
       nombreCargo,
       dedicacionHoras,
+      limiteHoras,
+      centroCosto,
+      codigoCPS,
       valorPorHora,
       tipoVinculacion,
       categoria,
@@ -148,6 +294,9 @@ export const createOportunidadMTM = async (req, res) => {
       company: company || null,
       nombreCargo,
       dedicacionHoras: dedicacionHoras || null,
+      limiteHoras: limiteHoras ?? null,
+      centroCosto: centroCosto || null,
+      codigoCPS: codigoCPS || null,
       valorPorHora: valorPorHora || null,
       tipoVinculacion: tipoVinculacion || null,
       categoria: categoria || null,
@@ -195,6 +344,9 @@ export const updateOportunidadMTM = async (req, res) => {
       company,
       nombreCargo,
       dedicacionHoras,
+      limiteHoras,
+      centroCosto,
+      codigoCPS,
       valorPorHora,
       tipoVinculacion,
       categoria,
@@ -221,6 +373,9 @@ export const updateOportunidadMTM = async (req, res) => {
       ...(company !== undefined && { company }),
       ...(nombreCargo !== undefined && { nombreCargo }),
       ...(dedicacionHoras !== undefined && { dedicacionHoras }),
+      ...(limiteHoras !== undefined && { limiteHoras }),
+      ...(centroCosto !== undefined && { centroCosto }),
+      ...(codigoCPS !== undefined && { codigoCPS }),
       ...(valorPorHora !== undefined && { valorPorHora }),
       ...(tipoVinculacion !== undefined && { tipoVinculacion }),
       ...(categoria !== undefined && { categoria }),
@@ -541,7 +696,8 @@ export const getMisPostulacionesMTM = async (req, res) => {
     const list = await PostulacionMTM.find({ postulant: postulant._id })
       .populate({
         path: "oportunidadMTM",
-        select: "nombreCargo estado fechaVencimiento",
+        select: "nombreCargo estado fechaVencimiento nombreProfesor profesorResponsable",
+        populate: { path: "profesorResponsable", select: "nombres apellidos" },
       })
       .populate("postulantProfile", "studentCode")
       .sort({ fechaAplicacion: -1 })
@@ -556,6 +712,9 @@ export const getMisPostulacionesMTM = async (req, res) => {
 
     const data = list.map((p) => {
       const opp = p.oportunidadMTM;
+      const nombreCoordinador = opp?.profesorResponsable
+        ? [opp.profesorResponsable.nombres, opp.profesorResponsable.apellidos].filter(Boolean).join(" ").trim() || opp?.nombreProfesor
+        : opp?.nombreProfesor ?? null;
       return {
         _id: p._id,
         cargo: opp?.nombreCargo,
@@ -569,6 +728,7 @@ export const getMisPostulacionesMTM = async (req, res) => {
         estadoConfirmacion: p.estadoConfirmacion,
         oportunidadId: opp?._id,
         seleccionadoAt: p.seleccionadoAt,
+        nombreCoordinador: nombreCoordinador || undefined,
       };
     });
 
@@ -612,12 +772,17 @@ export const getMisAceptadasMTM = async (req, res) => {
       .lean();
 
     const postulacionIds = list.map((p) => p._id);
-    const legalizaciones = await LegalizacionMTM.find({ postulacionMTM: { $in: postulacionIds } })
-      .select("postulacionMTM estado")
-      .lean();
+    const [legalizaciones, planes] = await Promise.all([
+      LegalizacionMTM.find({ postulacionMTM: { $in: postulacionIds } }).select("postulacionMTM estado").lean(),
+      PlanDeTrabajoMTM.find({ postulacionMTM: { $in: postulacionIds } }).select("postulacionMTM estado").lean(),
+    ]);
     const estadoLegByPost = {};
     legalizaciones.forEach((l) => {
       estadoLegByPost[String(l.postulacionMTM)] = l.estado;
+    });
+    const planAprobadoByPost = {};
+    planes.forEach((pl) => {
+      planAprobadoByPost[String(pl.postulacionMTM)] = pl.estado === "aprobado";
     });
 
     const nombreCompleto = postulant.postulantId?.name || "";
@@ -640,6 +805,7 @@ export const getMisAceptadasMTM = async (req, res) => {
         coordinador: opp?.profesorResponsable ? [opp.profesorResponsable.nombres, opp.profesorResponsable.apellidos].filter(Boolean).join(" ") : (opp?.nombreProfesor ?? null),
         estado: "Aceptado",
         estadoLegalizacion: estadoLegByPost[String(p._id)] === "en_revision" ? "En revisión" : estadoLegByPost[String(p._id)] === "aprobada" ? "Aprobada" : estadoLegByPost[String(p._id)] === "rechazada" ? "Rechazada" : "Pendiente",
+        planAprobado: planAprobadoByPost[String(p._id)] === true,
         finalizadoPorMonitor: null,
         aceptadoEstudianteAt: p.aceptadoEstudianteAt,
         oportunidad: opp,
@@ -1135,11 +1301,12 @@ async function getLegalizacionMTMForStudent(req, postulacionId) {
   })
     .populate({
       path: "oportunidadMTM",
-      select: "nombreCargo periodo nombreProfesor profesorResponsable categoria vacantes valorPorHora asignaturas programas dedicacionHoras",
+      select: "nombreCargo periodo nombreProfesor profesorResponsable categoria vacantes valorPorHora asignaturas programas dedicacionHoras limiteHoras centroCosto codigoCPS",
       populate: [
         { path: "periodo", select: "codigo" },
         { path: "valorPorHora", select: "value description" },
         { path: "categoria", select: "value description" },
+        { path: "dedicacionHoras", select: "value description" },
         { path: "asignaturas", select: "nombreAsignatura codAsignatura" },
         { path: "programas", select: "name code" },
         { path: "profesorResponsable", select: "nombres apellidos", populate: { path: "user", select: "email name" } },
@@ -1172,7 +1339,7 @@ export const getLegalizacionMTM = async (req, res) => {
     const profileId = result.po.postulantProfile?._id ?? null;
     const [postulantUser, postulantDatos, enrolledProgram, cedulaSupport] = await Promise.all([
       Postulant.findById(result.po.postulant).populate("postulantId", "name email").lean(),
-      Postulant.findById(result.po.postulant).select("phone address alternateEmail cityResidenceId").populate("cityResidenceId", "name").lean(),
+      Postulant.findById(result.po.postulant).select("phone address alternateEmail cityResidenceId zonaResidencia").populate("cityResidenceId", "name").lean(),
       profileId
         ? ProfileEnrolledProgram.findOne({ profileId }).populate("programId", "name code").populate({ path: "programFacultyId", select: "facultyId", populate: { path: "facultyId", select: "name" } }).lean()
         : null,
@@ -1195,7 +1362,7 @@ export const getLegalizacionMTM = async (req, res) => {
         identificacion: result.po.postulantProfile?.studentCode ?? null,
         celular: postulantDatos?.phone ?? null,
         direccion: postulantDatos?.address ?? null,
-        zonaResidencia: null,
+        zonaResidencia: postulantDatos?.zonaResidencia ?? null,
         localidadBarrio: postulantDatos?.cityResidenceId?.name ?? null,
         facultad: enrolledProgram?.programFacultyId?.facultyId?.name ?? null,
         programa: enrolledProgram?.programId?.name ?? null,
@@ -1473,11 +1640,12 @@ async function getLegalizacionMTMAdminByPostulacion(postulacionId) {
   })
     .populate({
       path: "oportunidadMTM",
-      select: "nombreCargo periodo nombreProfesor profesorResponsable categoria vacantes valorPorHora asignaturas programas dedicacionHoras",
+      select: "nombreCargo periodo nombreProfesor profesorResponsable categoria vacantes valorPorHora asignaturas programas dedicacionHoras limiteHoras centroCosto codigoCPS",
       populate: [
         { path: "periodo", select: "codigo" },
         { path: "valorPorHora", select: "value description" },
         { path: "categoria", select: "value description" },
+        { path: "dedicacionHoras", select: "value description" },
         { path: "asignaturas", select: "nombreAsignatura codAsignatura" },
         { path: "programas", select: "name code" },
         { path: "profesorResponsable", select: "nombres apellidos", populate: { path: "user", select: "email name" } },
@@ -1494,7 +1662,7 @@ async function getLegalizacionMTMAdminByPostulacion(postulacionId) {
   const profileId = po.postulantProfile?._id ?? null;
   const [postulantUser, postulantDatos, enrolledProgram, cedulaSupport] = await Promise.all([
     Postulant.findById(po.postulant).populate("postulantId", "name email").lean(),
-    Postulant.findById(po.postulant).select("phone address alternateEmail cityResidenceId").populate("cityResidenceId", "name").lean(),
+    Postulant.findById(po.postulant).select("phone address alternateEmail cityResidenceId zonaResidencia").populate("cityResidenceId", "name").lean(),
     profileId
       ? ProfileEnrolledProgram.findOne({ profileId }).populate("programId", "name code").populate({ path: "programFacultyId", select: "facultyId", populate: { path: "facultyId", select: "name" } }).lean()
       : null,
@@ -1515,7 +1683,7 @@ async function getLegalizacionMTMAdminByPostulacion(postulacionId) {
       identificacion: po.postulantProfile?.studentCode ?? null,
       celular: postulantDatos?.phone ?? null,
       direccion: postulantDatos?.address ?? null,
-      zonaResidencia: null,
+      zonaResidencia: postulantDatos?.zonaResidencia ?? null,
       localidadBarrio: postulantDatos?.cityResidenceId?.name ?? null,
       facultad: enrolledProgram?.programFacultyId?.facultyId?.name ?? null,
       programa: enrolledProgram?.programId?.name ?? null,
@@ -1553,6 +1721,30 @@ export const getDocumentoLegalizacionUrlAdmin = async (req, res) => {
       return res.status(503).json({ message: "El almacenamiento no está disponible" });
     }
     console.error("[MTM] getDocumentoLegalizacionUrlAdmin:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** GET descargar documento (stream directo, para guardar en Descargas sin abrir pestaña). */
+export const getDocumentoLegalizacionDownloadAdmin = async (req, res) => {
+  try {
+    const { postulacionId, tipo } = req.params;
+    const docField = DOC_TIPO_TO_FIELD[tipo];
+    if (!docField) return res.status(400).json({ message: "Tipo de documento no válido" });
+    const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId }).lean();
+    if (!leg) return res.status(404).json({ message: "Legalización no encontrada" });
+    const doc = leg.documentos?.[docField];
+    if (!doc?.key) return res.status(404).json({ message: "Documento no encontrado" });
+    const { body, contentType } = await getObjectFromS3(doc.key);
+    const fileName = (doc.originalName || `${tipo}.pdf`).replace(/[^a-zA-Z0-9._-]/g, "_") || "documento.pdf";
+    res.setHeader("Content-Type", contentType || "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.send(body);
+  } catch (err) {
+    if (err.message?.includes("S3 no está configurado")) {
+      return res.status(503).json({ message: "El almacenamiento no está disponible" });
+    }
+    console.error("[MTM] getDocumentoLegalizacionDownloadAdmin:", err);
     res.status(500).json({ message: err.message });
   }
 };
@@ -1751,7 +1943,7 @@ export const updatePlanTrabajoMTM = async (req, res) => {
   }
 };
 
-/** POST enviar plan a revisión (estudiante). */
+/** POST enviar plan a revisión (estudiante). RQ04_HU007: notificar al profesor/responsable MTM. */
 export const enviarRevisionPlanTrabajoMTM = async (req, res) => {
   try {
     const { postulacionId } = req.params;
@@ -1763,6 +1955,43 @@ export const enviarRevisionPlanTrabajoMTM = async (req, res) => {
     plan.estado = "enviado_revision";
     plan.enviadoRevisionAt = new Date();
     await plan.save();
+
+    try {
+      const Evento = (await import("../notificacion/eventos/evento.model.js")).default;
+      const { getRenderedActivePlantilla } = await import("../notificacion/plantillasNotificacion/plantillaNotificacion.service.js");
+      const evento = await Evento.findOne({ value: "envio_revision_plan_trabajo_monitoria", tipo: "monitoria" }).select("_id").lean();
+      if (evento) {
+        const po = await PostulacionMTM.findById(postulacionId)
+          .populate({
+            path: "oportunidadMTM",
+            select: "nombreCargo periodo profesorResponsable",
+            populate: [
+              { path: "periodo", select: "codigo" },
+              { path: "profesorResponsable", select: "nombres apellidos", populate: { path: "user", select: "email" } },
+            ],
+          })
+          .populate({ path: "postulant", populate: { path: "postulantId", select: "name" } })
+          .lean();
+        const opp = po?.oportunidadMTM;
+        const nombreEstudiante = po?.postulant?.postulantId?.name || "Estudiante";
+        const nombreMTM = opp?.nombreCargo || "Monitoría";
+        const periodo = opp?.periodo?.codigo || "";
+        const correoProfesor = opp?.profesorResponsable?.user?.email;
+        const rendered = await getRenderedActivePlantilla(evento._id, {
+          NOMBRE_ESTUDIANTE: nombreEstudiante,
+          NOMBRE_MTM: nombreMTM,
+          PERIODO: periodo,
+          LINK_APROBAR_PLAN: "", // HU007: enlace para aprobar sin autenticarse; integrar cuando exista ruta pública con token
+        });
+        if (rendered) {
+          console.log("[MTM] Notificación envío plan a revisión:", rendered.asunto, correoProfesor ? `→ ${correoProfesor}` : "(sin correo profesor)");
+          // TODO: enviar correo a correoProfesor cuando el módulo de envío esté integrado
+        }
+      }
+    } catch (notifErr) {
+      console.error("[MTM] Error notificación envío plan a revisión:", notifErr);
+    }
+
     res.json({ plan, message: "Plan enviado a revisión" });
   } catch (err) {
     console.error("[MTM] enviarRevisionPlanTrabajoMTM:", err);
@@ -1770,7 +1999,7 @@ export const enviarRevisionPlanTrabajoMTM = async (req, res) => {
   }
 };
 
-/** POST aprobar plan (profesor/admin). */
+/** POST aprobar plan (profesor/admin). RQ04_HU007: notificación a coordinadores cuando el profesor aprueba. */
 export const aprobarPlanTrabajoMTM = async (req, res) => {
   try {
     const { postulacionId } = req.params;
@@ -1781,6 +2010,23 @@ export const aprobarPlanTrabajoMTM = async (req, res) => {
     plan.aprobadoPorProfesorAt = new Date();
     plan.aprobadoPor = req.user?.id ?? null;
     await plan.save();
+
+    try {
+      const Evento = (await import("../notificacion/eventos/evento.model.js")).default;
+      const { getRenderedActivePlantilla } = await import("../notificacion/plantillasNotificacion/plantillaNotificacion.service.js");
+      const evento = await Evento.findOne({ value: "aprobacion_plan_trabajo_monitoria", tipo: "monitoria" }).select("_id").lean();
+      if (evento) {
+        const rendered = await getRenderedActivePlantilla(evento._id, {
+          NOMBRE_MTM: plan.nombreMonitor || plan.asignaturaArea || "Monitoría",
+          PERIODO: plan.periodo || "",
+        });
+        if (rendered) console.log("[MTM] Notificación aprobación plan de trabajo (para coordinadores):", rendered.asunto);
+        // TODO: enviar correo a coordinadores cuando el módulo de envío esté integrado
+      }
+    } catch (notifErr) {
+      console.error("[MTM] Error notificación aprobación plan:", notifErr);
+    }
+
     res.json({ plan, message: "Plan aprobado" });
   } catch (err) {
     console.error("[MTM] aprobarPlanTrabajoMTM:", err);
@@ -1821,6 +2067,595 @@ export const getPlanTrabajoMTMDatosCrear = async (req, res) => {
     res.json({ datosPrecargados, oportunidad: result.po.oportunidadMTM, yaExiste: false });
   } catch (err) {
     console.error("[MTM] getPlanTrabajoMTMDatosCrear:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ─── Seguimientos MTM (RQ04) ─────────────────────────────────────────────────
+/** GET listar seguimientos por postulacionId. Estudiante: solo su postulación y solo si plan aprobado (HU006); admin: cualquiera. */
+export const getSeguimientosMTM = async (req, res) => {
+  try {
+    const { postulacionId } = req.params;
+    const isStudent = req.user?.role === "student" || req.user?.modulo === "estudiante";
+    if (isStudent) {
+      const result = await getLegalizacionMTMForStudent(req, postulacionId);
+      if (result.error) return res.status(result.error).json({ message: result.message });
+      const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).select("estado").lean();
+      if (!plan || plan.estado !== "aprobado") return res.status(400).json({ message: "Los seguimientos se habilitan cuando el plan de trabajo esté aprobado por el profesor" });
+    } else {
+      const po = await PostulacionMTM.findOne({ _id: postulacionId, estado: "aceptado_estudiante" }).lean();
+      if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
+    }
+    const list = await SeguimientoMTM.find({ postulacionMTM: postulacionId })
+      .sort({ fecha: -1, createdAt: -1 })
+      .populate("creadoPor", "name email")
+      .populate("aprobadoPor", "name email")
+      .lean();
+    const totalResult = await SeguimientoMTM.aggregate([
+      { $match: { postulacionMTM: new mongoose.Types.ObjectId(postulacionId), estado: "aprobado" } },
+      { $group: { _id: null, totalHoras: { $sum: "$cantidadHoras" } } },
+    ]);
+    const totalHorasAprobadas = totalResult[0]?.totalHoras ?? 0;
+    const pendientes = await SeguimientoMTM.countDocuments({ postulacionMTM: postulacionId, estado: "pendiente_revision" });
+    const todosSeguimientosResueltos = pendientes === 0; // HU009: para finalizar MTM todos deben estar aprobados o rechazados
+    // Actividades del plan de trabajo aprobado para el select "Tipo de actividad"
+    const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).select("actividades estado").lean();
+    const actividadesPlan =
+      plan?.estado === "aprobado" && Array.isArray(plan.actividades)
+        ? plan.actividades.map((a) => (a.tema || "").trim()).filter(Boolean)
+        : [];
+    res.json({ data: list, totalHorasAprobadas, todosSeguimientosResueltos, actividadesPlan });
+  } catch (err) {
+    console.error("[MTM] getSeguimientosMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** POST crear seguimiento (HU008). Estudiante: plan aprobado; estado inicial pendiente_revision. */
+export const createSeguimientoMTM = async (req, res) => {
+  try {
+    const { postulacionId } = req.params;
+    const {
+      fecha,
+      tipoActividad,
+      numeroEstudiantesConvocados,
+      numeroEstudiantesAtendidos,
+      cantidadHoras,
+      comentarios,
+      tipo,
+      descripcion,
+    } = req.body || {};
+    const isStudent = req.user?.role === "student" || req.user?.modulo === "estudiante";
+    if (isStudent) {
+      const result = await getLegalizacionMTMForStudent(req, postulacionId);
+      if (result.error) return res.status(result.error).json({ message: result.message });
+      const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).select("estado").lean();
+      if (!plan || plan.estado !== "aprobado") return res.status(400).json({ message: "Los seguimientos se habilitan cuando el plan de trabajo esté aprobado por el profesor" });
+    } else {
+      const po = await PostulacionMTM.findOne({ _id: postulacionId, estado: "aceptado_estudiante" }).lean();
+      if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
+    }
+    const seg = await SeguimientoMTM.create({
+      postulacionMTM: postulacionId,
+      fecha: fecha ? new Date(fecha) : new Date(),
+      tipoActividad: (tipoActividad ?? tipo ?? "").toString().trim().slice(0, 150) || null,
+      numeroEstudiantesConvocados: numeroEstudiantesConvocados != null ? Number(numeroEstudiantesConvocados) : null,
+      numeroEstudiantesAtendidos: numeroEstudiantesAtendidos != null ? Number(numeroEstudiantesAtendidos) : null,
+      cantidadHoras: cantidadHoras != null ? Number(cantidadHoras) : null,
+      comentarios: (comentarios ?? descripcion ?? "").toString().trim() || null,
+      estado: "pendiente_revision",
+      creadoPor: req.user?.id ?? null,
+    });
+    const populated = await SeguimientoMTM.findById(seg._id).populate("creadoPor", "name email").lean();
+    res.status(201).json({ seguimiento: populated, message: "Seguimiento registrado. Queda en Pendiente de revisión." });
+  } catch (err) {
+    console.error("[MTM] createSeguimientoMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** PUT actualizar seguimiento (HU008). Solo editable en estado pendiente_revision. */
+export const updateSeguimientoMTM = async (req, res) => {
+  try {
+    const { postulacionId, seguimientoId } = req.params;
+    const {
+      fecha,
+      tipoActividad,
+      numeroEstudiantesConvocados,
+      numeroEstudiantesAtendidos,
+      cantidadHoras,
+      comentarios,
+      tipo,
+      descripcion,
+    } = req.body || {};
+    const seg = await SeguimientoMTM.findOne({ _id: seguimientoId, postulacionMTM: postulacionId });
+    if (!seg) return res.status(404).json({ message: "Seguimiento no encontrado" });
+    if (seg.estado !== "pendiente_revision") return res.status(400).json({ message: "Solo se puede editar un seguimiento en estado Pendiente de revisión" });
+    const isStudent = req.user?.role === "student" || req.user?.modulo === "estudiante";
+    if (isStudent) {
+      const result = await getLegalizacionMTMForStudent(req, postulacionId);
+      if (result.error) return res.status(result.error).json({ message: result.message });
+      const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).select("estado").lean();
+      if (!plan || plan.estado !== "aprobado") return res.status(400).json({ message: "Los seguimientos se habilitan cuando el plan de trabajo esté aprobado" });
+    }
+    if (fecha !== undefined) seg.fecha = new Date(fecha);
+    if (tipoActividad !== undefined) seg.tipoActividad = tipoActividad?.toString().trim().slice(0, 150) || null;
+    else if (tipo !== undefined) seg.tipoActividad = tipo?.toString().trim().slice(0, 150) || null;
+    if (numeroEstudiantesConvocados !== undefined) seg.numeroEstudiantesConvocados = numeroEstudiantesConvocados != null ? Number(numeroEstudiantesConvocados) : null;
+    if (numeroEstudiantesAtendidos !== undefined) seg.numeroEstudiantesAtendidos = numeroEstudiantesAtendidos != null ? Number(numeroEstudiantesAtendidos) : null;
+    if (cantidadHoras !== undefined) seg.cantidadHoras = cantidadHoras != null ? Number(cantidadHoras) : null;
+    if (comentarios !== undefined) seg.comentarios = comentarios?.toString().trim() || null;
+    else if (descripcion !== undefined) seg.comentarios = descripcion?.toString().trim() || null;
+    seg.actualizadoPor = req.user?.id ?? null;
+    await seg.save();
+    const updated = await SeguimientoMTM.findById(seg._id).populate("creadoPor", "name email").populate("aprobadoPor", "name email").lean();
+    res.json({ seguimiento: updated, message: "Seguimiento actualizado" });
+  } catch (err) {
+    console.error("[MTM] updateSeguimientoMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** DELETE seguimiento (HU008). Solo se puede eliminar si está en pendiente_revision. */
+export const deleteSeguimientoMTM = async (req, res) => {
+  try {
+    const { postulacionId, seguimientoId } = req.params;
+    const seg = await SeguimientoMTM.findOne({ _id: seguimientoId, postulacionMTM: postulacionId });
+    if (!seg) return res.status(404).json({ message: "Seguimiento no encontrado" });
+    if (seg.estado !== "pendiente_revision") return res.status(400).json({ message: "Solo se puede eliminar un seguimiento en estado Pendiente de revisión" });
+    const isStudent = req.user?.role === "student" || req.user?.modulo === "estudiante";
+    if (isStudent) {
+      const result = await getLegalizacionMTMForStudent(req, postulacionId);
+      if (result.error) return res.status(result.error).json({ message: result.message });
+      const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).select("estado").lean();
+      if (!plan || plan.estado !== "aprobado") return res.status(400).json({ message: "Los seguimientos se habilitan cuando el plan de trabajo esté aprobado" });
+    }
+    await SeguimientoMTM.deleteOne({ _id: seguimientoId });
+    res.json({ message: "Seguimiento eliminado" });
+  } catch (err) {
+    console.error("[MTM] deleteSeguimientoMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+const S3_PREFIX_SEGUIMIENTOS = "seguimientos-mtm";
+
+/** PATCH aprobar seguimiento. Solo coordinador; solo si estado pendiente_revision. */
+export const aprobarSeguimientoMTM = async (req, res) => {
+  try {
+    const { postulacionId, seguimientoId } = req.params;
+    const seg = await SeguimientoMTM.findOne({ _id: seguimientoId, postulacionMTM: postulacionId });
+    if (!seg) return res.status(404).json({ message: "Seguimiento no encontrado" });
+    if (seg.estado !== "pendiente_revision") return res.status(400).json({ message: "Solo se puede aprobar un seguimiento en estado Pendiente de revisión" });
+    seg.estado = "aprobado";
+    seg.aprobadoPor = req.user?.id ?? null;
+    seg.aprobadoAt = new Date();
+    seg.rechazoMotivo = null;
+    seg.rechazadoAt = null;
+    await seg.save();
+    const updated = await SeguimientoMTM.findById(seg._id).populate("creadoPor", "name email").populate("aprobadoPor", "name email").lean();
+    res.json({ seguimiento: updated, message: "Seguimiento aprobado" });
+  } catch (err) {
+    console.error("[MTM] aprobarSeguimientoMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** PATCH rechazar seguimiento. Solo coordinador; solo si estado pendiente_revision. */
+export const rechazarSeguimientoMTM = async (req, res) => {
+  try {
+    const { postulacionId, seguimientoId } = req.params;
+    const { motivo } = req.body || {};
+    const seg = await SeguimientoMTM.findOne({ _id: seguimientoId, postulacionMTM: postulacionId });
+    if (!seg) return res.status(404).json({ message: "Seguimiento no encontrado" });
+    if (seg.estado !== "pendiente_revision") return res.status(400).json({ message: "Solo se puede rechazar un seguimiento en estado Pendiente de revisión" });
+    seg.estado = "rechazado";
+    seg.rechazoMotivo = (motivo || "").toString().trim() || null;
+    seg.rechazadoAt = new Date();
+    seg.aprobadoPor = null;
+    seg.aprobadoAt = null;
+    await seg.save();
+    const updated = await SeguimientoMTM.findById(seg._id).populate("creadoPor", "name email").lean();
+    res.json({ seguimiento: updated, message: "Seguimiento rechazado" });
+  } catch (err) {
+    console.error("[MTM] rechazarSeguimientoMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** POST aprobación/rechazo masivo de seguimientos (HU009). Coordinador; solo pendiente_revision. */
+export const accionMasivaSeguimientosMTM = async (req, res) => {
+  try {
+    const { postulacionId } = req.params;
+    const { accion, seguimientoIds, motivo } = req.body || {};
+    if (!Array.isArray(seguimientoIds) || seguimientoIds.length === 0) {
+      return res.status(400).json({ message: "Indique al menos un seguimiento (seguimientoIds)" });
+    }
+    if (accion !== "aprobar" && accion !== "rechazar") {
+      return res.status(400).json({ message: "accion debe ser 'aprobar' o 'rechazar'" });
+    }
+    const po = await PostulacionMTM.findOne({ _id: postulacionId, estado: "aceptado_estudiante" }).lean();
+    if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
+
+    const ids = seguimientoIds.filter((id) => id && mongoose.Types.ObjectId.isValid(id));
+    const segs = await SeguimientoMTM.find({
+      _id: { $in: ids },
+      postulacionMTM: postulacionId,
+      estado: "pendiente_revision",
+    });
+    if (segs.length === 0) {
+      return res.status(400).json({ message: "Ningún seguimiento válido en estado Pendiente de revisión" });
+    }
+
+    const userId = req.user?.id ?? null;
+    const now = new Date();
+    if (accion === "aprobar") {
+      await SeguimientoMTM.updateMany(
+        { _id: { $in: segs.map((s) => s._id) } },
+        { $set: { estado: "aprobado", aprobadoPor: userId, aprobadoAt: now, rechazoMotivo: null, rechazadoAt: null } }
+      );
+    } else {
+      const motivoStr = (motivo || "").toString().trim() || null;
+      await SeguimientoMTM.updateMany(
+        { _id: { $in: segs.map((s) => s._id) } },
+        { $set: { estado: "rechazado", rechazoMotivo: motivoStr, rechazadoAt: now, aprobadoPor: null, aprobadoAt: null } }
+      );
+    }
+
+    const list = await SeguimientoMTM.find({ postulacionMTM: postulacionId })
+      .sort({ fecha: -1, createdAt: -1 })
+      .populate("creadoPor", "name email")
+      .populate("aprobadoPor", "name email")
+      .lean();
+    const totalResult = await SeguimientoMTM.aggregate([
+      { $match: { postulacionMTM: new mongoose.Types.ObjectId(postulacionId), estado: "aprobado" } },
+      { $group: { _id: null, totalHoras: { $sum: "$cantidadHoras" } } },
+    ]);
+    const totalHorasAprobadas = totalResult[0]?.totalHoras ?? 0;
+    const pendientes = await SeguimientoMTM.countDocuments({ postulacionMTM: postulacionId, estado: "pendiente_revision" });
+    res.json({
+      data: list,
+      totalHorasAprobadas,
+      todosSeguimientosResueltos: pendientes === 0,
+      actualizados: segs.length,
+      message: accion === "aprobar" ? `${segs.length} seguimiento(s) aprobado(s)` : `${segs.length} seguimiento(s) rechazado(s)`,
+    });
+  } catch (err) {
+    console.error("[MTM] accionMasivaSeguimientosMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** GET total horas de seguimientos aprobados (reporte reconocimiento DAF). */
+export const getTotalHorasSeguimientosMTM = async (req, res) => {
+  try {
+    const { postulacionId } = req.params;
+    const po = await PostulacionMTM.findOne({ _id: postulacionId, estado: "aceptado_estudiante" }).lean();
+    if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
+    const result = await SeguimientoMTM.aggregate([
+      { $match: { postulacionMTM: new mongoose.Types.ObjectId(postulacionId), estado: "aprobado" } },
+      { $group: { _id: null, totalHoras: { $sum: "$cantidadHoras" } } },
+    ]);
+    const totalHoras = result[0]?.totalHoras ?? 0;
+    res.json({ postulacionId, totalHorasAprobadas: totalHoras });
+  } catch (err) {
+    console.error("[MTM] getTotalHorasSeguimientosMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** POST subir documento de soporte de un seguimiento (HU008). Solo si estado pendiente_revision. */
+export const uploadDocumentoSeguimientoMTM = async (req, res) => {
+  try {
+    const { postulacionId, seguimientoId } = req.params;
+    if (!req.file || !req.file.buffer) return res.status(400).json({ message: "No se envió archivo" });
+    if (req.file.size > 5 * 1024 * 1024) return res.status(400).json({ message: "El archivo no puede superar 5 MB" });
+    if (req.file.mimetype !== "application/pdf") return res.status(400).json({ message: "Solo se permiten archivos PDF" });
+
+    const result = await getLegalizacionMTMForStudent(req, postulacionId);
+    if (result.error) return res.status(result.error).json({ message: result.message });
+    const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).select("estado").lean();
+    if (!plan || plan.estado !== "aprobado") return res.status(400).json({ message: "Los seguimientos se habilitan cuando el plan esté aprobado" });
+
+    const seg = await SeguimientoMTM.findOne({ _id: seguimientoId, postulacionMTM: postulacionId });
+    if (!seg) return res.status(404).json({ message: "Seguimiento no encontrado" });
+    if (seg.estado !== "pendiente_revision") return res.status(400).json({ message: "Solo se puede subir documento en un seguimiento Pendiente de revisión" });
+
+    const ext = ".pdf";
+    const key = `${S3_PREFIX_SEGUIMIENTOS}/${postulacionId}/${seguimientoId}/soporte${ext}`;
+    await uploadToS3(key, req.file.buffer, { contentType: "application/pdf" });
+    seg.documentoSoporte = { key, originalName: req.file.originalname || `soporte${ext}`, size: req.file.size };
+    await seg.save();
+
+    const updated = await SeguimientoMTM.findById(seg._id).populate("creadoPor", "name email").lean();
+    res.json({ seguimiento: updated, message: "Documento de soporte subido" });
+  } catch (err) {
+    if (err.message?.includes("S3 no está configurado")) return res.status(503).json({ message: "El almacenamiento no está disponible" });
+    console.error("[MTM] uploadDocumentoSeguimientoMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** GET URL firmada del documento de soporte (estudiante, su postulación). */
+export const getDocumentoSeguimientoUrl = async (req, res) => {
+  try {
+    const { postulacionId, seguimientoId } = req.params;
+    const result = await getLegalizacionMTMForStudent(req, postulacionId);
+    if (result.error) return res.status(result.error).json({ message: result.message });
+    const seg = await SeguimientoMTM.findOne({ _id: seguimientoId, postulacionMTM: postulacionId }).select("documentoSoporte").lean();
+    if (!seg || !seg.documentoSoporte?.key) return res.status(404).json({ message: "Documento no encontrado" });
+    const url = await getSignedDownloadUrl(seg.documentoSoporte.key);
+    res.json({ url, originalName: seg.documentoSoporte.originalName || "soporte.pdf" });
+  } catch (err) {
+    if (err.message?.includes("S3 no está configurado")) return res.status(503).json({ message: "Almacenamiento no disponible" });
+    console.error("[MTM] getDocumentoSeguimientoUrl:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** GET URL o descarga del documento de soporte (admin). */
+export const getDocumentoSeguimientoUrlAdmin = async (req, res) => {
+  try {
+    const { postulacionId, seguimientoId } = req.params;
+    const seg = await SeguimientoMTM.findOne({ _id: seguimientoId, postulacionMTM: postulacionId }).select("documentoSoporte").lean();
+    if (!seg || !seg.documentoSoporte?.key) return res.status(404).json({ message: "Documento no encontrado" });
+    const url = await getSignedDownloadUrl(seg.documentoSoporte.key);
+    res.json({ url, originalName: seg.documentoSoporte.originalName || "soporte.pdf" });
+  } catch (err) {
+    if (err.message?.includes("S3 no está configurado")) return res.status(503).json({ message: "Almacenamiento no disponible" });
+    console.error("[MTM] getDocumentoSeguimientoUrlAdmin:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** GET descarga directa del documento de soporte (admin, guardar en Descargas). */
+export const getDocumentoSeguimientoDownloadAdmin = async (req, res) => {
+  try {
+    const { postulacionId, seguimientoId } = req.params;
+    const seg = await SeguimientoMTM.findOne({ _id: seguimientoId, postulacionMTM: postulacionId }).select("documentoSoporte").lean();
+    if (!seg || !seg.documentoSoporte?.key) return res.status(404).json({ message: "Documento no encontrado" });
+    const { buffer, contentType } = await getObjectFromS3(seg.documentoSoporte.key);
+    const filename = seg.documentoSoporte.originalName || "soporte-seguimiento.pdf";
+    res.setHeader("Content-Type", contentType || "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename.replace(/"/g, "%22")}"`);
+    res.send(buffer);
+  } catch (err) {
+    if (err.message?.includes("S3 no está configurado")) return res.status(503).json({ message: "Almacenamiento no disponible" });
+    console.error("[MTM] getDocumentoSeguimientoDownloadAdmin:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ─── RQ04_HU010: Asistencia espacios MTM ─────────────────────────────────────
+/** GET o crear link de asistencia para una postulación. Admin o estudiante dueño de la postulación. */
+export const getOrCreateLinkAsistenciaMTM = async (req, res) => {
+  try {
+    const { postulacionId } = req.params;
+    const isStudent = req.user?.role === "student" || req.user?.modulo === "estudiante";
+    if (isStudent) {
+      const result = await getLegalizacionMTMForStudent(req, postulacionId);
+      if (result.error) return res.status(result.error).json({ message: result.message });
+    }
+    const po = await PostulacionMTM.findOne({ _id: postulacionId, estado: "aceptado_estudiante" });
+    if (!po) return res.status(404).json({ message: "Postulación no encontrada o no aceptada" });
+    if (!po.linkAsistenciaToken) {
+      po.linkAsistenciaToken = crypto.randomUUID();
+      await po.save();
+    }
+    const baseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "http://localhost:5173";
+    const link = `${baseUrl.replace(/\/$/, "")}/#/asistencia-mtm/${po.linkAsistenciaToken}`;
+    res.json({ token: po.linkAsistenciaToken, link });
+  } catch (err) {
+    console.error("[MTM] getOrCreateLinkAsistenciaMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** GET reporte de asistencia para la MTM del estudiante (desde su legalización). */
+export const getReporteAsistenciaMTMStudent = async (req, res) => {
+  try {
+    const { postulacionId } = req.params;
+    const result = await getLegalizacionMTMForStudent(req, postulacionId);
+    if (result.error) return res.status(result.error).json({ message: result.message });
+
+    const po = await PostulacionMTM.findOne({ _id: postulacionId, estado: "aceptado_estudiante" })
+      .populate({
+        path: "oportunidadMTM",
+        select: "periodo profesorResponsable",
+        populate: [
+          { path: "periodo", select: "codigo" },
+          { path: "profesorResponsable", select: "nombres apellidos", populate: { path: "user", select: "email" } },
+        ],
+      })
+      .populate({ path: "postulant", select: "postulantId", populate: { path: "postulantId", select: "name email" } })
+      .populate("postulantProfile", "studentCode")
+      .lean();
+    if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
+
+    const asistencias = await AsistenciaMTM.find({ postulacionMTM: postulacionId })
+      .sort({ fechaDiligenciamiento: -1 })
+      .lean();
+
+    const opp = po.oportunidadMTM;
+    const coordinador = opp?.profesorResponsable
+      ? [opp.profesorResponsable.nombres, opp.profesorResponsable.apellidos].filter(Boolean).join(" ")
+      : null;
+    const base = {
+      codigoMonitoria: po.postulantProfile?.studentCode ?? null,
+      nombreApellidoMonitor: po.postulant?.postulantId?.name ?? "",
+      identificacionMonitor: po.postulantProfile?.studentCode ?? null,
+      correoMonitor: po.postulant?.postulantId?.email ?? null,
+      nombreApellidoCoordinador: coordinador,
+      periodoAcademico: opp?.periodo?.codigo ?? null,
+    };
+    const data = asistencias.map((a) => ({
+      ...base,
+      nombreActividad: a.nombreActividad,
+      nombresEstudiante: a.nombresEstudiante,
+      apellidosEstudiante: a.apellidosEstudiante,
+      identificacionEstudiante: a.identificacionEstudiante,
+      programaEstudiante: a.programaEstudiante ?? "",
+      fechaDiligenciamiento: a.fechaDiligenciamiento,
+    }));
+    res.json({ data, total: data.length });
+  } catch (err) {
+    console.error("[MTM] getReporteAsistenciaMTMStudent:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** GET datos del formulario de asistencia por token (público, sin auth). */
+export const getAsistenciaFormByToken = async (req, res) => {
+  try {
+    const { token } = req.params;
+    const po = await PostulacionMTM.findOne({ linkAsistenciaToken: token, estado: "aceptado_estudiante" })
+      .populate({
+        path: "oportunidadMTM",
+        select: "nombreCargo periodo profesorResponsable",
+        populate: [
+          { path: "periodo", select: "codigo" },
+          { path: "profesorResponsable", select: "nombres apellidos", populate: { path: "user", select: "email" } },
+        ],
+      })
+      .populate("postulant", "postulantId")
+      .populate("postulantProfile", "studentCode")
+      .lean();
+    if (!po) return res.status(404).json({ message: "Link no válido o expirado" });
+    const postulantUser = await Postulant.findById(po.postulant).populate("postulantId", "name email").lean();
+    const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: po._id }).select("actividades").lean();
+    const actividades = Array.isArray(plan?.actividades)
+      ? plan.actividades.map((a) => (a.tema || "").trim()).filter(Boolean)
+      : [];
+    const opp = po.oportunidadMTM;
+    const nombreMonitor = postulantUser?.postulantId?.name ?? "";
+    const coordinador = opp?.profesorResponsable
+      ? [opp.profesorResponsable.nombres, opp.profesorResponsable.apellidos].filter(Boolean).join(" ")
+      : null;
+    res.json({
+      codigoMonitoria: po.postulantProfile?.studentCode ?? null,
+      nombreMonitor,
+      identificacionMonitor: po.postulantProfile?.studentCode ?? null,
+      correoMonitor: postulantUser?.postulantId?.email ?? null,
+      nombreCoordinador: coordinador,
+      periodoAcademico: opp?.periodo?.codigo ?? null,
+      nombreActividadMTM: opp?.nombreCargo ?? null,
+      actividades,
+    });
+  } catch (err) {
+    console.error("[MTM] getAsistenciaFormByToken:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** POST registrar asistencia (público, por token). */
+export const postRegistrarAsistenciaMTM = async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { nombreActividad, nombresEstudiante, apellidosEstudiante, identificacionEstudiante, programaEstudiante } = req.body || {};
+    const po = await PostulacionMTM.findOne({ linkAsistenciaToken: token, estado: "aceptado_estudiante" }).select("_id").lean();
+    if (!po) return res.status(404).json({ message: "Link no válido o expirado" });
+    const tema = (nombreActividad || "").toString().trim();
+    const nombres = (nombresEstudiante || "").toString().trim();
+    const apellidos = (apellidosEstudiante || "").toString().trim();
+    const identificacion = (identificacionEstudiante || "").toString().trim();
+    if (!tema || !nombres || !apellidos || !identificacion) {
+      return res.status(400).json({ message: "Faltan datos obligatorios: nombre de actividad, nombres, apellidos e identificación del estudiante" });
+    }
+    const reg = await AsistenciaMTM.create({
+      postulacionMTM: po._id,
+      nombreActividad: tema,
+      nombresEstudiante: nombres,
+      apellidosEstudiante: apellidos,
+      identificacionEstudiante: identificacion,
+      programaEstudiante: (programaEstudiante || "").toString().trim() || null,
+      fechaDiligenciamiento: new Date(),
+    });
+    res.status(201).json({ registro: reg, message: "Asistencia registrada correctamente" });
+  } catch (err) {
+    console.error("[MTM] postRegistrarAsistenciaMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** GET reporte de asistencia MTM (desde módulo legalización, mismos filtros). HU010. */
+export const getReporteAsistenciaMTM = async (req, res) => {
+  try {
+    const { estado, periodo, page = 1, limit = 500 } = req.query;
+    const filter = {};
+    if (estado) filter.estado = estado;
+    const legs = await LegalizacionMTM.find(filter)
+      .populate({
+        path: "postulacionMTM",
+        match: { estado: "aceptado_estudiante" },
+        select: "_id oportunidadMTM postulant postulantProfile",
+        populate: [
+          {
+            path: "oportunidadMTM",
+            select: "nombreCargo periodo profesorResponsable",
+            populate: [
+              { path: "periodo", select: "codigo" },
+              { path: "profesorResponsable", select: "nombres apellidos", populate: { path: "user", select: "email" } },
+            ],
+          },
+          { path: "postulant", select: "postulantId", populate: { path: "postulantId", select: "name email" } },
+          { path: "postulantProfile", select: "studentCode" },
+        ],
+      })
+      .lean();
+    const postulacionesValidas = legs.filter((l) => l.postulacionMTM != null);
+    let postulacionIds = postulacionesValidas.map((l) => l.postulacionMTM._id);
+    if (periodo) {
+      postulacionIds = postulacionesValidas
+        .filter((p) => p.postulacionMTM?.oportunidadMTM?.periodo?.codigo === periodo)
+        .map((p) => p.postulacionMTM._id);
+    }
+    const asistencias = await AsistenciaMTM.find({ postulacionMTM: { $in: postulacionIds } })
+      .sort({ fechaDiligenciamiento: -1 })
+      .lean();
+    const poMap = new Map();
+    postulacionesValidas.forEach((l) => {
+      const po = l.postulacionMTM;
+      if (po && !poMap.has(po._id.toString())) {
+        const opp = po.oportunidadMTM;
+        const nombreMonitor = po.postulant?.postulantId?.name ?? "";
+        const coordinador = opp?.profesorResponsable
+          ? [opp.profesorResponsable.nombres, opp.profesorResponsable.apellidos].filter(Boolean).join(" ")
+          : null;
+        poMap.set(po._id.toString(), {
+          codigoMonitoria: po.postulantProfile?.studentCode ?? null,
+          nombreApellidoMonitor: nombreMonitor,
+          identificacionMonitor: po.postulantProfile?.studentCode ?? null,
+          correoMonitor: po.postulant?.postulantId?.email ?? null,
+          nombreApellidoCoordinador: coordinador,
+          periodoAcademico: opp?.periodo?.codigo ?? null,
+        });
+      }
+    });
+    const rows = asistencias.map((a) => {
+      const meta = poMap.get(a.postulacionMTM.toString()) || {};
+      return {
+        codigoMonitoria: meta.codigoMonitoria,
+        nombreApellidoMonitor: meta.nombreApellidoMonitor,
+        identificacionMonitor: meta.identificacionMonitor,
+        correoMonitor: meta.correoMonitor,
+        nombreApellidoCoordinador: meta.nombreApellidoCoordinador,
+        periodoAcademico: meta.periodoAcademico,
+        nombreActividad: a.nombreActividad,
+        nombresEstudiante: a.nombresEstudiante,
+        apellidosEstudiante: a.apellidosEstudiante,
+        identificacionEstudiante: a.identificacionEstudiante,
+        programaEstudiante: a.programaEstudiante ?? "",
+        fechaDiligenciamiento: a.fechaDiligenciamiento,
+      };
+    });
+    const total = rows.length;
+    const pageNum = Math.max(1, parseInt(page, 10));
+    const limitNum = Math.min(1000, Math.max(1, parseInt(limit, 10)));
+    const start = (pageNum - 1) * limitNum;
+    const data = rows.slice(start, start + limitNum);
+    res.json({ data, total, page: pageNum, limit: limitNum });
+  } catch (err) {
+    console.error("[MTM] getReporteAsistenciaMTM:", err);
     res.status(500).json({ message: err.message });
   }
 };

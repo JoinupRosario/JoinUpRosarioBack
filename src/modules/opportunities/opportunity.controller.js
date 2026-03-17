@@ -731,6 +731,7 @@ export const closeOpportunity = async (req, res) => {
   try {
     const { id } = req.params;
     const { contrató, motivoNoContrato, postulantesSeleccionados, datosTutor } = req.body;
+    const contratoBool = contrató === true || contrató === "true" || contrató === 1 || contrató === "1";
 
     const opportunity = await Opportunity.findById(id);
     if (!opportunity) {
@@ -740,12 +741,57 @@ export const closeOpportunity = async (req, res) => {
       return res.status(400).json({ message: "Solo se puede cerrar una oportunidad en estado Activa" });
     }
 
+    const seleccionados = Array.isArray(postulantesSeleccionados) ? postulantesSeleccionados : [];
+    const tutores = Array.isArray(datosTutor) ? datosTutor : [];
+
+    if (contratoBool) {
+      if (seleccionados.length === 0) {
+        return res.status(400).json({ message: "Debe seleccionar al menos un postulante cuando la entidad indica que contrató." });
+      }
+
+      const postulacionesValidas = await PostulacionOportunidad.find({
+        _id: { $in: seleccionados },
+        opportunity: id,
+      }).select("_id").lean();
+      if (postulacionesValidas.length !== seleccionados.length) {
+        return res.status(400).json({ message: "Hay postulaciones seleccionadas que no pertenecen a esta oportunidad." });
+      }
+
+      const requiredTutorFields = [
+        "nombreTutor",
+        "apellidoTutor",
+        "emailTutor",
+        "cargoTutor",
+        "tipoIdentTutor",
+        "identificacionTutor",
+        "arlEmpresa",
+        "fechaInicioPractica",
+      ];
+      const tutorByPostulacion = new Map(
+        tutores
+          .filter((t) => t?.postulacionId)
+          .map((t) => [String(t.postulacionId), t])
+      );
+      for (const postId of seleccionados.map(String)) {
+        const tutor = tutorByPostulacion.get(postId);
+        if (!tutor) {
+          return res.status(400).json({ message: `Faltan datos del tutor para la postulación ${postId}.` });
+        }
+        for (const field of requiredTutorFields) {
+          const value = tutor[field];
+          if (value == null || String(value).trim() === "") {
+            return res.status(400).json({ message: `El campo ${field} del tutor es obligatorio para la postulación ${postId}.` });
+          }
+        }
+      }
+    }
+
     const estadoAnterior = opportunity.estado;
     opportunity.estado = "Cerrada";
     opportunity.fechaCierre = new Date();
-    opportunity.motivoCierreNoContrato = contrató === false ? (motivoNoContrato || null) : null;
-    opportunity.cierrePostulantesSeleccionados = Array.isArray(postulantesSeleccionados) ? postulantesSeleccionados : [];
-    opportunity.cierreDatosTutor = Array.isArray(datosTutor) ? datosTutor : [];
+    opportunity.motivoCierreNoContrato = contratoBool ? null : ((motivoNoContrato || "").toString().trim() || null);
+    opportunity.cierrePostulantesSeleccionados = seleccionados;
+    opportunity.cierreDatosTutor = contratoBool ? tutores : [];
 
     if (opportunity.cierrePostulantesSeleccionados.length > 0) {
       await PostulacionOportunidad.updateMany(
@@ -759,7 +805,7 @@ export const closeOpportunity = async (req, res) => {
       estadoNuevo: "Cerrada",
       cambiadoPor: req.user.id,
       fechaCambio: new Date(),
-      comentarios: contrató === false ? motivoNoContrato : "Oportunidad cerrada con postulante(s) seleccionado(s)",
+      comentarios: contratoBool ? "Oportunidad cerrada con postulante(s) seleccionado(s)" : motivoNoContrato,
     });
     await opportunity.save();
 
@@ -1027,6 +1073,19 @@ export const aplicarOportunidad = async (req, res) => {
       return res.status(400).json({ message: "No tiene un perfil de postulante asociado" });
     }
 
+    // HU004: si ya tiene una postulación seleccionada por empresa o aceptada por estudiante,
+    // se bloquean nuevas postulaciones hasta que rechace/culmine ese proceso.
+    const tieneAprobadaVigente = await PostulacionOportunidad.exists({
+      postulant: postulant._id,
+      estado: { $in: ["seleccionado_empresa", "aceptado_estudiante"] },
+    });
+    if (tieneAprobadaVigente) {
+      return res.status(400).json({
+        message:
+          "Ya tiene una postulación aprobada/seleccionada por una entidad. Debe responderla antes de postularse a más oportunidades.",
+      });
+    }
+
     const PostulantProfile = (await import("../postulants/models/profile/profile.schema.js")).default;
     const profile = await PostulantProfile.findOne({
       _id: profileId,
@@ -1102,6 +1161,8 @@ export const getMisPostulaciones = async (req, res) => {
       .sort({ fechaAplicacion: -1 })
       .lean();
 
+    const tieneAceptadaDefinitiva = list.some((p) => p.estado === "aceptado_estudiante");
+
     const data = list.map((p) => {
       const opp = p.opportunity;
       const company = opp?.company;
@@ -1116,12 +1177,14 @@ export const getMisPostulaciones = async (req, res) => {
         empresaDescargoHv: !!p.empresaDescargoHvAt,
         seleccionadoPorEmpresa: p.estado === "seleccionado_empresa" || p.estado === "aceptado_estudiante",
         aceptadoPorEstudiante: p.estado === "aceptado_estudiante",
+        puedeAceptarDefinitivo: p.estado === "seleccionado_empresa" && !tieneAceptadaDefinitiva,
+        tieneAceptadaDefinitivaGlobal: tieneAceptadaDefinitiva,
         linkOportunidad: opp?._id ? `/dashboard/oportunidades-practica` : null,
         opportunityId: opp?._id,
       };
     });
 
-    res.json({ data, total: data.length });
+    res.json({ data, total: data.length, tieneAceptadaDefinitivaGlobal: tieneAceptadaDefinitiva });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1157,13 +1220,42 @@ export const estudianteResponderPostulacion = async (req, res) => {
 
     const now = new Date();
     if (accion === "confirmar") {
+      const yaTieneAceptada = await PostulacionOportunidad.exists({
+        postulant: postulant._id,
+        estado: "aceptado_estudiante",
+        _id: { $ne: po._id },
+      });
+      if (yaTieneAceptada) {
+        return res.status(400).json({
+          message: "Ya confirmó otra oportunidad. Solo puede aceptar una entidad definitivamente.",
+        });
+      }
       po.estado = "aceptado_estudiante";
       po.aceptadoEstudianteAt = now;
       po.rechazadoAt = null;
+      po.comentarios = "Aceptada definitivamente por el estudiante";
+
+      // HU004: al aceptar una, las demás postulaciones del estudiante pasan a no disponible (rechazadas).
+      await PostulacionOportunidad.updateMany(
+        {
+          postulant: postulant._id,
+          _id: { $ne: po._id },
+          estado: { $in: ["aplicado", "empresa_consulto_perfil", "empresa_descargo_hv", "seleccionado_empresa"] },
+        },
+        {
+          $set: {
+            estado: "rechazado",
+            rechazadoAt: now,
+            comentarios: "No continúa el proceso: el estudiante aceptó otra oportunidad de forma definitiva",
+            aceptadoEstudianteAt: null,
+          },
+        }
+      );
     } else {
       po.estado = "rechazado";
       po.rechazadoAt = now;
       po.aceptadoEstudianteAt = null;
+      po.comentarios = "Rechazada por el estudiante";
     }
     await po.save();
 
@@ -1172,6 +1264,66 @@ export const estudianteResponderPostulacion = async (req, res) => {
       estado: po.estado,
       aceptadoEstudianteAt: po.aceptadoEstudianteAt,
       rechazadoAt: po.rechazadoAt,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * PATCH /opportunities/:id/applications/:postulacionId/coord-aceptar
+ * HU004: aceptación excepcional en nombre del estudiante por coordinación.
+ */
+export const coordinacionAceptarEnNombreEstudiante = async (req, res) => {
+  try {
+    const { id: opportunityId, postulacionId } = req.params;
+
+    const po = await PostulacionOportunidad.findOne({
+      _id: postulacionId,
+      opportunity: opportunityId,
+    });
+    if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
+    if (po.estado !== "seleccionado_empresa") {
+      return res.status(400).json({ message: "Solo se puede aceptar en nombre del estudiante cuando está seleccionada por la empresa" });
+    }
+
+    const now = new Date();
+    const yaTieneAceptada = await PostulacionOportunidad.exists({
+      postulant: po.postulant,
+      estado: "aceptado_estudiante",
+      _id: { $ne: po._id },
+    });
+    if (yaTieneAceptada) {
+      return res.status(400).json({ message: "El estudiante ya tiene otra oportunidad aceptada definitivamente" });
+    }
+
+    po.estado = "aceptado_estudiante";
+    po.aceptadoEstudianteAt = now;
+    po.rechazadoAt = null;
+    po.revisadoPor = req.user?.id || null;
+    po.comentarios = "Aceptada en nombre del estudiante por coordinación";
+    await po.save();
+
+    await PostulacionOportunidad.updateMany(
+      {
+        postulant: po.postulant,
+        _id: { $ne: po._id },
+        estado: { $in: ["aplicado", "empresa_consulto_perfil", "empresa_descargo_hv", "seleccionado_empresa"] },
+      },
+      {
+        $set: {
+          estado: "rechazado",
+          rechazadoAt: now,
+          comentarios: "No continúa el proceso: coordinación confirmó otra oportunidad en nombre del estudiante",
+          aceptadoEstudianteAt: null,
+        },
+      }
+    );
+
+    res.json({
+      message: "Aceptación registrada en nombre del estudiante",
+      estado: po.estado,
+      aceptadoEstudianteAt: po.aceptadoEstudianteAt,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1453,7 +1605,7 @@ export const getApplicationDetail = async (req, res) => {
 export const updateApplicationState = async (req, res) => {
   try {
     const { id: opportunityId, postulacionId } = req.params;
-    const { estado } = req.body;
+    const { estado, motivoNoAprobacion, motivo, comentarios } = req.body;
 
     if (!estado || !["rechazado", "empresa_consulto_perfil"].includes(estado)) {
       return res.status(400).json({
@@ -1470,8 +1622,15 @@ export const updateApplicationState = async (req, res) => {
     }
 
     if (estado === "rechazado") {
+      const razon = (motivoNoAprobacion ?? motivo ?? comentarios ?? "").toString().trim();
+      if (!razon) {
+        return res.status(400).json({
+          message: "Debe indicar la razón de no aprobación para rechazar una postulación.",
+        });
+      }
       po.estado = "rechazado";
       po.rechazadoAt = new Date();
+      po.comentarios = razon;
     } else {
       po.estado = "empresa_consulto_perfil";
       po.rechazadoAt = null;

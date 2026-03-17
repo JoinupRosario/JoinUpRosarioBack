@@ -34,6 +34,12 @@ const oportunidadMTMSchema = new mongoose.Schema(
       ref: "items",
       default: null
     },
+    /** Límite de horas de la monitoría (opcional, HU006). */
+    limiteHoras: { type: Number, default: null, min: 0 },
+    /** Centro de costo (opcional, HU006). */
+    centroCosto: { type: String, trim: true, maxlength: 100, default: null },
+    /** Código CPS (opcional, HU006). */
+    codigoCPS: { type: String, trim: true, maxlength: 50, default: null },
     valorPorHora: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "items",
