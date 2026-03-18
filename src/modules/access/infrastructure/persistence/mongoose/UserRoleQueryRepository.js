@@ -11,21 +11,24 @@ export class UserRoleQueryRepository {
    * @returns {Promise<string[]>} Códigos de permiso activos (ej. ['AMPO','VPPO',...]).
    */
   async getUserActivePermissionCodes(userId) {
-    const ua = await UserAdministrativo.findOne({ user: userId, estado: true })
+    // Usar find (no findOne) para unificar permisos de todos los perfiles administrativos
+    // del mismo User (evita 403 cuando hay duplicados o varios perfiles por usuario)
+    const uaList = await UserAdministrativo.find({ user: userId, estado: true })
       .populate({ path: 'roles.rol', match: { estado: true } })
       .lean();
 
-    if (!ua || !ua.roles || ua.roles.length === 0) {
-      return [];
+    const roleIds = new Set();
+    for (const ua of uaList) {
+      if (!ua.roles || !ua.roles.length) continue;
+      for (const r of ua.roles) {
+        if (r.rol && r.estado !== false) roleIds.add(r.rol._id?.toString?.() || r.rol._id);
+      }
     }
 
-    const roleIds = ua.roles
-      .filter(r => r.rol && r.estado !== false)
-      .map(r => r.rol._id);
+    if (roleIds.size === 0) return [];
+    const roleIdsArr = Array.from(roleIds);
 
-    if (roleIds.length === 0) return [];
-
-    const roles = await Rol.find({ _id: { $in: roleIds }, estado: true })
+    const roles = await Rol.find({ _id: { $in: roleIdsArr }, estado: true })
       .populate('permisos.permiso')
       .lean();
 

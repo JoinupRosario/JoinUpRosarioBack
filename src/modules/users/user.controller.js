@@ -146,7 +146,9 @@ export const getMyPermissions = async (req, res) => {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ message: "No autenticado" });
 
-    const adminProfile = await UserAdministrativo.findOne({ user: userId })
+    // Unificar permisos de todos los perfiles UserAdministrativo del usuario
+    // (evita inconsistencia cuando hay duplicados o varios perfiles por mismo User)
+    const adminProfiles = await UserAdministrativo.find({ user: userId, estado: true })
       .populate({
         path: "roles.rol",
         match: { estado: true },
@@ -157,35 +159,34 @@ export const getMyPermissions = async (req, res) => {
       })
       .lean();
 
-    if (!adminProfile) {
-      // Usuario autenticado pero sin perfil administrativo: sin permisos
-      return res.json({ permissions: [], roles: [] });
-    }
-
     const permissionsMap = new Map();
-    const roleNames = [];
+    const roleNamesMap = new Map(); // _id -> { _id, nombre } para no duplicar roles
 
-    for (const roleEntry of adminProfile.roles ?? []) {
-      if (!roleEntry.estado || !roleEntry.rol) continue;
-      const rol = roleEntry.rol;
-      roleNames.push({ _id: rol._id, nombre: rol.nombre });
+    for (const adminProfile of adminProfiles) {
+      for (const roleEntry of adminProfile.roles ?? []) {
+        if (!roleEntry.estado || !roleEntry.rol) continue;
+        const rol = roleEntry.rol;
+        if (!roleNamesMap.has(rol._id.toString())) {
+          roleNamesMap.set(rol._id.toString(), { _id: rol._id, nombre: rol.nombre });
+        }
 
-      for (const permisoEntry of rol.permisos ?? []) {
-        if (!permisoEntry.estado || !permisoEntry.permiso) continue;
-        const p = permisoEntry.permiso;
-        if (!permissionsMap.has(p.codigo)) {
-          permissionsMap.set(p.codigo, {
-            codigo: p.codigo,
-            nombre: p.nombre,
-            modulo: p.modulo,
-          });
+        for (const permisoEntry of rol.permisos ?? []) {
+          if (!permisoEntry.estado || !permisoEntry.permiso) continue;
+          const p = permisoEntry.permiso;
+          if (!permissionsMap.has(p.codigo)) {
+            permissionsMap.set(p.codigo, {
+              codigo: p.codigo,
+              nombre: p.nombre,
+              modulo: p.modulo,
+            });
+          }
         }
       }
     }
 
     return res.json({
       permissions: Array.from(permissionsMap.values()),
-      roles: roleNames,
+      roles: Array.from(roleNamesMap.values()),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });

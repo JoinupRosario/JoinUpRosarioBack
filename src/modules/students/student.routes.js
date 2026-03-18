@@ -9,22 +9,22 @@ import {
   getStudentProfile,
   updateStudentProfile
 } from "./student.controller.js";
-import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
+import { verifyToken } from "../../middlewares/auth.js";
+import { requirePermission } from "../access/presentation/middlewares/requirePermission.js";
 import { upload } from "../../middlewares/upload.js";
 
 const router = express.Router();
 
-// Rutas públicas (con autenticación)
 router.use(verifyToken);
 
-// Rutas para estudiantes
-router.get("/", authorizeRoles("admin", "superadmin", "leader", "monitor"), getStudents);
+// AMPR = Acceso módulo prácticas; BUSP = Buscar estudiantes; CEST = Cargar; BEST = Borrar
+router.get("/", requirePermission("AMPR", "BUSP"), getStudents);
 router.get("/profile", getStudentProfile);
 router.put("/profile", updateStudentProfile);
-router.get("/:id", getStudentById);
-router.post("/", authorizeRoles("admin", "superadmin"), createStudent);
-router.put("/:id", updateStudent);
-router.delete("/:id", authorizeRoles("admin", "superadmin"), deleteStudent);
+router.get("/:id", requirePermission("AMPR", "BUSP"), getStudentById);
+router.post("/", requirePermission("CEST"), createStudent);
+router.put("/:id", requirePermission("AMPR"), updateStudent);
+router.delete("/:id", requirePermission("BEST"), deleteStudent);
 
 // Subida de archivos
 router.post("/:id/cv", upload.single("cv"), uploadCV);

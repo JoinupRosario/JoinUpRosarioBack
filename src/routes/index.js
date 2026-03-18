@@ -25,6 +25,7 @@ import asignaturaRoutes from '../modules/asignaturas/asignatura.routes.js';
 import oportunidadesMTMRoutes from '../modules/oportunidadesMTM/oportunidadMTM.routes.js';
 import condicionCurricularRoutes from '../modules/condicionesCurriculares/condicionCurricular.routes.js';
 import documentParametrizationRoutes from '../modules/parametrizacionDocumentos/documentParametrization.routes.js';
+import documentPracticeDefinitionRoutes from '../modules/documentPracticeDefinition/documentPracticeDefinition.routes.js';
 import userSucursalRoutes from '../modules/userSucursal/userSucursal.routes.js';
 import estudiantesHabilitadosRoutes from '../modules/estudiantesHabilitados/estudianteHabilitado.routes.js';
 // Notificación: rutas directas desde cada módulo (sin archivo agregador)
@@ -63,6 +64,7 @@ router.use("/asignaturas", asignaturaRoutes);
 router.use("/oportunidades-mtm", oportunidadesMTMRoutes);
 router.use("/condiciones-curriculares", condicionCurricularRoutes);
 router.use("/parametrizacion-documentos", documentParametrizationRoutes);
+router.use("/document-practice-definitions", documentPracticeDefinitionRoutes);
 router.use("/user-sucursales", userSucursalRoutes);
 router.use("/estudiantes-habilitados", estudiantesHabilitadosRoutes);
 // Notificación: cada submódulo montado bajo /notificacion y en URLs legacy

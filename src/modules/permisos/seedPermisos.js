@@ -123,7 +123,8 @@ const permisosIniciales = [
   { codigo: 'CEES', nombre: 'Cambiar el estado de una evaluación de seguimiento', modulo: 'PRACTICAS' },
   { codigo: 'CREE', nombre: 'Consultar respuestas de evaluaciones de una legalización', modulo: 'PRACTICAS' },
 
-  // ========== MÓDULO MONITORÍAS (111-154) ==========
+  // ========== MÓDULO MONITORÍAS (111-155) ==========
+  { codigo: 'AMMO', nombre: 'Acceso al módulo de Monitorías (legalizaciones, planes, seguimiento)', modulo: 'MONITORIAS' },
   { codigo: 'CDDM', nombre: 'Consultar la definición de documentos para monitorías', modulo: 'MONITORIAS' },
   { codigo: 'CRDM', nombre: 'Crear definición de documentos para monitorías', modulo: 'MONITORIAS' },
   { codigo: 'ACDM', nombre: 'Actualizar definición de documentos para monitorías', modulo: 'MONITORIAS' },
@@ -183,8 +184,12 @@ const permisosIniciales = [
   { codigo: 'EDSU', nombre: 'Edita una sucursal', modulo: 'SUCURSALES' },
   { codigo: 'ELSU', nombre: 'Elimina una sucursal', modulo: 'SUCURSALES' },
 
-  // ========== MÓDULO ROLES (165) ==========
+  // ========== MÓDULO ROLES (165-169) ==========
   { codigo: 'AMRO', nombre: 'Acceso al módulo Roles', modulo: 'ROLES' },
+  { codigo: 'LRO', nombre: 'Listar roles y permisos', modulo: 'ROLES' },
+  { codigo: 'CRO', nombre: 'Crear rol', modulo: 'ROLES' },
+  { codigo: 'EDRO', nombre: 'Editar rol y asignar permisos', modulo: 'ROLES' },
+  { codigo: 'CEDRO', nombre: 'Activar o desactivar rol', modulo: 'ROLES' },
 
   // ========== MÓDULO USUARIOS (166-173) ==========
   { codigo: 'AMUS', nombre: 'Acceso al modulo Usuarios', modulo: 'USUARIOS' },
@@ -198,6 +203,7 @@ const permisosIniciales = [
 
   // ========== MÓDULO CONFIGURACIÓN (174-184) ==========
   { codigo: 'AMCO', nombre: 'Módulo Configuración', modulo: 'CONFIGURACION' },
+  { codigo: 'CFAPER', nombre: 'Configuración personal (cambiar contraseña, preferencias)', modulo: 'CONFIGURACION' },
   { codigo: 'CFPP', nombre: 'Configuración de facultades y programas', modulo: 'CONFIGURACION' },
   { codigo: 'CFAL', nombre: 'Configuración de alertas', modulo: 'CONFIGURACION' },
   { codigo: 'CFOP', nombre: 'Configuración de oportunidades para postulante', modulo: 'CONFIGURACION' },
@@ -208,8 +214,29 @@ const permisosIniciales = [
   { codigo: 'CFNP', nombre: 'Configuración de notificaciones de práctica', modulo: 'CONFIGURACION' },
   { codigo: 'CFDL', nombre: 'Configuración de documentos de legalización', modulo: 'CONFIGURACION' },
   { codigo: 'CFAS', nombre: 'Configuración de actividades de seguimiento de práctica', modulo: 'CONFIGURACION' },
+  { codigo: 'CFASIG', nombre: 'Configuración de asignaturas (cargue SFTP/UXXI)', modulo: 'CONFIGURACION' },
+  { codigo: 'GPPR', nombre: 'Gestión de periodos para prácticas', modulo: 'CONFIGURACION' },
+  { codigo: 'GPMO', nombre: 'Gestión de periodos para monitorías', modulo: 'CONFIGURACION' },
+  { codigo: 'GEPA', nombre: 'Gestión de estados para prácticas académicas', modulo: 'CONFIGURACION' },
+  { codigo: 'GPAR', nombre: 'Gestión de Parámetros', modulo: 'CONFIGURACION' },
 
-  // ========== MÓDULO GESTIÓN DE PERIODOS (185-190) ==========
+  // ========== MÓDULO PROGRAMAS Y FACULTADES (Configuración) ==========
+  { codigo: 'CFSYNP', nombre: 'Actualizar info programas (Universitas)', modulo: 'PROGRAMAS Y FACULTADES' },
+  { codigo: 'CFSYNF', nombre: 'Actualizar info facultades (Universitas)', modulo: 'PROGRAMAS Y FACULTADES' },
+  { codigo: 'CEPRO', nombre: 'Activar o desactivar programa', modulo: 'PROGRAMAS Y FACULTADES' },
+  { codigo: 'CEFAC', nombre: 'Activar o desactivar facultad', modulo: 'PROGRAMAS Y FACULTADES' },
+
+  // ========== MÓDULO DASHBOARD (185-191) ==========
+  { codigo: 'VERDASH', nombre: 'Ver estadísticas y gráficas en el Dashboard principal', modulo: 'DASHBOARD' },
+  { codigo: 'DASH_EST', nombre: 'Ver gráfica Total Estudiantes en Dashboard', modulo: 'DASHBOARD' },
+  { codigo: 'DASH_PRA', nombre: 'Ver gráfica Prácticas Activas en Dashboard', modulo: 'DASHBOARD' },
+  { codigo: 'DASH_OPO', nombre: 'Ver gráfica Oportunidades Disponibles en Dashboard', modulo: 'DASHBOARD' },
+  { codigo: 'DASH_EMP', nombre: 'Ver gráfica Empresas Registradas en Dashboard', modulo: 'DASHBOARD' },
+  { codigo: 'DASH_POS', nombre: 'Ver gráfica Postulaciones por Mes en Dashboard', modulo: 'DASHBOARD' },
+  { codigo: 'DASH_EDP', nombre: 'Ver gráfica Estado de Prácticas en Dashboard', modulo: 'DASHBOARD' },
+  { codigo: 'DASH_TEN', nombre: 'Ver gráfica Tendencia de Postulaciones en Dashboard', modulo: 'DASHBOARD' },
+
+  // ========== MÓDULO GESTIÓN DE PERIODOS (186-191) ==========
   { codigo: 'AMGP', nombre: 'Acceso al módulo de Gestión de Periodos', modulo: 'PERIODOS' },
   { codigo: 'LPER', nombre: 'Listar períodos', modulo: 'PERIODOS' },
   { codigo: 'CPER', nombre: 'Crear período', modulo: 'PERIODOS' },

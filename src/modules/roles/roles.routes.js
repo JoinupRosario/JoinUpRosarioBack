@@ -17,26 +17,27 @@ import { requirePermission } from '../access/presentation/middlewares/requirePer
 
 const router = express.Router();
 
-// Todas las rutas de roles requieren autenticación y permiso AMRO (Acceso al módulo Roles)
 router.use(verifyToken);
-router.use(requirePermission('AMRO'));
 
-// Rutas para roles
-router.post('/', crearRol);
-router.get('/', obtenerRoles);
-router.get('/:id', obtenerRolPorId);
-router.put('/:id', actualizarRol);
-router.patch('/:id/estado', cambiarEstadoRol);
-router.delete('/:id', eliminarRol);
+// Listar y ver: AMRO o LRO
+router.get('/', requirePermission('AMRO', 'LRO'), obtenerRoles);
+router.get('/permisos/todos', requirePermission('AMRO', 'LRO'), obtenerPermisos);
+router.get('/:id', requirePermission('AMRO', 'LRO'), obtenerRolPorId);
 
-// Ruta para obtener todos los permisos
-router.get('/permisos/todos', obtenerPermisos); // Agrega esta línea
+// Crear: AMRO o CRO
+router.post('/', requirePermission('AMRO', 'CRO'), crearRol);
 
-// Rutas para gestión de permisos en roles
-router.post('/:id/permisos', agregarPermiso);
-router.put('/:id/permisos', actualizarPermisos); // Nueva ruta para actualizar todos los permisos
+// Editar rol y permisos: AMRO o EDRO
+router.put('/:id', requirePermission('AMRO', 'EDRO'), actualizarRol);
+router.put('/:id/permisos', requirePermission('AMRO', 'EDRO'), actualizarPermisos);
+router.post('/:id/permisos', requirePermission('AMRO', 'EDRO'), agregarPermiso);
+router.delete('/:id/permisos', requirePermission('AMRO', 'EDRO'), removerPermiso);
+router.patch('/:id/permisos/estado', requirePermission('AMRO', 'EDRO'), cambiarEstadoPermiso);
 
-router.delete('/:id/permisos', removerPermiso);
-router.patch('/:id/permisos/estado', cambiarEstadoPermiso);
+// Activar/desactivar rol: AMRO o CEDRO
+router.patch('/:id/estado', requirePermission('AMRO', 'CEDRO'), cambiarEstadoRol);
+
+// Eliminar rol: AMRO o EDRO
+router.delete('/:id', requirePermission('AMRO', 'EDRO'), eliminarRol);
 
 export default router;
