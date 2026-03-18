@@ -57,6 +57,8 @@ const postulacionMTMSchema = new mongoose.Schema(
     rechazadoAt: { type: Date, default: null },
     revisadoPor: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     comentarios: { type: String, default: null },
+    /** RQ04_HU010: token único para link de control de asistencia por MTM (todo el semestre) */
+    linkAsistenciaToken: { type: String, trim: true, default: null, unique: true, sparse: true },
   },
   { timestamps: true }
 );

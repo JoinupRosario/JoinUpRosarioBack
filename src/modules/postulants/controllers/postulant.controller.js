@@ -1961,6 +1961,14 @@ function mapProfileBodyToPostulant(body) {
     mapped.cityResidenceId = mapped.residence_city || null;
     delete mapped.residence_city;
   }
+  if (mapped.residence_zone !== undefined) {
+    mapped.zonaResidencia = mapped.residence_zone || null;
+    delete mapped.residence_zone;
+  }
+  if (mapped.zona_residencia !== undefined) {
+    mapped.zonaResidencia = mapped.zona_residencia || null;
+    delete mapped.zona_residencia;
+  }
   if (mapped.phone_number !== undefined) {
     mapped.phone = mapped.phone_number || null;
     delete mapped.phone_number;
@@ -2152,6 +2160,8 @@ function formatPostulantProfileResponse(p) {
     residence_country: p.countryResidenceId,
     residence_department: residence_department,
     residence_city: p.cityResidenceId,
+    residence_zone: p.zonaResidencia ?? null,
+    zona_residencia: p.zonaResidencia ?? null,
     phone_number: p.phone ?? null,
     mobile_number: p.phone ?? null,
     linkedin_url: p.linkedinLink ?? null,

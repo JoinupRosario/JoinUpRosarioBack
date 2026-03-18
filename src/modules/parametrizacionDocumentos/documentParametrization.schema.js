@@ -16,12 +16,12 @@ const formatSeccionSchema = new mongoose.Schema(
 
 const documentParametrizationSchema = new mongoose.Schema(
   {
-    /** Tipo de documento: hoja_vida, carta_presentacion (RQ04_HU003), etc. */
+    /** Tipo de documento: hoja_vida, carta_presentacion (RQ04_HU003), acuerdo_vinculacion (RQ04_HU006), etc. */
     type: {
       type: String,
       required: true,
       unique: true,
-      enum: ["hoja_vida", "carta_presentacion"],
+      enum: ["hoja_vida", "carta_presentacion", "acuerdo_vinculacion"],
     },
     /** Logo en base64 (data URL o solo base64) para el encabezado del PDF. */
     logoBase64: { type: String, default: null },
@@ -69,6 +69,10 @@ const documentParametrizationSchema = new mongoose.Schema(
       enum: ["fecha_actual", "fecha_elegible", "ninguna"],
       default: "fecha_actual",
     },
+    /** RQ04_HU006 Acuerdo de vinculación: plantilla PDF en base64 (opcional; si tiene campos de formulario se rellenan). */
+    plantillaPdfBase64: { type: String, default: null },
+    /** RQ04_HU006: textos legales o bloques después de las tablas (si se genera por código en lugar de solo rellenar PDF). */
+    textosLegalesAcuerdo: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true }
 );

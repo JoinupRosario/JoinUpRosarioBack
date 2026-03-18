@@ -41,6 +41,8 @@ const postulantsSchema = new mongoose.Schema(
     dateBirth: { type: Date },
     phone: { type: String, maxlength: 20 },
     address: { type: String, maxlength: 150 },
+    /** Zona de residencia (ej. localidad, barrio o zona) para legalización MTM y perfil. */
+    zonaResidencia: { type: String, maxlength: 150, default: null },
     alternateEmail: { type: String, required: true, maxlength: 100 },
     linkedinLink: { type: String, maxlength: 100 },
     instagram: { type: String, maxlength: 250 },

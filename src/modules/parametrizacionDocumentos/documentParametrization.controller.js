@@ -3,6 +3,8 @@ import DocumentParametrization from "./documentParametrization.schema.js";
 const DOC_TYPE_HOJA_VIDA = "hoja_vida";
 /** RQ04_HU003: Parametrización Carta de presentación */
 const DOC_TYPE_CARTA_PRESENTACION = "carta_presentacion";
+/** RQ04_HU006: Parametrización Acuerdo de vinculación laboral */
+const DOC_TYPE_ACUERDO_VINCULACION = "acuerdo_vinculacion";
 
 /**
  * GET /parametrizacion-documentos/hoja-vida
@@ -176,6 +178,127 @@ export const updateCartaPresentacionParametrization = async (req, res) => {
       textosInternos: outTextosInternos,
       opcionFechaCarta: outOpcionFecha,
     });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET /parametrizacion-documentos/acuerdo-vinculacion
+ * RQ04_HU006: Devuelve la configuración de parametrización del acuerdo de vinculación (plantilla PDF, textos legales).
+ */
+export const getAcuerdoVinculacionParametrization = async (req, res) => {
+  try {
+    const doc = await DocumentParametrization.findOne({ type: DOC_TYPE_ACUERDO_VINCULACION }).lean();
+    if (!doc) {
+      return res.json({
+        type: DOC_TYPE_ACUERDO_VINCULACION,
+        logoBase64: null,
+        textosLegalesAcuerdo: null,
+      });
+    }
+    res.json({
+      type: doc.type,
+      logoBase64: doc.logoBase64 ?? null,
+      textosLegalesAcuerdo: doc.textosLegalesAcuerdo ?? null,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * PUT /parametrizacion-documentos/acuerdo-vinculacion
+ * Body: { logoBase64?, textosLegalesAcuerdo? }
+ */
+export const updateAcuerdoVinculacionParametrization = async (req, res) => {
+  try {
+    const { logoBase64, textosLegalesAcuerdo } = req.body;
+    const update = {};
+    if (logoBase64 !== undefined) update.logoBase64 = logoBase64;
+    if (textosLegalesAcuerdo !== undefined) update.textosLegalesAcuerdo = textosLegalesAcuerdo;
+
+    const doc = await DocumentParametrization.findOneAndUpdate(
+      { type: DOC_TYPE_ACUERDO_VINCULACION },
+      { $set: update },
+      { new: true, upsert: true }
+    ).lean();
+
+    res.json({
+      type: doc.type,
+      logoBase64: doc.logoBase64 ?? null,
+      textosLegalesAcuerdo: doc.textosLegalesAcuerdo ?? null,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * POST /parametrizacion-documentos/acuerdo-vinculacion/preview
+ * Genera un PDF de vista previa con datos de ejemplo y la config actual (logo + textos).
+ * Body opcional: { logoBase64?, textosLegalesAcuerdo? } para previsualizar sin guardar.
+ */
+export const previewAcuerdoVinculacionPdf = async (req, res) => {
+  try {
+    const { buildAcuerdoVinculacionPdf } = await import("../../services/acuerdoVinculacionPdf.service.js");
+    let logoBase64 = req.body?.logoBase64;
+    let textosLegalesAcuerdo = req.body?.textosLegalesAcuerdo;
+    if (logoBase64 === undefined || textosLegalesAcuerdo === undefined) {
+      const doc = await DocumentParametrization.findOne({ type: DOC_TYPE_ACUERDO_VINCULACION }).lean();
+      if (logoBase64 === undefined) logoBase64 = doc?.logoBase64 ?? null;
+      if (textosLegalesAcuerdo === undefined) textosLegalesAcuerdo = doc?.textosLegalesAcuerdo ?? null;
+    }
+    const dummyData = {
+      estudiante: {
+        nombreApellidos: "Juan Pérez García",
+        tipoDocumento: "C.C.",
+        numeroDocumento: "1234567890",
+        direccion: "KR 13 #33-01 de la ciudad de Bogotá D.C.",
+        facultad: "Facultad de Jurisprudencia",
+        programa: "Derecho",
+        semestre: "2025-1",
+        creditosAprobados: "85",
+      },
+      escenario: {
+        nombreOrganizacion: "Empresa Ejemplo S.A.S.",
+        tipoIdentificacion: "NIT",
+        nit: "900123456-1",
+        direccion: "Avenida cra9#115-30 de la ciudad de Bogotá D.C.",
+        representanteLegalNombre: "María López",
+        representanteTipoDoc: "C.C.",
+        representanteNumeroDoc: "9876543210",
+        tutorNombre: "Carlos Rodríguez",
+        tutorTipoDoc: "C.C.",
+        tutorNumeroDoc: "5555555555",
+      },
+      universidad: {
+        tipoIdentificacion: "NIT",
+        numeroIdentificacion: "890123456-1",
+        direccion: "Calle 12 C número 6 - 25 de la ciudad de Bogotá D.C.",
+        representanteNombre: "Universidad del Rosario",
+        representanteTipoDoc: "C.C.",
+        representanteNumeroDoc: "—",
+        monitorNombre: "Ana Monitor",
+        monitorTipoDoc: "C.C.",
+        monitorNumeroDoc: "—",
+      },
+      practica: {
+        fechaInicio: new Date("2025-02-01"),
+        fechaFin: new Date("2025-06-30"),
+        dedicacion: "Medio tiempo",
+        horario: "Lunes a viernes 8:00 a 12:00",
+        fechaEvaluacionParcial: new Date("2025-04-15"),
+        fechaEvaluacionFinal: new Date("2025-06-30"),
+        conAuxilio: true,
+        valor: 1500000,
+      },
+      parametrizacion: { logoBase64: logoBase64 || null, textosLegalesAcuerdo: textosLegalesAcuerdo || null },
+    };
+    const pdfBuffer = await buildAcuerdoVinculacionPdf(dummyData);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", 'inline; filename="acuerdo-vinculacion-vista-previa.pdf"');
+    res.send(pdfBuffer);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

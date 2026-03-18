@@ -63,6 +63,7 @@ const EVENTOS = [
   { value: "aprobacion_seguimiento_monitoria", tipo: "monitoria", nombre: "Posterior a la aprobación de un seguimiento de monitoría" },
   { value: "creacion_seguimiento_monitoria_requiere_aprobacion", tipo: "monitoria", nombre: "Posterior a la creación de un seguimiento de monitoría que requiere aprobación" },
   { value: "creacion_plan_trabajo_monitoria", tipo: "monitoria", nombre: "Posterior a la creación de un plan de trabajo de monitoría" },
+  { value: "envio_revision_plan_trabajo_monitoria", tipo: "monitoria", nombre: "Cuando el estudiante envía el plan de trabajo a revisión (notificación al profesor/responsable MTM)" },
   { value: "aprobacion_plan_trabajo_monitoria", tipo: "monitoria", nombre: "Posterior a la aprobación de un plan de trabajo de monitoría" },
   { value: "rechazo_seguimiento_monitoria", tipo: "monitoria", nombre: "Posterior al rechazo de un seguimiento de monitoría" },
   { value: "envio_evaluacion_coordinador", tipo: "monitoria", nombre: "Al momento del envío de la evaluación para el coordinador" },
