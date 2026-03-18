@@ -77,7 +77,7 @@ const opportunitySchema = new mongoose.Schema(
       type: Number,
       default: null,
       min: 0,
-      max: 48
+      max: 168
     },
     /** Referencia a Item (listId L_DEDICATION_JOB_OFFER). */
     dedicacion: {

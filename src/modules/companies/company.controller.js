@@ -1,8 +1,97 @@
+import path from "path";
 import Company from "./company.model.js";
 import Document from "../documents/document.model.js";
 import User from "../users/user.model.js";
 import bcrypt from "bcryptjs";
 import { logHelper } from "../logs/log.service.js";
+import { s3Config, uploadToS3, getSignedDownloadUrl } from "../../config/s3.config.js";
+
+const COMPANY_DOC_URL_FIELDS = [
+  "chamberOfCommerceCertificate",
+  "rutDocument",
+  "agencyAccreditationDocument",
+  "logo",
+];
+
+const COMPANIES_S3_PREFIX = (process.env.COMPANIES_S3_PREFIX || "companies-practicas").replace(/\/$/, "");
+
+function safeExt(originalname, mimetype, fallback = ".bin") {
+  const ext = path.extname(originalname || "").toLowerCase();
+  if (ext && ext.length <= 8 && /^\.[a-z0-9]+$/i.test(ext)) return ext;
+  if (/jpeg/i.test(mimetype || "")) return ".jpg";
+  if (/png/i.test(mimetype || "")) return ".png";
+  if (/gif/i.test(mimetype || "")) return ".gif";
+  if (/webp/i.test(mimetype || "")) return ".webp";
+  if (/pdf/i.test(mimetype || "")) return ".pdf";
+  return fallback;
+}
+
+/**
+ * Sube logo + 3 documentos a S3 tras crear la empresa. Solo llamar cuando la empresa ya existe en BD.
+ * @returns {Record<string, string>} campos a asignar en Company (keys S3)
+ */
+export async function uploadCompanyAssetsToS3(companyId, files) {
+  const result = {};
+  if (!files || !s3Config.isConfigured) return result;
+
+  const id = String(companyId);
+  const specs = [
+    { field: "logo", slug: "logo", dbKey: "logo", imagesOnly: true },
+    { field: "chamberOfCommerceCertificate", slug: "camara-comercio", dbKey: "chamberOfCommerceCertificate" },
+    { field: "rutDocument", slug: "rut", dbKey: "rutDocument" },
+    { field: "agencyAccreditationDocument", slug: "acreditacion-agencia", dbKey: "agencyAccreditationDocument" },
+  ];
+
+  for (const s of specs) {
+    const arr = files[s.field];
+    const file = Array.isArray(arr) ? arr[0] : arr;
+    if (!file?.buffer?.length) continue;
+    if (s.imagesOnly && !/^image\/(jpeg|png|gif|webp)$/i.test(file.mimetype)) continue;
+    if (!s.imagesOnly && !/^(application\/pdf|image\/)/i.test(file.mimetype)) continue;
+    const ext = safeExt(file.originalname, file.mimetype);
+    const key = `${COMPANIES_S3_PREFIX}/${id}/${s.slug}${ext}`;
+    await uploadToS3(key, file.buffer, { contentType: file.mimetype || "application/octet-stream" });
+    result[s.dbKey] = key;
+  }
+  return result;
+}
+
+/** POST /companies/:id/initial-files (auth) — sube archivos solo tras crear la entidad */
+export const uploadCompanyInitialFiles = async (req, res) => {
+  try {
+    const company = await Company.findById(req.params.id);
+    if (!company) {
+      return res.status(404).json({ success: false, message: "Empresa no encontrada" });
+    }
+    if (!s3Config.isConfigured) {
+      return res.status(503).json({
+        success: false,
+        message: "Almacenamiento S3 no está configurado en el servidor. Los archivos no se guardaron.",
+      });
+    }
+    const uploaded = await uploadCompanyAssetsToS3(company._id, req.files);
+    if (Object.keys(uploaded).length === 0) {
+      return res.json({
+        success: true,
+        message: "No se enviaron archivos o ninguno fue válido.",
+        uploaded: {},
+      });
+    }
+    Object.assign(company, uploaded);
+    await company.save();
+    res.json({
+      success: true,
+      message: "Archivos subidos correctamente.",
+      uploaded,
+    });
+  } catch (err) {
+    console.error("[uploadCompanyInitialFiles]", err);
+    res.status(500).json({
+      success: false,
+      message: err.message || "Error al subir archivos",
+    });
+  }
+};
 
 /** Validar NIT Colombia: 10 dígitos (9 base + 1 dígito de verificación), algoritmo módulo 11 DIAN */
 function validarNitColombia(nit) {
@@ -93,6 +182,48 @@ export const getCompanyById = async (req, res) => {
     res.json(company);
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+/** GET /companies/:id/document/:field — URL firmada (o URL absoluta) para revisar documentos en S3 */
+export const getCompanyDocumentSignedUrl = async (req, res) => {
+  try {
+    const field = req.params.field;
+    if (!COMPANY_DOC_URL_FIELDS.includes(field)) {
+      return res.status(400).json({
+        success: false,
+        message: "Tipo de documento no válido.",
+      });
+    }
+    const company = await Company.findById(req.params.id).lean();
+    if (!company) {
+      return res.status(404).json({ success: false, message: "Empresa no encontrada" });
+    }
+    const key = company[field];
+    if (!key || typeof key !== "string" || !String(key).trim()) {
+      return res.status(404).json({
+        success: false,
+        message: "No hay archivo registrado.",
+      });
+    }
+    const trimmed = String(key).trim();
+    if (/^https?:\/\//i.test(trimmed)) {
+      return res.json({ success: true, url: trimmed });
+    }
+    if (!s3Config.isConfigured) {
+      return res.status(503).json({
+        success: false,
+        message: "Almacenamiento S3 no configurado; no se puede generar el enlace.",
+      });
+    }
+    const url = await getSignedDownloadUrl(trimmed, 3600);
+    return res.json({ success: true, url });
+  } catch (err) {
+    console.error("[getCompanyDocumentSignedUrl]", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Error al generar enlace de descarga",
+    });
   }
 };
 
@@ -656,6 +787,9 @@ export const addContact = async (req, res) => {
       lastName,
       alternateEmail,
       country,
+      countryCode,
+      state,
+      stateCode,
       city,
       address,
       phone,
@@ -739,6 +873,9 @@ export const addContact = async (req, res) => {
       lastName,
       alternateEmail: alternateEmail || '',
       country: country || '',
+      countryCode: countryCode || '',
+      state: state || '',
+      stateCode: stateCode || '',
       city: city || '',
       address: address || '',
       phone: phone || '',
@@ -804,7 +941,7 @@ export const updateContact = async (req, res) => {
 
     // Actualizar campos permitidos
     const camposPermitidos = [
-      'firstName', 'lastName', 'alternateEmail', 'country', 'city', 'address',
+      'firstName', 'lastName', 'alternateEmail', 'country', 'countryCode', 'state', 'stateCode', 'city', 'address',
       'phone', 'extension', 'mobile', 'idType', 'identification',
       'dependency', 'isPrincipal', 'position', 'isPracticeTutor', 'status'
     ];
@@ -1024,7 +1161,6 @@ export const publicRegisterCompany = async (req, res) => {
 
     // Preparar datos básicos
     const legalName = (req.body.legalName || req.body.name || '').trim();
-    const commercialName = (req.body.commercialName || legalName).trim();
     const idType = (req.body.idType || 'NIT').trim();
     const nit = String(req.body.nit || req.body.idNumber || '').replace(/\s/g, '');
 
@@ -1049,6 +1185,60 @@ export const publicRegisterCompany = async (req, res) => {
     const nitExistente = await Company.findOne({ nit });
     if (nitExistente) {
       return res.status(400).json({ success: false, message: 'Ya existe una entidad registrada con ese NIT.' });
+    }
+
+    const commercialName = (req.body.commercialName || '').trim();
+    if (!commercialName) {
+      return res.status(400).json({ success: false, message: 'El nombre comercial es requerido.' });
+    }
+    const sectorMineSniesVal = (req.body.sectorMineSnies || '').trim();
+    if (!sectorMineSniesVal) {
+      return res.status(400).json({ success: false, message: 'El sector MinE (SNIES) es requerido.' });
+    }
+    let ciiuCodes = [];
+    if (req.body.ciiuCodes) {
+      try {
+        ciiuCodes =
+          typeof req.body.ciiuCodes === 'string' ? JSON.parse(req.body.ciiuCodes) : req.body.ciiuCodes;
+      } catch {
+        ciiuCodes = [];
+      }
+    }
+    if (!Array.isArray(ciiuCodes)) ciiuCodes = [];
+    ciiuCodes = ciiuCodes.filter(Boolean);
+    if (ciiuCodes.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe seleccionar al menos un código CIIU (sector económico).',
+      });
+    }
+
+    const MIN_DOC_BYTES = 1024 * 1024;
+    const fileChamber = req.files?.chamberOfCommerceCertificate?.[0];
+    const fileRut = req.files?.rutDocument?.[0];
+    if (!fileChamber?.buffer?.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe adjuntar el certificado de cámara de comercio.',
+      });
+    }
+    if (!fileRut?.buffer?.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debe adjuntar el documento RUT.',
+      });
+    }
+    if (fileChamber.buffer.length < MIN_DOC_BYTES) {
+      return res.status(400).json({
+        success: false,
+        message: 'El certificado de cámara de comercio debe tener un tamaño mínimo de 1 MB.',
+      });
+    }
+    if (fileRut.buffer.length < MIN_DOC_BYTES) {
+      return res.status(400).json({
+        success: false,
+        message: 'El documento RUT debe tener un tamaño mínimo de 1 MB.',
+      });
     }
 
     // Representante legal (puede llegar como objeto JSON o como campos planos de FormData)
@@ -1106,8 +1296,8 @@ export const publicRegisterCompany = async (req, res) => {
       country: req.body.country || 'Colombia',
       city: req.body.city || '',
       address: req.body.address || '',
-      idType: req.body.legalRepresentative?.idType || 'CC',
-      identification: req.body.legalRepresentative?.idNumber || '',
+      idType: legalRepBody.idType || 'CC',
+      identification: legalRepBody.idNumber || '',
       isPrincipal: true,
       status: 'active'
     }];
@@ -1152,17 +1342,6 @@ export const publicRegisterCompany = async (req, res) => {
       });
     }
 
-    // Parsear ciiuCodes: puede venir como JSON string o array
-    let ciiuCodes = [];
-    if (req.body.ciiuCodes) {
-      try {
-        ciiuCodes = typeof req.body.ciiuCodes === 'string'
-          ? JSON.parse(req.body.ciiuCodes)
-          : req.body.ciiuCodes;
-      } catch { ciiuCodes = []; }
-    }
-    if (!Array.isArray(ciiuCodes)) ciiuCodes = [];
-
     // Parsear domains
     let domains = [];
     if (req.body.domains) {
@@ -1186,7 +1365,7 @@ export const publicRegisterCompany = async (req, res) => {
       idNumber: nit,
       nit,
       sector: req.body.sector || '',
-      sectorMineSnies: req.body.sectorMineSnies || '',
+      sectorMineSnies: sectorMineSniesVal,
       size: req.body.size || '',
       arl: req.body.arl || '',
       ciiuCodes: ciiuCodes.slice(0, 3),
@@ -1220,12 +1399,31 @@ export const publicRegisterCompany = async (req, res) => {
 
     await newCompany.save();
 
-    // Nota: no se genera log de auditoría aquí porque es una ruta pública sin req.user
+    // Archivos (logo + 3 documentos): solo después de crear la empresa en BD
+    let uploadWarning = "";
+    try {
+      if (req.files && s3Config.isConfigured) {
+        const uploaded = await uploadCompanyAssetsToS3(newCompany._id, req.files);
+        if (Object.keys(uploaded).length > 0) {
+          Object.assign(newCompany, uploaded);
+          await newCompany.save();
+        }
+      } else if (req.files && Object.keys(req.files).length > 0 && !s3Config.isConfigured) {
+        uploadWarning =
+          " Los archivos adjuntos no se almacenaron (servidor sin S3). Podrá enviarlos cuando la coordinación lo solicite.";
+      }
+    } catch (upErr) {
+      console.error("[public-register] Error subiendo archivos a S3:", upErr);
+      uploadWarning =
+        " La entidad quedó registrada, pero hubo un error al guardar uno o más archivos. La coordinación podrá solicitarlos de nuevo.";
+    }
 
     return res.status(201).json({
       success: true,
-      message: 'Tu registro fue enviado exitosamente. La coordinación revisará y aprobará tu solicitud pronto.',
-      companyId: newCompany._id
+      message:
+        "Tu registro fue enviado exitosamente. La coordinación revisará y aprobará tu solicitud pronto." +
+        uploadWarning,
+      companyId: newCompany._id,
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });

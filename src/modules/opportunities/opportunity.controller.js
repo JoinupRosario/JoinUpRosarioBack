@@ -10,7 +10,42 @@ import Periodo from "../periodos/periodo.model.js";
 import Country from "../shared/location/models/country.schema.js";
 import City from "../shared/location/models/city.schema.js";
 import Item from "../shared/reference-data/models/item.schema.js";
+import Parameter from "../parameters/parameter.model.js";
 import { esAcuerdoDeVinculacion, iniciarFlujoAcuerdoVinculacion } from "../../services/acuerdoVinculacion.service.js";
+
+const CODE_MAX_JORNADA_ORDINARIA = "PRACTICE_MAX_JORNADA_ORDINARIA_SEMANAL";
+const CODE_MIN_APOYO_ECONOMICO_COP = "PRACTICE_MIN_APOYO_ECONOMICO_COP";
+const DEFAULT_MIN_APOYO_COP = 1750905;
+
+async function getMinApoyoEconomicoCop() {
+  try {
+    const p = await Parameter.findOne({ code: CODE_MIN_APOYO_ECONOMICO_COP, "metadata.active": true }).lean();
+    const v = p?.value;
+    const n = typeof v === "number" ? v : parseInt(String(v || "").replace(/\D/g, ""), 10);
+    if (Number.isFinite(n) && n >= 500000 && n <= 50000000) return n;
+  } catch (_) {}
+  return DEFAULT_MIN_APOYO_COP;
+}
+
+async function getMaxJornadaOrdinariaSemanal() {
+  try {
+    const p = await Parameter.findOne({ code: CODE_MAX_JORNADA_ORDINARIA, "metadata.active": true }).lean();
+    const v = p?.value;
+    const n = typeof v === "number" ? v : parseInt(String(v || ""), 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 48) return n;
+  } catch (_) {}
+  return 44;
+}
+
+function validateJornadaPractica(restData) {
+  const tipo = String(restData.tipo || "").toLowerCase();
+  if (tipo !== "practica") return null;
+  const jo = restData.jornadaOrdinariaSemanal;
+  if (jo == null || jo === "") return null;
+  const n = parseInt(jo, 10);
+  if (Number.isNaN(n)) return null;
+  return n;
+}
 
 const OBJECTID_REGEX = /^[a-f0-9]{24}$/i;
 const LIST_ID_INTEREST_AREA = "L_INTEREST_AREA";
@@ -546,6 +581,26 @@ export const createOpportunity = async (req, res) => {
       return res.status(400).json({ message: "Empresa no encontrada" });
     }
 
+    if (String(restData.tipo || "").toLowerCase() === "practica") {
+      restData.jornadaSemanalPractica = null;
+      const maxH = await getMaxJornadaOrdinariaSemanal();
+      const n = validateJornadaPractica(restData);
+      if (n != null && n > maxH) {
+        return res.status(400).json({
+          message: `La jornada ordinaria semanal no puede superar ${maxH} horas (regla de negocio).`,
+        });
+      }
+      if (restData.auxilioEconomico === true) {
+        const minAp = await getMinApoyoEconomicoCop();
+        const ap = parseInt(String(restData.apoyoEconomico ?? "").replace(/\D/g, ""), 10);
+        if (!Number.isFinite(ap) || ap < minAp) {
+          return res.status(400).json({
+            message: `Con auxilio económico activo, el apoyo debe ser al menos $${minAp.toLocaleString("es-CO")} COP (mínimo configurado en reglas de negocio).`,
+          });
+        }
+      }
+    }
+
     // Validar campos requeridos
     if (!restData.nombreCargo) {
       return res.status(400).json({ message: "El nombre del cargo es requerido" });
@@ -638,6 +693,37 @@ export const updateOpportunity = async (req, res) => {
       return res.status(400).json({ 
         message: "Las funciones deben tener al menos 60 caracteres" 
       });
+    }
+
+    if (String(opportunity.tipo || "").toLowerCase() === "practica") {
+      updateData.jornadaSemanalPractica = null;
+      const maxH = await getMaxJornadaOrdinariaSemanal();
+      const jo = updateData.jornadaOrdinariaSemanal;
+      if (jo != null && jo !== "") {
+        const n = parseInt(jo, 10);
+        if (!Number.isNaN(n) && n > maxH) {
+          return res.status(400).json({
+            message: `La jornada ordinaria semanal no puede superar ${maxH} horas (regla de negocio).`,
+          });
+        }
+      }
+      const auxOn =
+        updateData.auxilioEconomico !== undefined
+          ? updateData.auxilioEconomico === true
+          : opportunity.auxilioEconomico === true;
+      if (auxOn) {
+        const minAp = await getMinApoyoEconomicoCop();
+        const rawAp =
+          updateData.apoyoEconomico !== undefined && updateData.apoyoEconomico !== null
+            ? updateData.apoyoEconomico
+            : opportunity.apoyoEconomico;
+        const ap = parseInt(String(rawAp ?? "").replace(/\D/g, ""), 10);
+        if (!Number.isFinite(ap) || ap < minAp) {
+          return res.status(400).json({
+            message: `Con auxilio económico activo, el apoyo debe ser al menos $${minAp.toLocaleString("es-CO")} COP (mínimo configurado en reglas de negocio).`,
+          });
+        }
+      }
     }
 
     // No permitir cambiar el estado ni el historial desde el body

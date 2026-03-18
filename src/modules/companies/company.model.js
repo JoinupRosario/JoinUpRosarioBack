@@ -97,6 +97,9 @@ const companySchema = new mongoose.Schema(
       alternateEmail: { type: String },
       // Ubicación
       country: { type: String },
+      countryCode: { type: String },
+      state: { type: String },
+      stateCode: { type: String },
       city: { type: String },
       address: { type: String },
       // Contacto
