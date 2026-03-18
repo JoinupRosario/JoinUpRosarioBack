@@ -1,62 +1,87 @@
 /**
  * Servicio para calcular y persistir la completitud del perfil (perfilCompleto).
- * Para generar HV solo se exige: datos personales + áreas de interés, competencias, idiomas y al menos una referencia.
- * No se exigen experiencia laboral, logros, otras experiencias, ni créditos/promedio académico.
+ * Solo cuenta campos que el estudiante puede ver/editar en el perfil:
+ * datos personales (sin correo alternativo en UI, sin fecha/depto/ciudad nacimiento) +
+ * código estudiante + áreas + competencias + idiomas (12 ítems).
+ * Créditos/promedio/programa en curso no cuentan para este % ni para HV.
  */
 import Postulant from "../models/postulants.schema.js";
 import PostulantProfile from "../models/profile/profile.schema.js";
-import ProfileReference from "../models/profile/profileReference.schema.js";
 import ProfileInterestArea from "../models/profile/profileInterestArea.schema.js";
 import ProfileSkill from "../models/profile/profileSkill.schema.js";
 import ProfileLanguage from "../models/profile/profileLanguage.schema.js";
 
-const DATOS_PERSONALES_LABELS = {
-  typeOfIdentification: "Tipo de identificación",
-  gender: "Género",
-  dateBirth: "Fecha de nacimiento",
-  phone: "Teléfono",
-  address: "Dirección",
-  alternateEmail: "Correo alternativo",
-  countryBirthId: "País de nacimiento",
-  stateBirthId: "Departamento de nacimiento",
-  cityBirthId: "Ciudad de nacimiento",
-  countryResidenceId: "País de residencia",
-  stateResidenceId: "Departamento de residencia",
-  cityResidenceId: "Ciudad de residencia",
-};
+/** Claves Postulant que participan en completitud (orden estable). */
+export const COMPLETENESS_DATOS_KEYS = [
+  "typeOfIdentification",
+  "gender",
+  "phone",
+  "address",
+  "countryBirthId",
+  "countryResidenceId",
+  "stateResidenceId",
+  "cityResidenceId",
+];
+
+const DATOS_PERSONALES_LABELS = Object.fromEntries(
+  COMPLETENESS_DATOS_KEYS.map((key) => {
+    const map = {
+      typeOfIdentification: "Tipo de identificación",
+      gender: "Género",
+      phone: "Teléfono",
+      address: "Dirección",
+      countryBirthId: "País de nacimiento",
+      countryResidenceId: "País de residencia",
+      stateResidenceId: "Departamento de residencia",
+      cityResidenceId: "Ciudad de residencia",
+    };
+    return [key, map[key]];
+  })
+);
 
 const PERFIL_LABELS = [
+  { key: "studentCode", label: "Código de estudiante" },
   { key: "interestAreas", label: "Áreas de interés" },
   { key: "skills", label: "Competencias" },
   { key: "languages", label: "Idiomas" },
-  { key: "references", label: "Al menos una referencia" },
 ];
 
+function isFilledValue(v) {
+  if (v == null || v === "") return false;
+  if (typeof v !== "object") return true;
+  if (v instanceof Date && !isNaN(v.getTime())) return true;
+  if (v._id != null) return true;
+  if (v.constructor && v.constructor.name === "ObjectId") return true;
+  return false;
+}
+
 /**
- * Completitud para generar HV: datos personales + perfil (áreas, competencias, idiomas, al menos una referencia).
+ * Fallback cuando no hay perfil cargado (listados): solo la parte de datos personales
+ * respecto al total de 12 ítems (máx. 67% si datos están completos).
+ */
+export function calculateListFallbackCompleteness(postulant) {
+  const filled = COMPLETENESS_DATOS_KEYS.filter((key) => isFilledValue(postulant?.[key])).length;
+  const totalItems = COMPLETENESS_DATOS_KEYS.length + 4;
+  return totalItems ? Math.min(100, Math.round((filled / totalItems) * 100)) : 0;
+}
+
+/**
+ * Completitud para generar HV: datos personales + perfil (áreas, competencias, idiomas).
  * Créditos y promedio no intervienen.
  * Devuelve 0-100.
  */
 export function calculateFullCompleteness(postulant, postulantProfile, profileData) {
-  const isFilled = (v) => {
-    if (v == null || v === "") return false;
-    if (typeof v !== "object") return true;
-    if (v instanceof Date && !isNaN(v.getTime())) return true;
-    if (v._id != null) return true;
-    if (v.constructor && v.constructor.name === "ObjectId") return true;
-    return false;
-  };
-  const datosKeys = Object.keys(DATOS_PERSONALES_LABELS);
-  const itemsDatos = datosKeys.map((key) => ({ ok: isFilled(postulant?.[key]) }));
-  const hasRefs = (profileData?.references?.length ?? 0) > 0;
+  const itemsDatos = COMPLETENESS_DATOS_KEYS.map((key) => ({ ok: isFilledValue(postulant?.[key]) }));
+  const hasStudentCode =
+    postulantProfile?.studentCode != null && String(postulantProfile.studentCode).trim() !== "";
   const hasInterest = (profileData?.interestAreas?.length ?? 0) > 0;
   const hasSkills = (profileData?.skills?.length ?? 0) > 0;
   const hasLangs = (profileData?.languages?.length ?? 0) > 0;
   const itemsPerfil = [
+    { ok: hasStudentCode },
     { ok: hasInterest },
     { ok: hasSkills },
     { ok: hasLangs },
-    { ok: hasRefs },
   ];
   const allItems = [...itemsDatos, ...itemsPerfil];
   const completed = allItems.filter((i) => i.ok).length;
@@ -68,27 +93,19 @@ export function calculateFullCompleteness(postulant, postulantProfile, profileDa
  * Devuelve la lista de campos que faltan por completar (etiquetas en español).
  */
 export function getMissingCompletenessLabels(postulant, postulantProfile, profileData) {
-  const isFilled = (v) => {
-    if (v == null || v === "") return false;
-    if (typeof v !== "object") return true;
-    if (v instanceof Date && !isNaN(v.getTime())) return true;
-    if (v._id != null) return true;
-    if (v.constructor && v.constructor.name === "ObjectId") return true;
-    return false;
-  };
   const missing = [];
-  const datosKeys = Object.keys(DATOS_PERSONALES_LABELS);
-  datosKeys.forEach((key) => {
-    if (!isFilled(postulant?.[key])) missing.push(DATOS_PERSONALES_LABELS[key]);
+  COMPLETENESS_DATOS_KEYS.forEach((key) => {
+    if (!isFilledValue(postulant?.[key])) missing.push(DATOS_PERSONALES_LABELS[key]);
   });
-  const hasRefs = (profileData?.references?.length ?? 0) > 0;
+  const hasStudentCode =
+    postulantProfile?.studentCode != null && String(postulantProfile.studentCode).trim() !== "";
   const hasInterest = (profileData?.interestAreas?.length ?? 0) > 0;
   const hasSkills = (profileData?.skills?.length ?? 0) > 0;
   const hasLangs = (profileData?.languages?.length ?? 0) > 0;
-  if (!hasInterest) missing.push(PERFIL_LABELS[0].label);
-  if (!hasSkills) missing.push(PERFIL_LABELS[1].label);
-  if (!hasLangs) missing.push(PERFIL_LABELS[2].label);
-  if (!hasRefs) missing.push(PERFIL_LABELS[3].label);
+  if (!hasStudentCode) missing.push(PERFIL_LABELS[0].label);
+  if (!hasInterest) missing.push(PERFIL_LABELS[1].label);
+  if (!hasSkills) missing.push(PERFIL_LABELS[2].label);
+  if (!hasLangs) missing.push(PERFIL_LABELS[3].label);
   return missing;
 }
 
@@ -105,22 +122,19 @@ export async function recalcAndSaveProfileCompleteness(postulantDocId, userId, p
     ? { profileId, profileVersionId: versionId }
     : { profileId, $or: [{ profileVersionId: null }, { profileVersionId: { $exists: false } }] };
 
-  const [postulantFull, postulantProfile, references, interestAreas, skills, languages] =
-    await Promise.all([
-      Postulant.findById(postulantDocId)
-        .select("typeOfIdentification gender dateBirth phone address alternateEmail countryBirthId stateBirthId cityBirthId countryResidenceId stateResidenceId cityResidenceId")
-        .lean(),
-      PostulantProfile.findOne({ _id: profileId, ...profileFilter }).lean(),
-      ProfileReference.find({ profileId }).lean(),
-      ProfileInterestArea.find(versionFilter).lean(),
-      ProfileSkill.find(versionFilter).lean(),
-      ProfileLanguage.find(versionFilter).lean(),
-    ]);
+  const [postulantFull, postulantProfile, interestAreas, skills, languages] = await Promise.all([
+    Postulant.findById(postulantDocId)
+      .select("typeOfIdentification gender phone address countryBirthId countryResidenceId stateResidenceId cityResidenceId")
+      .lean(),
+    PostulantProfile.findOne({ _id: profileId, ...profileFilter }).lean(),
+    ProfileInterestArea.find(versionFilter).lean(),
+    ProfileSkill.find(versionFilter).lean(),
+    ProfileLanguage.find(versionFilter).lean(),
+  ]);
 
   if (!postulantProfile || !postulantFull) return { perfilCompleto: false, fullPct: 0 };
 
   const profileDataForCalc = {
-    references: references || [],
     interestAreas: interestAreas || [],
     skills: skills || [],
     languages: languages || [],

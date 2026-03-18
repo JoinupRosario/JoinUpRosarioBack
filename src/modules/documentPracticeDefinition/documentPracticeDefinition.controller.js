@@ -190,12 +190,52 @@ async function enrichPracticeDefFiles(doc) {
 
 export async function listDocumentPracticeDefinitions(req, res) {
   try {
-    const docs = await DocumentPracticeDefinition.find({})
+    const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
+    const limitRaw = parseInt(String(req.query.limit || "15"), 10);
+    const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 15));
+    const search = String(req.query.search || req.query.q || "").trim();
+
+    const practiceListId = process.env.DOC_PRACT_DEF_PRACTICE_LIST_ID || "L_PRACTICE_TYPE";
+    const documentTypeListId = process.env.DOC_PRACT_DEF_DOCUMENT_TYPE_LIST_ID || "L_DOCUMENT_TYPE";
+
+    let filter = {};
+    if (search) {
+      const rx = new RegExp(escapeRegex(search), "i");
+      const items = await Item.find({
+        listId: { $in: [documentTypeListId, practiceListId] },
+        $or: [{ value: rx }, { description: rx }],
+      })
+        .select("_id listId")
+        .lean();
+      const docTypeMatched = items.filter((i) => String(i.listId) === documentTypeListId).map((i) => i._id);
+      const practiceMatched = items.filter((i) => String(i.listId) === practiceListId).map((i) => i._id);
+      const or = [{ documentName: rx }];
+      if (docTypeMatched.length) or.push({ documentTypeItem: { $in: docTypeMatched } });
+      if (practiceMatched.length) or.push({ practiceTypeItem: { $in: practiceMatched } });
+      filter = { $or: or };
+    }
+
+    const total = await DocumentPracticeDefinition.countDocuments(filter);
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const safePage = Math.min(page, totalPages);
+
+    const docs = await DocumentPracticeDefinition.find(filter)
       .populate(populateList)
       .sort({ documentOrder: 1, documentName: 1 })
+      .skip((safePage - 1) * limit)
+      .limit(limit)
       .lean();
     await Promise.all(docs.map((d) => enrichPracticeDefFiles(d)));
-    res.json({ success: true, data: docs });
+    res.json({
+      success: true,
+      data: docs,
+      pagination: {
+        page: safePage,
+        limit,
+        total,
+        totalPages,
+      },
+    });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }

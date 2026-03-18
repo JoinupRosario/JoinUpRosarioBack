@@ -121,20 +121,16 @@ function sectionDatosBasicos(doc, profileData, postulant, options = {}) {
   const user = postulant?.postulantId || postulant?.user;
   const email = user?.email || postulant?.alternateEmail || "—";
   const phone = postulant?.phone || "—";
-  const address = postulant?.address || "—";
   const linkedin = postulant?.linkedinLink || postulant?.personalWebsite || "—";
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica").fillColor(COLOR_BODY);
   const contentWidth = PAGE_WIDTH - 2 * MARGIN;
-  const slotWidth = contentWidth / 3; // misma cuadrícula para ambas filas: email/linkedin alineados con location/phone
+  const slotWidth = contentWidth / 3;
   const row1Items = [
-    { icon: "location", text: safeStr(address) },
     { icon: "phone", text: safeStr(phone) },
     { icon: "mobile", text: safeStr(phone) },
-  ];
-  const row2Items = [
     { icon: "email", text: safeStr(email) },
-    { icon: "linkedin", text: safeStr(linkedin) },
   ];
+  const row2Items = [{ icon: "linkedin", text: safeStr(linkedin) }];
   const lineHeight = 20;
   const rowGap = 10;
 
@@ -156,7 +152,7 @@ function sectionDatosBasicos(doc, profileData, postulant, options = {}) {
 
   drawRow(row1Items, [0, 1, 2]);
   doc.y += rowGap;
-  drawRow(row2Items, [0, 1]); // email y LinkedIn inician en la misma columna que location y phone
+  drawRow(row2Items, [0]);
 }
 
 function sectionCedula(doc, profileData, postulant) {
@@ -199,16 +195,16 @@ function sectionFormacionRosarioFinalizada(doc, profileData, postulant) {
   const list = profileData?.graduatePrograms || [];
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
   list.forEach((gp) => {
-      const program = gp.programId?.name || "—";
-      const faculty = gp.programFacultyId?.facultyId?.name || gp.programFacultyId?.code || "—";
-      const dateStr = gp.dateObtained ? formatDate(gp.dateObtained) : "—";
-      doc.text(`${program} (${dateStr})`, { continued: false });
-      doc.text(`Universidad del Rosario`, { continued: false });
-      const city = gp.cityId?.name || "—";
-      const country = gp.countryId?.name || "Colombia";
-      doc.text(`${city}, ${country}`, { continued: false });
-      doc.moveDown(0.3);
-    });
+    const program = gp.programId?.name || gp.programId?.code || "—";
+    const titulo = safeStr(gp.title) || "—";
+    const dateStr = gp.endDate ? formatDate(gp.endDate) : gp.dateObtained ? formatDate(gp.dateObtained) : "—";
+    const country = gp.countryId?.name || "—";
+    doc.text(`Programa: ${program}`, { continued: false });
+    doc.text(`Título formación académica: ${titulo}`, { continued: false });
+    doc.text(`Fecha de obtención de título: ${dateStr}`, { continued: false });
+    doc.text(`País: ${country}`, { continued: false });
+    doc.moveDown(0.4);
+  });
 }
 
 function sectionFormacionEnCursoOtras(doc, profileData, postulant) {
@@ -421,8 +417,20 @@ export async function buildHojaVidaPdf(postulant, profileData, parametrizacion) 
     doc.text(fullName, nameAreaX, y + 8, { align: "center", width: nameAreaWidth });
     doc.fontSize(HEADER_ROLE_FONT_SIZE).font("Helvetica").fillColor(COLOR_BODY);
     doc.text("Estudiante", nameAreaX, doc.y + 4, { align: "center", width: nameAreaWidth });
-    const headerBottom = logoBuffer ? y + LOGO_HEIGHT : doc.y + 14;
-    doc.y = Math.max(doc.y + 14, headerBottom);
+    const enCurso = (profileData?.enrolledPrograms || []).filter((ep) => ep.programFacultyId != null);
+    if (enCurso.length > 0) {
+      const progLine = enCurso
+        .map((ep) => safeStr(ep.programId?.name || ep.programId?.code))
+        .filter(Boolean)
+        .join(" · ");
+      if (progLine) {
+        doc.fontSize(9).font("Helvetica").fillColor(COLOR_SUBTLE);
+        doc.text(progLine, nameAreaX, doc.y + 6, { align: "center", width: nameAreaWidth, lineGap: 2 });
+      }
+    }
+    const afterHeaderText = doc.y;
+    const logoBottom = logoBuffer ? y + LOGO_HEIGHT : afterHeaderText;
+    doc.y = Math.max(afterHeaderText + 10, logoBottom);
     doc.moveDown(1.2);
 
     const contactIcons = loadContactIcons();

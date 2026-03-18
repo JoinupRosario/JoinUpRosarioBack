@@ -38,7 +38,12 @@ import { buildHojaVidaPdf } from "../../../services/hojaVidaPdf.service.js";
 import { buildCartaPresentacionPdf } from "../../../services/cartaPresentacionPdf.service.js";
 import { s3Config, uploadToS3, getObjectFromS3 } from "../../../config/s3.config.js";
 import mongoose from "mongoose";
-import { calculateFullCompleteness, recalcAndSaveProfileCompleteness } from "../services/profileCompleteness.service.js";
+import {
+  calculateFullCompleteness,
+  recalcAndSaveProfileCompleteness,
+  getMissingCompletenessLabels,
+  calculateListFallbackCompleteness,
+} from "../services/profileCompleteness.service.js";
 import { userHasPermission } from "../../access/presentation/helpers/checkPermission.js";
 
 /** Prefijo S3 para hojas de vida: hojas-vida/{postulantId}/{profileId}/archivo.pdf */
@@ -149,7 +154,7 @@ export const getPostulants = async (req, res) => {
       student_code: studentCodeByPostulantId.get(p._id.toString()) ?? null,
       estate_postulant: p.estatePostulant ?? null,
       full_profile: p.filled ?? false,
-      filling_percentage: p.fillingPercentage ?? calculateCompleteness(p),
+      filling_percentage: p.fillingPercentage ?? calculateListFallbackCompleteness(p),
       updatedAt: p.updatedAt,
       profileCount: countByPostulantId.get(p._id.toString()) ?? 0,
       maxProfilesAllowed: MAX_PROFILES_PER_POSTULANT,
@@ -224,7 +229,7 @@ export const createPostulant = async (req, res) => {
     };
 
     const postulant = new Postulant(postulantData);
-    postulant.fillingPercentage = calculateCompleteness(postulant);
+    postulant.fillingPercentage = calculateListFallbackCompleteness(postulant);
     await postulant.save();
 
     await postulant.populate("postulantId", "_id name email code");
@@ -301,7 +306,7 @@ export const getPostulantById = async (req, res) => {
       return res.status(404).json({ message: "Postulante no encontrado" });
     }
 
-    const fillingPercentage = postulant.fillingPercentage ?? calculateCompleteness(postulant);
+    const fillingPercentage = postulant.fillingPercentage ?? calculateListFallbackCompleteness(postulant);
     const user = postulant.postulantId
       ? { name: postulant.postulantId.name, email: postulant.postulantId.email, code: postulant.postulantId.code }
       : null;
@@ -633,11 +638,20 @@ export const aplicarInfoUniversitas = async (req, res) => {
       if (itemGender) updatePostulant.gender = itemGender._id;
     }
 
-    const postulantForCompleteness = await Postulant.findById(id).lean();
-    const merged = { ...postulantForCompleteness, ...updatePostulant };
-    updatePostulant.fillingPercentage = calculateCompleteness(merged);
-
     await Postulant.findByIdAndUpdate(id, { $set: updatePostulant }, { runValidators: true });
+
+    const userIdUni = postulantDoc.postulantId?._id || postulantDoc.postulantId;
+    const profUni = await PostulantProfile.findOne({
+      $or: [{ postulantId: id }, ...(userIdUni ? [{ postulantId: userIdUni }] : [])],
+    })
+      .select("_id")
+      .lean();
+    if (profUni) {
+      await recalcAndSaveProfileCompleteness(id, userIdUni, profUni._id);
+    } else {
+      const pAfter = await Postulant.findById(id).lean();
+      await Postulant.updateOne({ _id: id }, { fillingPercentage: calculateListFallbackCompleteness(pAfter) });
+    }
 
     const correoInstUni = normalizeStr(uni.correo_institucioinal);
     if (correoInstUni !== undefined) {
@@ -1308,6 +1322,7 @@ export const getPostulantProfileData = async (req, res) => {
     }
     if (!postulantProfile) {
       return res.json({
+        profileCompleteness: null,
         postulantProfile: null,
         enrolledPrograms: [],
         graduatePrograms: [],
@@ -1405,22 +1420,19 @@ export const getPostulantProfileData = async (req, res) => {
         ? await ProfileProgramExtraInfo.find({ enrolledProgramId: { $in: enrolledIds } }).lean()
         : [];
 
-    // Completitud solo con datos de ESTE perfil (cada perfil es independiente)
+    let profileCompleteness = null;
+    // Completitud: 8 datos personales visibles + código estudiante + áreas + competencias + idiomas
     try {
       const postulantFull = await Postulant.findById(postulantDocId)
-        .select("typeOfIdentification gender dateBirth phone address alternateEmail countryBirthId stateBirthId cityBirthId countryResidenceId stateResidenceId cityResidenceId")
+        .select("typeOfIdentification gender phone address countryBirthId countryResidenceId stateResidenceId cityResidenceId")
         .lean();
-      const fullPct = calculateFullCompleteness(postulantFull, postulantProfile, {
-        references,
-        interestAreas,
-        skills,
-        languages,
-        enrolledPrograms,
-        programExtraInfo: programExtraInfoFiltered,
-      });
+      const profileDataCalc = { interestAreas, skills, languages };
+      const fullPct = calculateFullCompleteness(postulantFull, postulantProfile, profileDataCalc);
+      const missingLabels =
+        fullPct === 100 ? [] : getMissingCompletenessLabels(postulantFull, postulantProfile, profileDataCalc);
+      profileCompleteness = { percentage: fullPct, missingLabels };
       await Postulant.updateOne({ _id: postulantDocId }, { fillingPercentage: fullPct });
 
-      // Persistir perfilCompleto en el perfil (para bloquear HV si está incompleto)
       const perfilCompleto = fullPct === 100;
       await PostulantProfile.updateOne({ _id: profileId }, { perfilCompleto });
       postulantProfile.perfilCompleto = perfilCompleto;
@@ -1429,6 +1441,7 @@ export const getPostulantProfileData = async (req, res) => {
     }
 
     res.json({
+      profileCompleteness,
       postulantProfile,
       selectedProfileVersion,
       enrolledPrograms,
@@ -1488,7 +1501,7 @@ export const generateHojaVidaPdf = async (req, res) => {
     if (!perfilCompleto) {
       const message = missingLabels?.length > 0
         ? `Faltan los siguientes campos por completar: ${missingLabels.join(", ")}`
-        : "El perfil no está completo. Complete los datos personales, áreas de interés, competencias, idiomas y al menos una referencia.";
+        : "El perfil no está completo. Complete los datos personales, áreas de interés, competencias e idiomas.";
       return res.status(400).json({ message, missing: missingLabels || [] });
     }
     // Datos solo del perfil seleccionado (cada perfil es independiente)
@@ -1644,42 +1657,46 @@ export const generateHojaVidaPdf = async (req, res) => {
 
 /**
  * Comprueba si el estudiante puede generar carta de presentación:
- * - Solo durante el periodo en que está autorizado para práctica (fechaAutorizacion del periodo activo).
- * - Debe estar en estudiantes_habilitados con estadoFinal "AUTORIZADO" para ese periodo.
- * Busca por postulant, user o identificacion (documento), por si el registro solo tiene identificacion.
+ * - Debe figurar en estudiantes_habilitados como AUTORIZADO para un periodo de práctica que esté Activo (ej. 2026-2).
+ * - No se usa fechaAutorizacion ni fechaSistemaAcademico para bloquear: si está habilitado en el periodo activo, puede generar carta.
+ * Busca por postulant, user o identificacion (documento).
  * @returns {{ allowed: boolean, message?: string }}
  */
 async function checkCanGenerateCartaPresentacion(postulantDocId, userId, identificacion) {
-  const now = new Date();
   const periodosActivos = await Periodo.find({
     tipo: "practica",
     estado: { $in: ["Activo", "activo"] },
   })
-    .select("_id fechaAutorizacion")
+    .select("_id")
     .lean();
-  const periodoIds = (periodosActivos || [])
-    .filter((p) => {
-      const ini = p.fechaAutorizacion?.inicio;
-      const fin = p.fechaAutorizacion?.fin;
-      if (ini == null && fin == null) return true;
-      if (ini != null && fin != null) return ini <= now && fin >= now;
-      if (ini != null && fin == null) return ini <= now;
-      if (ini == null && fin != null) return fin >= now;
-      return false;
-    })
-    .map((p) => p._id);
+  const periodoIds = (periodosActivos || []).map((p) => p._id);
+
   if (periodoIds.length === 0) {
     return {
       allowed: false,
       message:
-        "La generación de carta de presentación solo está habilitada durante los periodos de autorización para práctica. No hay un periodo activo en este momento.",
+        "No hay ningún periodo de prácticas académicas activo. Active el periodo correspondiente (ej. 2026-2) para habilitar la carta de presentación.",
     };
   }
   const orConditions = [];
   if (postulantDocId) orConditions.push({ postulant: postulantDocId });
   if (userId) orConditions.push({ user: userId });
-  const idDoc = identificacion != null && String(identificacion).trim() !== "" ? String(identificacion).trim() : null;
-  if (idDoc) orConditions.push({ identificacion: idDoc });
+  const idList = Array.isArray(identificacion)
+    ? identificacion
+    : identificacion != null && String(identificacion).trim() !== ""
+      ? [identificacion]
+      : [];
+  const idSeen = new Set();
+  for (const raw of idList) {
+    const idDoc = String(raw).trim().replace(/\s+/g, "");
+    if (!idDoc || idSeen.has(idDoc)) continue;
+    idSeen.add(idDoc);
+    orConditions.push({ identificacion: idDoc });
+    if (/^\d+$/.test(idDoc)) {
+      const n = String(Number(idDoc));
+      if (n !== idDoc) orConditions.push({ identificacion: n });
+    }
+  }
   if (orConditions.length === 0) {
     return {
       allowed: false,
@@ -1716,15 +1733,18 @@ export const canGenerateCartaPresentacion = async (req, res) => {
     let postulant = await Postulant.findById(id).select("_id postulantId").lean();
     if (!postulant) postulant = await Postulant.findOne({ postulantId: id }).select("_id postulantId").lean();
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
-    const postulantProfile = await PostulantProfile.findOne({ postulantId: postulant._id }).select("studentCode").lean();
-    const identificacion =
-      postulantProfile?.studentCode != null && String(postulantProfile.studentCode).trim() !== ""
-        ? String(postulantProfile.studentCode).trim()
-        : null;
+    const profileRows = await PostulantProfile.find({ postulantId: postulant._id }).select("studentCode").lean();
+    const identificaciones = [
+      ...new Set(
+        profileRows
+          .map((p) => (p.studentCode != null ? String(p.studentCode).trim() : ""))
+          .filter(Boolean)
+      ),
+    ];
     const result = await checkCanGenerateCartaPresentacion(
       postulant._id,
       postulant.postulantId ?? null,
-      identificacion
+      identificaciones.length ? identificaciones : null
     );
     return res.json({ allowed: result.allowed, message: result.message || null });
   } catch (error) {
@@ -1748,24 +1768,30 @@ export const generateCartaPresentacionPdf = async (req, res) => {
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
 
     const postulantDocId = postulant._id;
-    const postulantProfile = await PostulantProfile.findOne({ postulantId: postulantDocId })
-      .select("_id studentCode")
-      .lean();
-    if (!postulantProfile) return res.status(404).json({ message: "El postulante no tiene perfil. Debe crear al menos un perfil." });
-
-    const identificacion =
-      postulantProfile.studentCode != null && String(postulantProfile.studentCode).trim() !== ""
-        ? String(postulantProfile.studentCode).trim()
-        : null;
+    const profileRows = await PostulantProfile.find({ postulantId: postulantDocId }).select("_id studentCode").lean();
+    if (!profileRows.length) {
+      return res.status(404).json({ message: "El postulante no tiene perfil. Debe crear al menos un perfil." });
+    }
+    const identificaciones = [
+      ...new Set(
+        profileRows.map((p) => (p.studentCode != null ? String(p.studentCode).trim() : "")).filter(Boolean)
+      ),
+    ];
     const check = await checkCanGenerateCartaPresentacion(
       postulant._id,
       postulant.postulantId ?? null,
-      identificacion
+      identificaciones.length ? identificaciones : null
     );
     if (!check.allowed) {
       return res.status(403).json({ message: check.message || "No está habilitado para generar carta de presentación." });
     }
 
+    const postulantProfile =
+      profileRows.find((p) => p.studentCode != null && String(p.studentCode).trim() !== "") || profileRows[0];
+    const identificacion =
+      postulantProfile.studentCode != null && String(postulantProfile.studentCode).trim() !== ""
+        ? String(postulantProfile.studentCode).trim()
+        : null;
     if (!identificacion) {
       return res.status(400).json({ message: "El perfil del postulante debe tener studentCode (cédula) para actualizar la información académica y generar la carta." });
     }
@@ -2066,7 +2092,7 @@ export const updatePostulant = async (req, res) => {
     if (req.body.full_profile !== undefined) {
       postulant.filled = req.body.full_profile === true || req.body.full_profile === "true";
     }
-    // fillingPercentage se actualiza en getPostulantProfileData (completitud completa 21 ítems)
+    // fillingPercentage se actualiza al cargar profile-data (12 ítems visibles + HV)
     await postulant.save();
 
     if (req.body.acept_terms !== undefined) {
@@ -2133,7 +2159,7 @@ function resolveDepartmentDisplay(stateDoc, cityDoc) {
 
 function formatPostulantProfileResponse(p) {
   if (!p) return null;
-  const fillingPercentage = p.fillingPercentage ?? calculateCompleteness(p);
+  const fillingPercentage = p.fillingPercentage ?? calculateListFallbackCompleteness(p);
   const user = p.postulantId
     ? { name: p.postulantId.name, email: p.postulantId.email, code: p.postulantId.code, estado: p.postulantId.estado }
     : null;
@@ -2170,30 +2196,6 @@ function formatPostulantProfileResponse(p) {
     website_url: p.personalWebsite ?? null,
     acept_terms: false, // Sobrescrito en getPostulantById desde PostulantProfile.acceptTerms
   };
-}
-
-/**
- * Calcula el porcentaje de completitud del perfil del postulante (0-100)
- * según datos básicos del documento Postulant (solo 13 campos).
- */
-function calculateCompleteness(postulant) {
-  const fields = [
-    postulant.postulantId,
-    postulant.typeOfIdentification,
-    postulant.gender,
-    postulant.dateBirth,
-    postulant.phone,
-    postulant.address,
-    postulant.alternateEmail,
-    postulant.countryBirthId,
-    postulant.stateBirthId,
-    postulant.cityBirthId,
-    postulant.countryResidenceId,
-    postulant.stateResidenceId,
-    postulant.cityResidenceId,
-  ];
-  const completed = fields.filter(Boolean).length;
-  return Math.min(100, Math.round((completed / fields.length) * 100));
 }
 
 export const uploadProfilePicture = async (req, res) => {

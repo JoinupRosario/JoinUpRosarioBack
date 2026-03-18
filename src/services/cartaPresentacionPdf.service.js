@@ -164,7 +164,7 @@ function drawMixedText(doc, text, phrasesToBold, textOpts) {
       continued: i < segments.length - 1,
       width: textOpts.width ?? TEXT_WIDTH,
       lineGap: textOpts.lineGap ?? LINE_GAP,
-      align: textOpts.align ?? "left",
+      align: textOpts.align ?? "justify",
     });
   }
 }
@@ -422,7 +422,7 @@ export async function buildCartaPresentacionPdf(postulant, profileData, parametr
 
     doc.x = MARGIN;
     doc.y = y;
-    const textOpts = { width: TEXT_WIDTH, lineGap: LINE_GAP, align: "left", fontSize: FONT_SIZE_BODY, fillColor: COLOR_BODY };
+    const textOpts = { width: TEXT_WIDTH, lineGap: LINE_GAP, align: "justify", fontSize: FONT_SIZE_BODY, fillColor: COLOR_BODY };
     const phrasesToBold = [cartaData.NOMBRE_COMPLETO, cartaData.NUMERO_DOCUMENTO, cartaData.NOMBRE_PROGRAMA].filter(
       (p) => p != null && String(p).trim() !== "" && String(p) !== "—"
     );

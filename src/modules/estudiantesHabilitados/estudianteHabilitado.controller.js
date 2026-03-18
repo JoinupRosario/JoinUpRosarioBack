@@ -72,14 +72,34 @@ export const getEstudiantesHabilitados = async (req, res) => {
     const [total, data] = await Promise.all([
       EstudianteHabilitado.countDocuments(filter),
       EstudianteHabilitado.find(filter)
-        .populate("postulant", "alternateEmail")
+        .populate("postulant", "_id alternateEmail")
         .populate("user", "name email code")
         .populate("periodo", "codigo tipo")
         .populate("tipoPractica", "value")
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(parseInt(limit)),
+        .limit(parseInt(limit))
+        .lean(),
     ]);
+
+    const userIdsNeedPostulant = [];
+    for (const row of data) {
+      const pid = row.postulant?._id;
+      if (pid) row.perfilPostulanteId = pid;
+      else if (row.user?._id) userIdsNeedPostulant.push(row.user._id);
+    }
+    if (userIdsNeedPostulant.length) {
+      const postulants = await Postulant.find({ postulantId: { $in: userIdsNeedPostulant } })
+        .select("_id postulantId")
+        .lean();
+      const byUser = new Map(postulants.map((p) => [String(p.postulantId), p._id]));
+      for (const row of data) {
+        if (!row.perfilPostulanteId && row.user?._id) {
+          const found = byUser.get(String(row.user._id));
+          if (found) row.perfilPostulanteId = found;
+        }
+      }
+    }
 
     res.json({
       data,
