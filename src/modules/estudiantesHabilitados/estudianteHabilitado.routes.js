@@ -2,6 +2,7 @@ import express from "express";
 import {
   getMeAutorizado,
   getEstudiantesHabilitados,
+  getHistorialEstados,
   previewCargueUxxi,
   confirmarCargueUxxi,
   crearUsuariosBD,
@@ -19,6 +20,7 @@ router.get("/me-autorizado", getMeAutorizado);
 
 // AMPR = Acceso módulo prácticas; BUSP = Buscar estudiantes; CEST = Cargar estudiantes
 router.get("/", requirePermission("AMPR", "BUSP"), getEstudiantesHabilitados);
+router.get("/historial-estados", requirePermission("AMPR", "BUSP"), getHistorialEstados);
 router.patch(
   "/:id/estado-final",
   requirePermission("AMPR", "BUSP"),

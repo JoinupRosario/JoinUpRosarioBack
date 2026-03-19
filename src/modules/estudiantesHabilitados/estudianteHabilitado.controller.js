@@ -1,5 +1,6 @@
 import bcrypt                from "bcryptjs";
 import EstudianteHabilitado from "./estudianteHabilitado.model.js";
+import EstudianteHabilitadoEstadoLog from "./estudianteHabilitadoEstadoLog.model.js";
 import CondicionCurricular   from "../condicionesCurriculares/condicionCurricular.model.js";
 import User                  from "../users/user.model.js";
 import Postulant             from "../postulants/models/postulants.schema.js";
@@ -359,7 +360,13 @@ export const confirmarCargueUxxi = async (req, res) => {
     return res.status(400).json({ message: "No hay estudiantes para guardar" });
   }
 
-  const cargadoPor = req.user?.email || "sistema";
+  let cargadoPor = req.user?.email || req.user?.name;
+  if (!cargadoPor && req.user?.id) {
+    const userDoc = await User.findById(req.user.id).select("email name").lean();
+    cargadoPor = userDoc?.email || userDoc?.name || null;
+  }
+  cargadoPor = cargadoPor || "sistema";
+
   let guardados = 0;
   let actualizados = 0;
   const errores = [];
@@ -405,8 +412,16 @@ export const confirmarCargueUxxi = async (req, res) => {
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
 
-      if (doc.createdAt?.getTime() === doc.updatedAt?.getTime()) {
+      const esNuevo = doc.createdAt?.getTime() === doc.updatedAt?.getTime();
+      if (esNuevo) {
         guardados++;
+        await EstudianteHabilitadoEstadoLog.create({
+          estudianteHabilitado: doc._id,
+          estadoAnterior: null,
+          estadoNuevo: doc.estadoFinal,
+          tipo: "cargue",
+          cambiadoPor: cargadoPor,
+        });
       } else {
         actualizados++;
       }
@@ -621,16 +636,67 @@ export const patchEstadoFinalEstudianteHabilitado = async (req, res) => {
         message: "estadoFinal debe ser AUTORIZADO, NO_AUTORIZADO o EN_REVISION",
       });
     }
+    const anterior = await EstudianteHabilitado.findById(id).select("estadoFinal").lean();
+    if (!anterior) {
+      return res.status(404).json({ message: "Registro no encontrado" });
+    }
     const doc = await EstudianteHabilitado.findByIdAndUpdate(
       id,
       { $set: { estadoFinal } },
       { new: true }
     ).lean();
-    if (!doc) {
-      return res.status(404).json({ message: "Registro no encontrado" });
+
+    let cambiadoPor = req.user?.email || req.user?.name;
+    if (!cambiadoPor && req.user?.id) {
+      const userDoc = await User.findById(req.user.id).select("email name").lean();
+      cambiadoPor = userDoc?.email || userDoc?.name || null;
     }
+    cambiadoPor = cambiadoPor || "sistema";
+
+    await EstudianteHabilitadoEstadoLog.create({
+      estudianteHabilitado: doc._id,
+      estadoAnterior: anterior.estadoFinal || null,
+      estadoNuevo: estadoFinal,
+      tipo: "cambio_manual",
+      cambiadoPor,
+    });
     res.json({ message: "Estado final actualizado", data: doc });
   } catch (e) {
     res.status(500).json({ message: "Error actualizando estado final", error: e.message });
+  }
+};
+
+/**
+ * GET /estudiantes-habilitados/historial-estados
+ * Query: estudianteHabilitadoId (opcional), identificacion (opcional), periodo (opcional), limit (default 200)
+ */
+export const getHistorialEstados = async (req, res) => {
+  try {
+    const { estudianteHabilitadoId, identificacion, periodo, limit = 200 } = req.query;
+    const filter = {};
+    if (estudianteHabilitadoId) filter.estudianteHabilitado = estudianteHabilitadoId;
+
+    let logDocs = await EstudianteHabilitadoEstadoLog.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(Math.min(parseInt(limit, 10) || 200, 500))
+      .populate("estudianteHabilitado", "identificacion nombres apellidos codigoPrograma nombrePrograma codigoPeriodo")
+      .lean();
+
+    if (identificacion && logDocs.length > 0) {
+      const idTrim = String(identificacion).trim();
+      logDocs = logDocs.filter(
+        (l) => l.estudianteHabilitado && String(l.estudianteHabilitado.identificacion) === idTrim
+      );
+    }
+    if (periodo && logDocs.length > 0) {
+      const periodoStr = String(periodo).trim();
+      logDocs = logDocs.filter(
+        (l) => l.estudianteHabilitado && String(l.estudianteHabilitado.codigoPeriodo || l.estudianteHabilitado.periodo) === periodoStr
+      );
+    }
+
+    res.json({ data: logDocs });
+  } catch (e) {
+    res.status(500).json({ message: "Error al obtener historial", error: e.message });
   }
 };
