@@ -436,9 +436,10 @@ function mapSexoUxxiToOurs(uxxiCode) {
 }
 
 /**
- * Compara datos del postulante (BD) con datos de Universitas. currentAcademicUser = academicUser del PostulantProfile.
+ * Compara datos del postulante (BD) con datos de Universitas.
+ * currentAcademicUser = academicUser del PostulantProfile; currentUserEmail = email del User (lo que se muestra en Datos básicos).
  */
-function comparePostulantWithUniversitas(postulant, uni, currentAcademicUser = "") {
+function comparePostulantWithUniversitas(postulant, uni, currentAcademicUser = "", currentUserEmail = "") {
   const changes = [];
   const nombreCompletoUni = [uni.nombre, uni.primer_apellido, uni.segundo_apellido].filter(Boolean).join(" ").trim();
   const currentNombre = normalizeStr(postulant.postulantId?.name);
@@ -478,9 +479,15 @@ function comparePostulantWithUniversitas(postulant, uni, currentAcademicUser = "
     changes.push({ label: UNIVERSITAS_FIELD_LABELS.correo_personal, valorActual: currentAlternate || "—", valorNuevo: correoPersonalUni });
   }
   const correoInstUni = normalizeStr(uni.correo_institucioinal);
+  const currentUserEmailNorm = normalizeStr(currentUserEmail);
   const currentAcademic = normalizeStr(currentAcademicUser);
-  if (correoInstUni !== currentAcademic) {
-    changes.push({ label: UNIVERSITAS_FIELD_LABELS.correo_institucional, valorActual: currentAcademic || "—", valorNuevo: correoInstUni });
+  // Mostrar cambio si el correo institucional de UXXI difiere del User (Datos básicos) o del perfil (academicUser)
+  if (correoInstUni && (correoInstUni !== currentUserEmailNorm || correoInstUni !== currentAcademic)) {
+    changes.push({
+      label: UNIVERSITAS_FIELD_LABELS.correo_institucional,
+      valorActual: currentUserEmailNorm || currentAcademic || "—",
+      valorNuevo: correoInstUni,
+    });
   }
   return changes;
 }
@@ -528,7 +535,8 @@ export const consultaInfEstudianteUniversitas = async (req, res) => {
     if (!universitasData) return res.status(404).json({ message: "No se encontró información del estudiante en Universitas." });
     const profile = await PostulantProfile.findOne({ postulantId: id }).select("academicUser").lean();
     const currentAcademicUser = profile?.academicUser ?? "";
-    const changes = comparePostulantWithUniversitas(postulant, universitasData, currentAcademicUser);
+    const currentUserEmail = postulant.postulantId?.email ?? "";
+    const changes = comparePostulantWithUniversitas(postulant, universitasData, currentAcademicUser, currentUserEmail);
     res.json({ changes, universitasData });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -609,12 +617,19 @@ export const aplicarInfoUniversitas = async (req, res) => {
 
     const uni = universitasData;
     const userId = postulantDoc.postulantId?._id;
+    const correoInstUni = normalizeStr(uni.correo_institucioinal);
+    if (correoInstUni && !isAllowedPostulantEmail(correoInstUni)) {
+      return res.status(400).json({
+        message: `El correo institucional debe ser del dominio ${ALLOWED_EMAIL_DOMAIN}. No se aplicó el cambio.`,
+      });
+    }
     if (userId) {
       const nameUni = [uni.nombre, uni.primer_apellido, uni.segundo_apellido].filter(Boolean).join(" ").trim();
-      const emailUni = normalizeStr(uni.correo_personal);
+      // En User se guarda el correo institucional (es el que se muestra en Datos básicos); si no viene, se usa el personal como respaldo
+      const emailParaUser = correoInstUni || normalizeStr(uni.correo_personal);
       const updateUser = {};
       if (nameUni) updateUser.name = nameUni;
-      if (emailUni && isAllowedPostulantEmail(emailUni)) updateUser.email = emailUni;
+      if (emailParaUser && isAllowedPostulantEmail(emailParaUser)) updateUser.email = emailParaUser;
       if (Object.keys(updateUser).length) await User.findByIdAndUpdate(userId, updateUser);
     }
 
@@ -653,13 +668,7 @@ export const aplicarInfoUniversitas = async (req, res) => {
       await Postulant.updateOne({ _id: id }, { fillingPercentage: calculateListFallbackCompleteness(pAfter) });
     }
 
-    const correoInstUni = normalizeStr(uni.correo_institucioinal);
     if (correoInstUni !== undefined) {
-      if (!isAllowedPostulantEmail(correoInstUni)) {
-        return res.status(400).json({
-          message: `El correo institucional debe ser del dominio ${ALLOWED_EMAIL_DOMAIN}. No se aplicó el cambio.`,
-        });
-      }
       await PostulantProfile.updateMany({ postulantId: id }, { $set: { academicUser: correoInstUni || null } });
     }
     const updated = await Postulant.findById(id)

@@ -119,28 +119,31 @@ function drawContactIcon(doc, iconBuffer, x, y) {
 function sectionDatosBasicos(doc, profileData, postulant, options = {}) {
   const contactIcons = options.contactIcons || {};
   const user = postulant?.postulantId || postulant?.user;
-  const email = user?.email || postulant?.alternateEmail || "—";
-  const phone = postulant?.phone || "—";
-  const linkedin = postulant?.linkedinLink || postulant?.personalWebsite || "—";
+  // Correo institucional del perfil (academicUser); respaldo: user.email, luego alternateEmail
+  const email = safeStr(profileData?.postulantProfile?.academicUser || user?.email || postulant?.alternateEmail || "");
+  const phone = safeStr(postulant?.phone || "");
+  const linkedin = safeStr(postulant?.linkedinLink || postulant?.personalWebsite || "");
+  const has = (s) => s && s !== "—";
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica").fillColor(COLOR_BODY);
   const contentWidth = PAGE_WIDTH - 2 * MARGIN;
   const slotWidth = contentWidth / 3;
   const row1Items = [
-    { icon: "phone", text: safeStr(phone) },
-    { icon: "mobile", text: safeStr(phone) },
-    { icon: "email", text: safeStr(email) },
-  ];
-  const row2Items = [{ icon: "linkedin", text: safeStr(linkedin) }];
+    has(phone) && { icon: "phone", text: phone },
+    has(phone) && { icon: "mobile", text: phone },
+    has(email) && { icon: "email", text: email },
+  ].filter(Boolean);
+  const row2Items = has(linkedin) ? [{ icon: "linkedin", text: linkedin }] : [];
   const lineHeight = 20;
   const rowGap = 10;
 
   function drawRow(items, slotIndices) {
+    if (items.length === 0) return;
     const baseY = doc.y;
     const textMaxWidth = slotWidth - ICON_SIZE - ICON_GAP - 8;
-    // Alinea verticalmente el ícono con el texto (centrado respecto a font size ~10)
     const iconOffsetY = Math.round((BODY_FONT_SIZE - ICON_SIZE) / 2);
     slotIndices.forEach((slotIndex, i) => {
       const item = items[i];
+      if (!item) return;
       const slotLeft = MARGIN + slotIndex * slotWidth;
       const iconX = slotLeft;
       const textX = slotLeft + ICON_SIZE + ICON_GAP;
@@ -150,9 +153,15 @@ function sectionDatosBasicos(doc, profileData, postulant, options = {}) {
     doc.y = baseY + lineHeight;
   }
 
-  drawRow(row1Items, [0, 1, 2]);
-  doc.y += rowGap;
-  drawRow(row2Items, [0]);
+  if (row1Items.length > 0) {
+    drawRow(row1Items, row1Items.map((_, i) => i));
+    if (row2Items.length > 0) {
+      doc.y += rowGap;
+      drawRow(row2Items, [0]);
+    }
+  } else if (row2Items.length > 0) {
+    drawRow(row2Items, [0]);
+  }
 }
 
 function sectionCedula(doc, profileData, postulant) {
@@ -184,9 +193,9 @@ function sectionFormacionRosarioEnCurso(doc, profileData, postulant) {
       const sem = extra?.accordingCreditSemester != null ? `${extra.accordingCreditSemester} semestre` : "—";
       doc.text(`${program} - ${sem}`, { continued: false });
       doc.text(`Universidad del Rosario`, { continued: false });
-      const city = ep.cityId?.name || "—";
+      const city = safeStr(ep.cityId?.name || "");
       const country = ep.countryId?.name || "Colombia";
-      doc.text(`${city}, ${country}`, { continued: false });
+      doc.text(city ? `${city}, ${country}` : country, { continued: false });
       doc.moveDown(0.3);
     });
 }
