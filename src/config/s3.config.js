@@ -107,9 +107,10 @@ export async function getObjectFromS3(key) {
  * Requiere: npm install @aws-sdk/s3-request-presigner
  * @param {string} key - Ruta del objeto en el bucket
  * @param {number} expiresIn - Segundos hasta que expire la URL (default 3600)
+ * @param {object} options - { responseContentDisposition?: string, responseContentType?: string }
  * @returns {Promise<string>}
  */
-export async function getSignedDownloadUrl(key, expiresIn = 3600) {
+export async function getSignedDownloadUrl(key, expiresIn = 3600, options = {}) {
   const client = getS3Client();
   if (!client) {
     throw new Error("S3 no está configurado");
@@ -118,6 +119,10 @@ export async function getSignedDownloadUrl(key, expiresIn = 3600) {
   const command = new GetObjectCommand({
     Bucket: s3Config.bucket,
     Key: key,
+    ...(options.responseContentDisposition
+      ? { ResponseContentDisposition: options.responseContentDisposition }
+      : {}),
+    ...(options.responseContentType ? { ResponseContentType: options.responseContentType } : {}),
   });
   return getSignedUrl(client, command, { expiresIn });
 }

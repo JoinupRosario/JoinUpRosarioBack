@@ -1,16 +1,14 @@
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 import mongoose from "mongoose";
 import { v4 as uuidv4 } from "uuid";
-import DocumentPracticeDefinition from "./documentPracticeDefinition.model.js";
+import DocumentMonitoringDefinition from "./documentMonitoringDefinition.model.js";
 import Item from "../shared/reference-data/models/item.schema.js";
 import Attachment from "../shared/attachment/attachment.schema.js";
 import { s3Config, uploadToS3, deleteFromS3, getSignedDownloadUrl } from "../../config/s3.config.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const UPLOAD_SUBDIR = "document-practice-definitions";
-const S3_PREFIX = (process.env.DOC_PRACT_DEF_S3_PREFIX || "legalizacion-practica-def").replace(/\/$/, "");
+const UPLOAD_SUBDIR = "document-monitoring-definitions";
+const S3_PREFIX = (process.env.DOC_MON_DEF_S3_PREFIX || "legalizacion-monitoria-def").replace(/\/$/, "");
 
 function absUploadPath(storedPath) {
   if (!storedPath || typeof storedPath !== "string") return null;
@@ -88,7 +86,10 @@ function parseIds(raw) {
   }
 }
 
-const EXTENSIONS_LIST_ID = process.env.DOC_PRACT_DEF_EXTENSIONS_LIST_ID || "L_EXTENSIONS";
+const EXTENSIONS_LIST_ID =
+  process.env.DOC_MON_DEF_EXTENSIONS_LIST_ID || process.env.DOC_PRACT_DEF_EXTENSIONS_LIST_ID || "L_EXTENSIONS";
+const DOCUMENT_TYPE_LIST_ID =
+  process.env.DOC_MON_DEF_DOCUMENT_TYPE_LIST_ID || process.env.DOC_PRACT_DEF_DOCUMENT_TYPE_LIST_ID || "L_DOCUMENT_TYPE";
 
 function valueToExtensionCode(v) {
   const s = String(v ?? "")
@@ -116,24 +117,14 @@ async function resolveExtensionItems(extItemIds) {
 
 const populateList = [
   { path: "documentTypeItem", select: "value description listId mysqlId" },
-  { path: "practiceTypeItem", select: "value description listId mysqlId" },
   { path: "extensionItems", select: "value description listId mysqlId" },
-  {
-    path: "programFaculties",
-    select: "code mysqlId programId facultyId",
-    populate: [
-      { path: "programId", select: "name code" },
-      { path: "facultyId", select: "name code" },
-    ],
-  },
 ];
 
 export async function getMeta(req, res) {
   try {
     res.json({
       success: true,
-      practiceTypeListId: process.env.DOC_PRACT_DEF_PRACTICE_LIST_ID || "L_PRACTICE_TYPE",
-      documentTypeListId: process.env.DOC_PRACT_DEF_DOCUMENT_TYPE_LIST_ID || "L_DOCUMENT_TYPE",
+      documentTypeListId: DOCUMENT_TYPE_LIST_ID,
       extensionsListId: EXTENSIONS_LIST_ID,
     });
   } catch (e) {
@@ -145,6 +136,7 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Paginación y término de búsqueda solo desde query; límites acotados en servidor. */
 function parseListQuery(query) {
   const page = Math.max(1, parseInt(String(query.page ?? "1"), 10) || 1);
   const limitRaw = parseInt(String(query.limit ?? "15"), 10);
@@ -153,34 +145,34 @@ function parseListQuery(query) {
   return { page, limit, search };
 }
 
-/**
- * Búsqueda en servidor: nombre, observaciones, extensiones guardadas,
- * y coincidencia con ítems de tipo de documento, tipo de práctica y L_EXTENSIONS.
- */
-async function buildPracticeListFilter(search, practiceListId, documentTypeListId, extensionsListId) {
+async function buildMonitoringListFilter(search) {
   if (!search) return {};
   const rx = new RegExp(escapeRegex(search), "i");
   const or = [{ documentName: rx }, { documentObservation: rx }, { extensionCodes: rx }];
 
-  const items = await Item.find({
-    listId: { $in: [documentTypeListId, practiceListId, extensionsListId] },
-    $or: [{ value: rx }, { description: rx }],
-  })
-    .select("_id listId")
-    .lean();
+  const [docTypeItems, extItems] = await Promise.all([
+    Item.find({
+      listId: DOCUMENT_TYPE_LIST_ID,
+      $or: [{ value: rx }, { description: rx }],
+    })
+      .select("_id")
+      .lean(),
+    Item.find({
+      listId: EXTENSIONS_LIST_ID,
+      $or: [{ value: rx }, { description: rx }],
+    })
+      .select("_id")
+      .lean(),
+  ]);
 
-  const docTypeMatched = items.filter((i) => String(i.listId) === String(documentTypeListId)).map((i) => i._id);
-  const practiceMatched = items.filter((i) => String(i.listId) === String(practiceListId)).map((i) => i._id);
-  const extensionMatched = items.filter((i) => String(i.listId) === String(extensionsListId)).map((i) => i._id);
-
-  if (docTypeMatched.length) or.push({ documentTypeItem: { $in: docTypeMatched } });
-  if (practiceMatched.length) or.push({ practiceTypeItem: { $in: practiceMatched } });
-  if (extensionMatched.length) or.push({ extensionItems: { $in: extensionMatched } });
+  const dtIds = docTypeItems.map((i) => i._id);
+  if (dtIds.length) or.push({ documentTypeItem: { $in: dtIds } });
+  const exIds = extItems.map((i) => i._id);
+  if (exIds.length) or.push({ extensionItems: { $in: exIds } });
 
   return { $or: or };
 }
 
-/** Adjunto en S3 guardado pero definición sin templateFile/modelFile (fallo previo al guardar). */
 async function enrichOrphanS3FileRefs(doc) {
   if (!doc?._id || !s3Config.isConfigured) return;
   const docId = String(doc._id);
@@ -202,7 +194,7 @@ async function enrichOrphanS3FileRefs(doc) {
         attachmentMysqlId: null,
         attachmentId: att._id,
       };
-      await DocumentPracticeDefinition.updateOne(
+      await DocumentMonitoringDefinition.updateOne(
         { _id: doc._id },
         { $set: { templateFile: doc.templateFile } }
       ).catch(() => {});
@@ -225,15 +217,14 @@ async function enrichOrphanS3FileRefs(doc) {
         attachmentMysqlId: null,
         attachmentId: att._id,
       };
-      await DocumentPracticeDefinition.updateOne({ _id: doc._id }, { $set: { modelFile: doc.modelFile } }).catch(
+      await DocumentMonitoringDefinition.updateOne({ _id: doc._id }, { $set: { modelFile: doc.modelFile } }).catch(
         () => {}
       );
     }
   }
 }
 
-/** Completa attachmentId y nombre desde Attachment por mysqlId (migración / datos sueltos). */
-async function enrichPracticeDefFiles(doc) {
+async function enrichMonitoringDefFiles(doc) {
   if (!doc || typeof doc !== "object") return doc;
   const fix = async (ref) => {
     if (!ref || typeof ref !== "object") return ref;
@@ -254,26 +245,22 @@ async function enrichPracticeDefFiles(doc) {
   return doc;
 }
 
-export async function listDocumentPracticeDefinitions(req, res) {
+export async function listDocumentMonitoringDefinitions(req, res) {
   try {
     const { page: pageReq, limit, search } = parseListQuery(req.query);
-    const practiceListId = process.env.DOC_PRACT_DEF_PRACTICE_LIST_ID || "L_PRACTICE_TYPE";
-    const documentTypeListId = process.env.DOC_PRACT_DEF_DOCUMENT_TYPE_LIST_ID || "L_DOCUMENT_TYPE";
-    const extensionsListId = EXTENSIONS_LIST_ID;
+    const filter = await buildMonitoringListFilter(search);
 
-    const filter = await buildPracticeListFilter(search, practiceListId, documentTypeListId, extensionsListId);
-
-    const total = await DocumentPracticeDefinition.countDocuments(filter);
+    const total = await DocumentMonitoringDefinition.countDocuments(filter);
     const totalPages = Math.max(1, Math.ceil(total / limit));
     const safePage = Math.min(pageReq, totalPages);
 
-    const docs = await DocumentPracticeDefinition.find(filter)
+    const docs = await DocumentMonitoringDefinition.find(filter)
       .populate(populateList)
       .sort({ documentOrder: 1, documentName: 1 })
       .skip((safePage - 1) * limit)
       .limit(limit)
       .lean();
-    await Promise.all(docs.map((d) => enrichPracticeDefFiles(d)));
+    await Promise.all(docs.map((d) => enrichMonitoringDefFiles(d)));
     res.json({
       success: true,
       data: docs,
@@ -290,11 +277,11 @@ export async function listDocumentPracticeDefinitions(req, res) {
   }
 }
 
-export async function getDocumentPracticeDefinitionById(req, res) {
+export async function getDocumentMonitoringDefinitionById(req, res) {
   try {
-    const doc = await DocumentPracticeDefinition.findById(req.params.id).populate(populateList).lean();
+    const doc = await DocumentMonitoringDefinition.findById(req.params.id).populate(populateList).lean();
     if (!doc) return res.status(404).json({ success: false, message: "No encontrado" });
-    await enrichPracticeDefFiles(doc);
+    await enrichMonitoringDefFiles(doc);
     res.json({ success: true, data: doc });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
@@ -311,7 +298,7 @@ function isLikelyLocalFilesystemPath(fp) {
   return false;
 }
 
-async function resolvePracticeDefAttachment(ref) {
+async function resolveMonitoringDefAttachment(ref) {
   if (!ref) return null;
   const has =
     ref.attachmentId ||
@@ -330,7 +317,7 @@ async function resolvePracticeDefAttachment(ref) {
   return null;
 }
 
-async function removePracticeDefFileStorage(ref) {
+async function removeMonitoringDefFileStorage(ref) {
   if (!ref) return;
   if (ref.attachmentId) {
     const att = await Attachment.findById(ref.attachmentId);
@@ -349,11 +336,7 @@ async function removePracticeDefFileStorage(ref) {
   if (ref.storedPath) safeUnlink(ref.storedPath);
 }
 
-/**
- * Sube a S3 + Attachment, o guarda en disco local si S3 no está configurado.
- * Soporta multer memoryStorage (buffer) o disco (path).
- */
-async function savePracticeDefFile(file, docMongoId, role) {
+async function saveMonitoringDefFile(file, docMongoId, role) {
   if (!file) return null;
   const originalName = String(file.originalname || file.filename || "archivo").slice(0, 500);
   const ext = path.extname(originalName) || ".bin";
@@ -416,7 +399,7 @@ async function savePracticeDefFile(file, docMongoId, role) {
 }
 
 async function resolveFileAccess(ref) {
-  const resolved = await resolvePracticeDefAttachment(ref);
+  const resolved = await resolveMonitoringDefAttachment(ref);
   if (!resolved) return null;
   const { attachment: att, ref: r } = resolved;
 
@@ -467,27 +450,15 @@ async function resolveFileAccess(ref) {
   return null;
 }
 
-export async function createDocumentPracticeDefinition(req, res) {
+export async function createDocumentMonitoringDefinition(req, res) {
   try {
-    const {
-      documentTypeItemId,
-      practiceTypeItemId,
-      documentName,
-      documentObservation,
-      documentOrder,
-      programFacultyIds,
-    } = req.body;
+    const { documentTypeItemId, documentName, documentObservation, documentOrder } = req.body;
 
-    if (!documentTypeItemId || !practiceTypeItemId || !documentName) {
+    if (!documentTypeItemId || !documentName) {
       return res.status(400).json({
         success: false,
-        message: "Tipo de documento, tipo de práctica y nombre son obligatorios.",
+        message: "Tipo de documento y nombre son obligatorios.",
       });
-    }
-
-    const pfIds = parseIds(programFacultyIds);
-    if (pfIds.length === 0) {
-      return res.status(400).json({ success: false, message: "Debe asociar al menos un programa." });
     }
 
     const extIds = parseIds(req.body.extensionItemIds);
@@ -514,51 +485,38 @@ export async function createDocumentPracticeDefinition(req, res) {
     const newId = new mongoose.Types.ObjectId();
     const tpl = req.files?.plantilla?.[0] || req.files?.template?.[0];
     const mod = req.files?.modelo?.[0] || req.files?.model?.[0];
-    let templateFile = tpl ? await savePracticeDefFile(tpl, newId, "plantilla") : null;
-    let modelFile = mod ? await savePracticeDefFile(mod, newId, "modelo") : null;
+    let templateFile = tpl ? await saveMonitoringDefFile(tpl, newId, "plantilla") : null;
+    let modelFile = mod ? await saveMonitoringDefFile(mod, newId, "modelo") : null;
 
-    const doc = await DocumentPracticeDefinition.create({
+    const doc = await DocumentMonitoringDefinition.create({
       _id: newId,
       documentTypeItem: documentTypeItemId,
-      practiceTypeItem: practiceTypeItemId,
       documentName: String(documentName).trim(),
       documentObservation: String(documentObservation || "").slice(0, 500),
       documentMandatory: parseBool(req.body.documentMandatory),
       documentOrder: Number.isFinite(order) ? order : 0,
-      functionalLetter: parseBool(req.body.functionalLetter),
       showFormTracing: parseBool(req.body.showFormTracing),
-      bindingAgreement: parseBool(req.body.bindingAgreement),
-      requiresAdditionalApproval: parseBool(req.body.requiresAdditionalApproval),
-      programFaculties: pfIds,
       extensionItems,
       extensionCodes: ext,
       templateFile,
       modelFile,
     });
 
-    const populated = await DocumentPracticeDefinition.findById(doc._id).populate(populateList).lean();
+    const populated = await DocumentMonitoringDefinition.findById(doc._id).populate(populateList).lean();
     res.status(201).json({ success: true, data: populated });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }
 }
 
-export async function updateDocumentPracticeDefinition(req, res) {
+export async function updateDocumentMonitoringDefinition(req, res) {
   try {
-    const doc = await DocumentPracticeDefinition.findById(req.params.id);
+    const doc = await DocumentMonitoringDefinition.findById(req.params.id);
     if (!doc) return res.status(404).json({ success: false, message: "No encontrado" });
 
-    const {
-      documentTypeItemId,
-      practiceTypeItemId,
-      documentName,
-      documentObservation,
-      documentOrder,
-      programFacultyIds,
-    } = req.body;
+    const { documentTypeItemId, documentName, documentObservation, documentOrder } = req.body;
 
     if (documentTypeItemId) doc.documentTypeItem = documentTypeItemId;
-    if (practiceTypeItemId) doc.practiceTypeItem = practiceTypeItemId;
     if (documentName != null) doc.documentName = String(documentName).trim();
     if (documentObservation != null) doc.documentObservation = String(documentObservation).slice(0, 500);
     if (documentOrder != null) {
@@ -567,19 +525,7 @@ export async function updateDocumentPracticeDefinition(req, res) {
     }
 
     doc.documentMandatory = parseBool(req.body.documentMandatory, doc.documentMandatory);
-    doc.functionalLetter = parseBool(req.body.functionalLetter, doc.functionalLetter);
     doc.showFormTracing = parseBool(req.body.showFormTracing, doc.showFormTracing);
-    doc.bindingAgreement = parseBool(req.body.bindingAgreement, doc.bindingAgreement);
-    doc.requiresAdditionalApproval = parseBool(
-      req.body.requiresAdditionalApproval,
-      doc.requiresAdditionalApproval
-    );
-
-    const pfIds = programFacultyIds != null ? parseIds(programFacultyIds) : null;
-    if (pfIds && pfIds.length === 0) {
-      return res.status(400).json({ success: false, message: "Debe asociar al menos un programa." });
-    }
-    if (pfIds) doc.programFaculties = pfIds;
 
     if (req.body.extensionItemIds != null) {
       const extIds = parseIds(req.body.extensionItemIds);
@@ -606,8 +552,8 @@ export async function updateDocumentPracticeDefinition(req, res) {
 
     const plantilla = req.files?.plantilla?.[0] || req.files?.template?.[0];
     if (plantilla) {
-      await removePracticeDefFileStorage(doc.templateFile);
-      const tplRef = await savePracticeDefFile(plantilla, doc._id, "plantilla");
+      await removeMonitoringDefFileStorage(doc.templateFile);
+      const tplRef = await saveMonitoringDefFile(plantilla, doc._id, "plantilla");
       if (tplRef) {
         doc.templateFile = tplRef;
         doc.markModified("templateFile");
@@ -616,8 +562,8 @@ export async function updateDocumentPracticeDefinition(req, res) {
 
     const modelo = req.files?.modelo?.[0] || req.files?.model?.[0];
     if (modelo) {
-      await removePracticeDefFileStorage(doc.modelFile);
-      const modRef = await savePracticeDefFile(modelo, doc._id, "modelo");
+      await removeMonitoringDefFileStorage(doc.modelFile);
+      const modRef = await saveMonitoringDefFile(modelo, doc._id, "modelo");
       if (modRef) {
         doc.modelFile = modRef;
         doc.markModified("modelFile");
@@ -625,20 +571,20 @@ export async function updateDocumentPracticeDefinition(req, res) {
     }
 
     await doc.save();
-    const populated = await DocumentPracticeDefinition.findById(doc._id).populate(populateList).lean();
+    const populated = await DocumentMonitoringDefinition.findById(doc._id).populate(populateList).lean();
     res.json({ success: true, data: populated });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }
 }
 
-export async function deleteDocumentPracticeDefinition(req, res) {
+export async function deleteDocumentMonitoringDefinition(req, res) {
   try {
-    const doc = await DocumentPracticeDefinition.findById(req.params.id);
+    const doc = await DocumentMonitoringDefinition.findById(req.params.id);
     if (!doc) return res.status(404).json({ success: false, message: "No encontrado" });
 
-    await removePracticeDefFileStorage(doc.templateFile);
-    await removePracticeDefFileStorage(doc.modelFile);
+    await removeMonitoringDefFileStorage(doc.templateFile);
+    await removeMonitoringDefFileStorage(doc.modelFile);
 
     await doc.deleteOne();
     res.json({ success: true, message: "Eliminado" });
@@ -647,15 +593,11 @@ export async function deleteDocumentPracticeDefinition(req, res) {
   }
 }
 
-/**
- * GET acceso a plantilla/modelo: URL firmada S3 o indicación de stream local.
- * kind: plantilla | modelo
- */
-export async function getPracticeDefFileAccess(req, res) {
+export async function getMonitoringDefFileAccess(req, res) {
   try {
-    const doc = await DocumentPracticeDefinition.findById(req.params.id).lean();
+    const doc = await DocumentMonitoringDefinition.findById(req.params.id).lean();
     if (!doc) return res.status(404).json({ success: false, message: "No encontrado" });
-    await enrichPracticeDefFiles(doc);
+    await enrichMonitoringDefFiles(doc);
     const kind = String(req.params.kind || "").toLowerCase();
     const ref = kind === "modelo" ? doc.modelFile : doc.templateFile;
     const access = await resolveFileAccess(ref);
@@ -681,11 +623,11 @@ export async function getPracticeDefFileAccess(req, res) {
   }
 }
 
-export async function streamPracticeDefFile(req, res) {
+export async function streamMonitoringDefFile(req, res) {
   try {
-    const doc = await DocumentPracticeDefinition.findById(req.params.id).lean();
+    const doc = await DocumentMonitoringDefinition.findById(req.params.id).lean();
     if (!doc) return res.status(404).json({ success: false, message: "No encontrado" });
-    await enrichPracticeDefFiles(doc);
+    await enrichMonitoringDefFiles(doc);
     const kind = String(req.params.kind || "").toLowerCase();
     const ref = kind === "modelo" ? doc.modelFile : doc.templateFile;
     const access = await resolveFileAccess(ref);

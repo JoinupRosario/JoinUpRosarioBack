@@ -6,6 +6,7 @@ dotenv.config();
 // Configuración de conexión a MySQL
 const mysqlConfig = {
   host: process.env.MYSQL_HOST || '127.0.0.1',
+  port: Number(process.env.MYSQL_PORT || 3306),
   user: process.env.MYSQL_USER || 'root',
   password: process.env.MYSQL_PASSWORD || '',
   database: process.env.MYSQL_DATABASE || 'tenant-1',
@@ -36,7 +37,7 @@ const connectMySQL = async () => {
     
     // Probar la conexión
     const connection = await pool.getConnection();
-    console.log(`✅ MySQL conectado: ${mysqlConfig.host}`);
+    console.log(`✅ MySQL conectado: ${mysqlConfig.host}:${mysqlConfig.port}`);
     connection.release();
     
     return pool;
