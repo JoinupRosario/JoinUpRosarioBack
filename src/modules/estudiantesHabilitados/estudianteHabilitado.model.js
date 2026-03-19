@@ -61,10 +61,8 @@ const estudianteHabilitadoSchema = new mongoose.Schema(
 
     // ── Estado curricular ────────────────────────────────────────────────────
     /**
-     * AUTORIZADO: cumple todas las reglas.
-     * NO_AUTORIZADO: no cumple alguna regla.
-     * EN_REVISION: sin reglas activas configuradas o excluido manualmente.
-     * EXCLUIDO: en lista de exclusión (internacionalización, etc.).
+     * Resultado evaluación curricular (UXXI + reglas). Cumple reglas → EN_REVISION hasta autorización del líder.
+     * NO_AUTORIZADO: no cumple alguna regla. EXCLUIDO: exclusión manual.
      */
     estadoCurricular: {
       type: String,
@@ -73,8 +71,7 @@ const estudianteHabilitadoSchema = new mongoose.Schema(
       index: true,
     },
     /**
-     * Estado final que puede ser modificado por el usuario radicador.
-     * Por defecto igual a estadoCurricular.
+     * Decisión del líder de práctica (disciplinar / manual). El estudiante ve prácticas solo si AUTORIZADO.
      */
     estadoFinal: {
       type: String,

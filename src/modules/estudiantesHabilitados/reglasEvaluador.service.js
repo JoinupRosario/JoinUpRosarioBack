@@ -270,6 +270,7 @@ export function evaluarTodasLasReglas(reglas, infoAcad, codigoPlan, itemsAsignat
   });
 
   const todasCumplen = reglasEvaluadas.every((r) => r.cumple);
-  const estadoCurricular = todasCumplen ? "AUTORIZADO" : "NO_AUTORIZADO";
+  /** Cumplen reglas → EN_REVISION hasta que líder de práctica autorice (disciplinar / manual). */
+  const estadoCurricular = todasCumplen ? "EN_REVISION" : "NO_AUTORIZADO";
   return { estadoCurricular, reglasEvaluadas };
 }

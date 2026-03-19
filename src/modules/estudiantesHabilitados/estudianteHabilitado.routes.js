@@ -5,6 +5,7 @@ import {
   previewCargueUxxi,
   confirmarCargueUxxi,
   crearUsuariosBD,
+  patchEstadoFinalEstudianteHabilitado,
 } from "./estudianteHabilitado.controller.js";
 import { verifyToken } from "../../middlewares/auth.js";
 import { requirePermission } from "../access/presentation/middlewares/requirePermission.js";
@@ -18,6 +19,11 @@ router.get("/me-autorizado", getMeAutorizado);
 
 // AMPR = Acceso módulo prácticas; BUSP = Buscar estudiantes; CEST = Cargar estudiantes
 router.get("/", requirePermission("AMPR", "BUSP"), getEstudiantesHabilitados);
+router.patch(
+  "/:id/estado-final",
+  requirePermission("AMPR", "BUSP"),
+  patchEstadoFinalEstudianteHabilitado
+);
 router.post("/preview-uxxi", requirePermission("CEST"), previewCargueUxxi);
 router.post("/confirmar-cargue", requirePermission("CEST"), confirmarCargueUxxi);
 router.post("/crear-usuarios-bd", requirePermission("CEST"), crearUsuariosBD);

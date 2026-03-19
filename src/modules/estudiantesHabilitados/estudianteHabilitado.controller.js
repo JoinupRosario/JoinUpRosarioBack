@@ -50,13 +50,14 @@ export const getEstudiantesHabilitados = async (req, res) => {
   try {
     const {
       page = 1, limit = 15,
-      periodo, codigoPrograma, estadoCurricular, search,
+      periodo, codigoPrograma, estadoCurricular, estadoFinal, search,
     } = req.query;
 
     const filter = {};
     if (periodo)          filter.periodo        = periodo;
     if (codigoPrograma)   filter.codigoPrograma = codigoPrograma;
     if (estadoCurricular) filter.estadoCurricular = estadoCurricular;
+    if (estadoFinal)      filter.estadoFinal      = estadoFinal;
     if (search) {
       const re = new RegExp(search.trim(), "i");
       filter.$or = [
@@ -298,9 +299,15 @@ export const previewCargueUxxi = async (req, res) => {
       await sleep(100);
     }
 
-    const autorizados = resultados.filter((r) => r.estadoCurricular === "AUTORIZADO").length;
+    const cumplenCondiciones = resultados.filter(
+      (r) => (r.reglasEvaluadas || []).length > 0 && (r.reglasEvaluadas || []).every((x) => x.cumple)
+    ).length;
     const noAutorizados = resultados.filter((r) => r.estadoCurricular === "NO_AUTORIZADO").length;
-    const enRevision = resultados.filter((r) => r.estadoCurricular === "EN_REVISION").length;
+    const enRevisionOtros = resultados.filter((r) => {
+      const conReglas = (r.reglasEvaluadas || []).length > 0;
+      if (conReglas) return false;
+      return r.estadoCurricular === "EN_REVISION";
+    }).length;
 
     const vacios = resumenPorPrograma.filter((r) => r.total === 0);
     const mensaje =
@@ -312,9 +319,12 @@ export const previewCargueUxxi = async (req, res) => {
 
     return res.json({
       total: resultados.length,
-      autorizados,
+      cumplenCondiciones,
       noAutorizados,
-      enRevision,
+      enRevisionOtros,
+      /** @deprecated usar cumplenCondiciones */
+      autorizados: cumplenCondiciones,
+      enRevision: cumplenCondiciones + enRevisionOtros,
       estudiantes: resultados,
       resumenPorPrograma,
       ...(mensaje && { mensaje }),
@@ -362,6 +372,8 @@ export const confirmarCargueUxxi = async (req, res) => {
         codigoPrograma: est.codigoPrograma || codigoPrograma,
       };
 
+      const existente = await EstudianteHabilitado.findOne(filtro).select("_id estadoFinal").lean();
+
       const pfId = est.programaFacultadId || programaFacultadId || null;
       const update = {
         postulant:        est.postulantId   || null,
@@ -378,12 +390,14 @@ export const confirmarCargueUxxi = async (req, res) => {
         tipoPractica:     tipoPracticaId    || null,
         sede:             sedeId            || null,
         estadoCurricular: est.estadoCurricular,
-        estadoFinal:      est.estadoCurricular,
         reglasEvaluadas:  est.reglasEvaluadas || [],
         datosAcademicos:  est.datosAcademicos  || null,
         cargadoPor,
         fechaCargue:      new Date(),
       };
+      if (!existente) {
+        update.estadoFinal = est.estadoCurricular;
+      }
 
       const doc = await EstudianteHabilitado.findOneAndUpdate(
         filtro,
@@ -590,4 +604,33 @@ export const crearUsuariosBD = async (req, res) => {
     omitidos,
     errores,
   });
+};
+
+const ESTADOS_FINAL_PERMITIDOS = ["AUTORIZADO", "NO_AUTORIZADO", "EN_REVISION"];
+
+/**
+ * PATCH /estudiantes-habilitados/:id/estado-final
+ * Líder de práctica: Autorizado / No autorizado / En revisión.
+ */
+export const patchEstadoFinalEstudianteHabilitado = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { estadoFinal } = req.body || {};
+    if (!ESTADOS_FINAL_PERMITIDOS.includes(estadoFinal)) {
+      return res.status(400).json({
+        message: "estadoFinal debe ser AUTORIZADO, NO_AUTORIZADO o EN_REVISION",
+      });
+    }
+    const doc = await EstudianteHabilitado.findByIdAndUpdate(
+      id,
+      { $set: { estadoFinal } },
+      { new: true }
+    ).lean();
+    if (!doc) {
+      return res.status(404).json({ message: "Registro no encontrado" });
+    }
+    res.json({ message: "Estado final actualizado", data: doc });
+  } catch (e) {
+    res.status(500).json({ message: "Error actualizando estado final", error: e.message });
+  }
 };
