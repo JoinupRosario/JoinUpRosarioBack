@@ -207,11 +207,9 @@ function sectionFormacionRosarioFinalizada(doc, profileData, postulant) {
     const program = gp.programId?.name || gp.programId?.code || "—";
     const titulo = safeStr(gp.title) || "—";
     const dateStr = gp.endDate ? formatDate(gp.endDate) : gp.dateObtained ? formatDate(gp.dateObtained) : "—";
-    const country = gp.countryId?.name || "—";
     doc.text(`Programa: ${program}`, { continued: false });
     doc.text(`Título formación académica: ${titulo}`, { continued: false });
     doc.text(`Fecha de obtención de título: ${dateStr}`, { continued: false });
-    doc.text(`País: ${country}`, { continued: false });
     doc.moveDown(0.4);
   });
 }
