@@ -90,7 +90,7 @@ const POPULATE_FIELDS = [
     select: "code activo programId",
     populate: { path: "programId", select: "name code level labelLevel" },
   },
-  { path: "asignaturasRequeridas.asignatura", select: "nombreAsignatura codAsignatura" },
+  { path: "asignaturasRequeridas.asignatura", select: "nombreAsignatura codAsignatura idAsignatura" },
 ];
 
 // ── Devuelve las variables y operadores disponibles (para el builder del front) ─
@@ -123,6 +123,52 @@ export const getProgramasHabilitadosPorPeriodo = async (req, res) => {
   } catch (e) {
     res.status(500).json({
       message: "Error al obtener programas habilitados para el periodo",
+      error: e.message,
+    });
+  }
+};
+
+/**
+ * IDs de ProgramFaculty que aparecen en al menos una condición curricular ACTIVE.
+ * - Si la regla lista programas: esos PF.
+ * - Si la regla no lista programas ("todos"): todos los PF activos de esa facultad.
+ * Uso: filtros UXXI (nivel/programa solo con cobertura de reglas).
+ */
+export const getProgramFacultyIdsEnReglasActivas = async (_req, res) => {
+  try {
+    const reglas = await CondicionCurricular.find({ estado: "ACTIVE" })
+      .select("programas facultad")
+      .lean();
+    const pfIds = new Set();
+    const facultyIds = [];
+    for (const r of reglas) {
+      const progs = r.programas || [];
+      if (progs.length > 0) {
+        progs.forEach((id) => pfIds.add(id.toString()));
+      } else if (r.facultad) {
+        facultyIds.push(r.facultad);
+      }
+    }
+    const facUnique = [...new Set(facultyIds.map((f) => f.toString()))];
+    if (facUnique.length > 0) {
+      const fObjectIds = facUnique
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+      if (fObjectIds.length > 0) {
+        const extra = await ProgramFaculty.find({
+          facultyId: { $in: fObjectIds },
+          activo: "SI",
+          status: "ACTIVE",
+        })
+          .select("_id")
+          .lean();
+        extra.forEach((p) => pfIds.add(p._id.toString()));
+      }
+    }
+    res.json({ programFacultyIds: [...pfIds] });
+  } catch (e) {
+    res.status(500).json({
+      message: "Error al obtener programas con condición curricular",
       error: e.message,
     });
   }

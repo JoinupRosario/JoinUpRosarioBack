@@ -7,8 +7,8 @@ import PostulantProfile      from "../postulants/models/profile/profile.schema.j
 import PostulantAcademic     from "../postulants/models/postulant_academic.schema.js";
 import ProgramFaculty        from "../program/model/programFaculty.model.js";
 import { ProfileEnrolledProgram, ProfileGraduateProgram } from "../postulants/models/profile/index.js";
-import { descargarYFiltrarPostulantes } from "./carguePostulantes.sftp.js";
-import { consultaInfAcademica }         from "../../services/uxxiIntegration.service.js";
+import { descargarYFiltrarPostulantesMultiples } from "./carguePostulantes.sftp.js";
+import { consultaInfAcademica, consultaAsignatura } from "../../services/uxxiIntegration.service.js";
 import { evaluarTodasLasReglas }        from "./reglasEvaluador.service.js";
 
 // ── Helper: pequeño sleep para no saturar OSB ─────────────────────────────────
@@ -115,70 +115,120 @@ export const getEstudiantesHabilitados = async (req, res) => {
 
 /**
  * POST /estudiantes-habilitados/preview-uxxi
- * Descarga el archivo SFTP, filtra por programa, consulta OSB y evalúa reglas.
- * NO guarda nada en BD → devuelve el preview al frontend para que el usuario confirme.
- *
- * Body: { programaFacultadId, codigoPrograma, periodoId, codigoPeriodo, tipoPracticaId, sedeId }
+ * Uno o varios programas: una sola descarga SFTP + parseo; filtra todas las filas de esos códigos.
+ * programasSeleccionados: [{ programaFacultadId, codigoPrograma }, ...]
  */
 export const previewCargueUxxi = async (req, res) => {
   const {
     programaFacultadId,
     codigoPrograma,
+    programasSeleccionados,
     periodoId,
     codigoPeriodo,
-    tipoPracticaId,
-    sedeId,
   } = req.body;
 
-  if (!codigoPrograma || !periodoId) {
-    return res.status(400).json({ message: "Se requieren codigoPrograma y periodoId" });
+  if (!periodoId) {
+    return res.status(400).json({ message: "Se requiere periodoId" });
   }
 
-  const logPrefix = `[previewUxxi ${codigoPrograma}/${codigoPeriodo}]`;
-  console.log(`${logPrefix} ── INICIO ──────────────────────────────`);
-  console.log(`${logPrefix} Body: programaFacultadId=${programaFacultadId}, periodoId=${periodoId}`);
+  let lista = [];
+  if (Array.isArray(programasSeleccionados) && programasSeleccionados.length > 0) {
+    lista = programasSeleccionados
+      .map((p) => ({
+        programaFacultadId: p.programaFacultadId,
+        codigoPrograma: (p.codigoPrograma || "").trim(),
+      }))
+      .filter((p) => p.codigoPrograma);
+  } else if (programaFacultadId && codigoPrograma) {
+    lista = [{ programaFacultadId, codigoPrograma: String(codigoPrograma).trim() }];
+  }
+
+  if (lista.length === 0) {
+    return res.status(400).json({
+      message: "Seleccione al menos un programa con código válido (programasSeleccionados o codigoPrograma).",
+    });
+  }
+
+  const codeToPfId = new Map();
+  for (const item of lista) {
+    codeToPfId.set(item.codigoPrograma.toUpperCase(), item.programaFacultadId);
+  }
+  const codigosUnicos = [...new Set(lista.map((x) => x.codigoPrograma.toUpperCase()))];
 
   try {
-    // 1. Descargar y filtrar Excel SFTP
-    console.log(`${logPrefix} [1/4] Conectando al SFTP...`);
-    const filasExcel = await descargarYFiltrarPostulantes(codigoPrograma);
-    console.log(`${logPrefix} [1/4] SFTP OK — filas filtradas: ${filasExcel.length}`);
+    console.log(`[previewUxxi] SFTP una vez — ${codigosUnicos.length} código(s) de programa`);
+    const filasExcel = await descargarYFiltrarPostulantesMultiples(codigosUnicos);
+
+    const countByCode = Object.fromEntries(codigosUnicos.map((c) => [c, 0]));
+    for (const f of filasExcel) {
+      const k = String(f.codProgramaCurso || "").toUpperCase();
+      if (k in countByCode) countByCode[k]++;
+    }
+    const resumenPorPrograma = codigosUnicos.map((cod) => ({
+      codigoPrograma: lista.find((x) => x.codigoPrograma.toUpperCase() === cod)?.codigoPrograma || cod,
+      total: countByCode[cod],
+    }));
 
     if (filasExcel.length === 0) {
-      console.log(`${logPrefix} Sin estudiantes para el programa. Finalizando.`);
       return res.json({
-        total: 0, autorizados: 0, noAutorizados: 0, enRevision: 0,
+        total: 0,
+        autorizados: 0,
+        noAutorizados: 0,
+        enRevision: 0,
         estudiantes: [],
-        mensaje: `No se encontraron estudiantes con programa "${codigoPrograma}" en el archivo UXXI.`,
+        resumenPorPrograma,
+        mensaje: `No se encontraron estudiantes en UXXI para los programa(s) seleccionado(s).`,
       });
     }
 
-    // 2. Obtener reglas activas para el periodo y programa
-    console.log(`${logPrefix} [2/4] Buscando reglas curriculares activas para periodo ${periodoId}...`);
-    const todasReglas = await CondicionCurricular.find({ periodo: periodoId, estado: "ACTIVE" });
-    const reglasAplicables = todasReglas.filter((r) => {
-      const progs = r.programas || [];
-      if (progs.length === 0) return true;
-      return progs.some((p) => String(p) === String(programaFacultadId));
-    });
-    console.log(`${logPrefix} [2/4] Reglas totales del periodo: ${todasReglas.length}, aplicables al programa: ${reglasAplicables.length}`);
-    reglasAplicables.forEach(r => console.log(`${logPrefix}   → Regla: "${r.nombre}" (${r.logica}, ${r.condiciones?.length} condiciones)`));
+    const todasReglas = await CondicionCurricular.find({ periodo: periodoId, estado: "ACTIVE" })
+      .populate({
+        path: "asignaturasRequeridas.asignatura",
+        select: "nombreAsignatura codAsignatura idAsignatura",
+      })
+      .lean();
 
-    // 3. Procesar cada estudiante
-    console.log(`${logPrefix} [3/4] Procesando ${filasExcel.length} estudiantes...`);
+    /** Evita llamar Consulta_asignatura varias veces para el mismo doc+plan en un mismo preview */
+    const cacheAsignaturasUxxi = new Map();
+    const getItemsAsignatura = async (documento, planCode) => {
+      const key = `${String(documento).trim()}|${String(planCode).trim().toUpperCase()}`;
+      if (cacheAsignaturasUxxi.has(key)) return cacheAsignaturasUxxi.get(key);
+      try {
+        const items = (await consultaAsignatura(documento, planCode)) || [];
+        cacheAsignaturasUxxi.set(key, items);
+        return items;
+      } catch (e) {
+        console.warn(`[previewUxxi] consultaAsignatura doc=${documento} plan=${planCode}:`, e.message);
+        cacheAsignaturasUxxi.set(key, []);
+        return [];
+      }
+    };
+    const reglasCache = new Map();
+    const reglasParaPf = (pfId) => {
+      const key = String(pfId);
+      if (!reglasCache.has(key)) {
+        reglasCache.set(
+          key,
+          todasReglas.filter((r) => {
+            const progs = r.programas || [];
+            if (progs.length === 0) return true;
+            return progs.some((p) => String(p) === key);
+          })
+        );
+      }
+      return reglasCache.get(key);
+    };
+
     const resultados = [];
-
     for (let i = 0; i < filasExcel.length; i++) {
       const fila = filasExcel[i];
+      const codigoProgramaRow = String(fila.codProgramaCurso || "").trim();
+      const programaFacultadIdRow = codeToPfId.get(codigoProgramaRow.toUpperCase());
+      if (!programaFacultadIdRow) continue;
+
       const { identificacion, correo, nombres, apellidos, codigoEstudiante, genero, celular } = fila;
-      if (!identificacion) {
-        console.warn(`${logPrefix}   [${i+1}/${filasExcel.length}] Fila sin identificación, se omite.`);
-        continue;
-      }
+      if (!identificacion) continue;
 
-      console.log(`${logPrefix}   [${i+1}/${filasExcel.length}] Procesando: ${identificacion}`);
-
-      // Buscar User por documento (code) O por email
       const emailNorm = (correo || "").toLowerCase().trim();
       const userDoc = await User.findOne({
         $or: [
@@ -189,73 +239,76 @@ export const previewCargueUxxi = async (req, res) => {
       const postulantDoc = userDoc
         ? await Postulant.findOne({ postulantId: userDoc._id }).lean()
         : null;
-      console.log(`${logPrefix}     BD: user=${userDoc ? `${userDoc._id} (code=${userDoc.code})` : 'NO ENCONTRADO'}, postulant=${postulantDoc ? postulantDoc._id : 'NO ENCONTRADO'}`);
 
-      // Consultar OSB
-      let infoAcad  = [];
-      let errorOSB  = null;
+      let infoAcad = [];
+      let errorOSB = null;
       let datosAcad = null;
       try {
-        console.log(`${logPrefix}     OSB: consultando getInfoacademica para doc=${identificacion}...`);
         infoAcad = await consultaInfAcademica(identificacion) || [];
-        console.log(`${logPrefix}     OSB: ${infoAcad.length} planes devueltos`);
         const planData = infoAcad.find(
-          (p) => (p.codigoplan || "").toUpperCase() === codigoPrograma.toUpperCase()
+          (p) => (p.codigoplan || "").toUpperCase() === codigoProgramaRow.toUpperCase()
         );
         datosAcad = planData || null;
-        if (datosAcad) {
-          console.log(`${logPrefix}     OSB: plan ${codigoPrograma} encontrado → creditos_matriculados=${datosAcad.creditos_matriculados}, promedio=${datosAcad.promedioacumulado}`);
-        } else {
-          console.warn(`${logPrefix}     OSB: plan ${codigoPrograma} NO encontrado entre [${infoAcad.map(p=>p.codigoplan).join(', ')}]`);
-        }
       } catch (err) {
         errorOSB = err.message;
-        console.warn(`${logPrefix}     OSB ERROR: ${err.message}`);
       }
 
-      // Evaluar reglas
+      const reglasAplicables = reglasParaPf(programaFacultadIdRow);
       let estadoCurricular = "EN_REVISION";
-      let reglasEvaluadas  = [];
+      let reglasEvaluadas = [];
       if (!errorOSB && reglasAplicables.length > 0) {
-        const resultado = evaluarTodasLasReglas(reglasAplicables, infoAcad, codigoPrograma);
+        const necesitaAsignaturas = reglasAplicables.some(
+          (r) => Array.isArray(r.asignaturasRequeridas) && r.asignaturasRequeridas.length > 0
+        );
+        const itemsAsignatura = necesitaAsignaturas
+          ? await getItemsAsignatura(identificacion, codigoProgramaRow)
+          : [];
+        const resultado = evaluarTodasLasReglas(
+          reglasAplicables,
+          infoAcad,
+          codigoProgramaRow,
+          itemsAsignatura
+        );
         estadoCurricular = resultado.estadoCurricular;
-        reglasEvaluadas  = resultado.reglasEvaluadas;
-        console.log(`${logPrefix}     REGLAS: estado=${estadoCurricular}`);
-        reglasEvaluadas.forEach(r => console.log(`${logPrefix}       → "${r.reglaNombre}": cumple=${r.cumple}`));
-      } else if (reglasAplicables.length === 0) {
-        console.log(`${logPrefix}     REGLAS: sin reglas configuradas → EN_REVISION`);
+        reglasEvaluadas = resultado.reglasEvaluadas;
       }
 
       resultados.push({
         identificacion,
         codigoEstudiante: codigoEstudiante || "",
-        correo:           correo || userDoc?.email || "",
-        nombres:          nombres || userDoc?.name || "",
+        correo: correo || userDoc?.email || "",
+        nombres: nombres || userDoc?.name || "",
         apellidos,
-        genero:           genero || "",
-        celular:          celular || "",
-        codigoPrograma,
-        nombrePrograma:   datosAcad?.nombreprograma || "",
+        genero: genero || "",
+        celular: celular || "",
+        codigoPrograma: codigoProgramaRow,
+        nombrePrograma: datosAcad?.nombreprograma || "",
         codigoPeriodo,
         estadoCurricular,
         reglasEvaluadas,
-        datosAcademicos:  datosAcad,
-        todosLosPlanesOSB: infoAcad,   // todos los planes del estudiante en OSB
+        datosAcademicos: datosAcad,
+        todosLosPlanesOSB: infoAcad,
         errorOSB,
-        userId:           userDoc?._id || null,
-        postulantId:      postulantDoc?._id || null,
-        existeEnBD:       !!userDoc,
+        userId: userDoc?._id || null,
+        postulantId: postulantDoc?._id || null,
+        existeEnBD: !!userDoc,
+        programaFacultadId: String(programaFacultadIdRow),
       });
 
       await sleep(100);
     }
 
-    const autorizados   = resultados.filter((r) => r.estadoCurricular === "AUTORIZADO").length;
+    const autorizados = resultados.filter((r) => r.estadoCurricular === "AUTORIZADO").length;
     const noAutorizados = resultados.filter((r) => r.estadoCurricular === "NO_AUTORIZADO").length;
-    const enRevision    = resultados.filter((r) => r.estadoCurricular === "EN_REVISION").length;
+    const enRevision = resultados.filter((r) => r.estadoCurricular === "EN_REVISION").length;
 
-    console.log(`${logPrefix} [4/4] RESUMEN: total=${resultados.length}, autorizados=${autorizados}, no_autorizados=${noAutorizados}, en_revision=${enRevision}`);
-    console.log(`${logPrefix} ── FIN ────────────────────────────────`);
+    const vacios = resumenPorPrograma.filter((r) => r.total === 0);
+    const mensaje =
+      vacios.length === codigosUnicos.length
+        ? null
+        : vacios.length > 0
+          ? `Algunos programas sin filas en UXXI: ${vacios.map((v) => v.codigoPrograma).join(", ")}.`
+          : null;
 
     return res.json({
       total: resultados.length,
@@ -263,9 +316,11 @@ export const previewCargueUxxi = async (req, res) => {
       noAutorizados,
       enRevision,
       estudiantes: resultados,
+      resumenPorPrograma,
+      ...(mensaje && { mensaje }),
     });
   } catch (e) {
-    console.error(`${logPrefix} ERROR FATAL:`, e.message);
+    console.error("[previewUxxi] ERROR FATAL:", e.message);
     console.error(e.stack);
     res.status(500).json({ message: "Error procesando cargue UXXI", error: e.message });
   }
@@ -307,6 +362,7 @@ export const confirmarCargueUxxi = async (req, res) => {
         codigoPrograma: est.codigoPrograma || codigoPrograma,
       };
 
+      const pfId = est.programaFacultadId || programaFacultadId || null;
       const update = {
         postulant:        est.postulantId   || null,
         user:             est.userId        || null,
@@ -316,7 +372,7 @@ export const confirmarCargueUxxi = async (req, res) => {
         apellidos:        est.apellidos     || "",
         codigoPrograma:   est.codigoPrograma || codigoPrograma,
         nombrePrograma:   est.nombrePrograma || "",
-        programaFacultad: programaFacultadId || null,
+        programaFacultad: pfId,
         periodo:          periodoId,
         codigoPeriodo:    codigoPeriodo     || "",
         tipoPractica:     tipoPracticaId    || null,

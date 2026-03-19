@@ -4,6 +4,7 @@ import {
   getCondicionesCurriculares,
   getCondicionCurricularById,
   getProgramasHabilitadosPorPeriodo,
+  getProgramFacultyIdsEnReglasActivas,
   createCondicionCurricular,
   updateCondicionCurricular,
   toggleEstadoCondicion,
@@ -19,6 +20,7 @@ router.use(verifyToken);
 router.get("/variables", getVariablesDisponibles);
 // Programas con condición curricular activa para un periodo (formación académica en oportunidades)
 router.get("/programas-habilitados", getProgramasHabilitadosPorPeriodo);
+router.get("/program-faculty-en-reglas-activas", getProgramFacultyIdsEnReglasActivas);
 
 // CRUD
 router.get("/",    getCondicionesCurriculares);

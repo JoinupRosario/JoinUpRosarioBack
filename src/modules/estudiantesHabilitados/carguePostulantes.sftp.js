@@ -180,3 +180,76 @@ export async function descargarYFiltrarPostulantes(codigoPrograma) {
 
   return parsed;
 }
+
+/**
+ * Una sola conexión/descarga/parseo del Excel; filtra filas cuyo programa (col1 o col2)
+ * coincida con cualquiera de los códigos indicados.
+ * @param {string[]} codigosPrograma Códigos UXXI (ej. SNIES/plan)
+ * @returns {Promise<Array>} Mismas filas que descargarYFiltrarPostulantes; codProgramaCurso = código que hizo match
+ */
+export async function descargarYFiltrarPostulantesMultiples(codigosPrograma) {
+  const codesSet = new Set(
+    (codigosPrograma || [])
+      .map((c) => String(c ?? "").trim().toUpperCase())
+      .filter(Boolean)
+  );
+  if (codesSet.size === 0) {
+    console.log("[SFTP-Postulantes] Multiples: sin códigos — 0 filas");
+    return [];
+  }
+
+  const { path: SFTP_PATH } = getConfig();
+  const remoteMtime = await getRemoteMtime(SFTP_PATH);
+  console.log(`[SFTP-Postulantes] Multiples (${codesSet.size} códigos) — mtime ${remoteMtime}`);
+
+  let buffer = getCachedIfFresh(remoteMtime);
+  if (!buffer) {
+    console.log("[SFTP-Postulantes] Multiples — transfiriendo una vez...");
+    buffer = await downloadBuffer(SFTP_PATH);
+    setCache(buffer, remoteMtime);
+  }
+
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheetName = workbook.SheetNames[0];
+  const sheet = workbook.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", range: 1 });
+  const normalize = (v) => String(v ?? "").trim();
+
+  const parsed = rows.map((row) => ({
+    codProgramaCurso: normalize(row["COD_PROGRAMA_CURSO"]),
+    codProgramaCurso2: normalize(row["COD_PROGRAMA_CURSO2"] || ""),
+    tituloCurso: normalize(row["TITULO_PROGRAMA_CURSO"] || row["TITULO_PROGRAMA_CURSO2"] || ""),
+    identificacion: normalize(row["IDENTIFICACION"]),
+    codigoEstudiante: normalize(row["CODIGO"] || ""),
+    correo: normalize(row["EMAIL"] || row["CORREO"] || row["MAIL"] || ""),
+    nombres: normalize(row["NOMBRES"] || row["NOMBRE"] || ""),
+    apellidos: normalize(row["APELLIDOS"] || row["APELLIDO"] || ""),
+    genero: normalize(row["GENERO"] || ""),
+    celular: normalize(row["CELULAR"] || row["TELEFONO"] || ""),
+    sede: normalize(row["SEDE"] || row["COD_SEDE"] || ""),
+    periodo: normalize(row["PERIODO"] || ""),
+    tipoPractica: normalize(row["TIPO_PRACTICA"] || ""),
+    paisNacimiento: normalize(row["PAIS_NACIMIENTO"] || row["COD_PAIS_NAC"] || ""),
+    deptoNacimiento: normalize(row["DEPTO_NACIMIENTO"] || row["COD_DEPTO_NAC"] || ""),
+    ciudadNacimiento: normalize(row["CIUDAD_NACIMIENTO"] || row["COD_CIUDAD_NAC"] || ""),
+    paisResidencia: normalize(row["PAIS_RESIDENCIA"] || row["COD_PAIS_RES"] || ""),
+    deptoResidencia: normalize(row["DEPTO_RESIDENCIA"] || row["COD_DEPTO_RES"] || ""),
+    ciudadResidencia: normalize(row["CIUDAD_RESIDENCIA"] || row["COD_CIUDAD_RES"] || ""),
+    direccion: normalize(row["DIRECCION"] || row["DIRECCION_RESIDENCIA"] || ""),
+    fechaNacimiento: normalize(row["FECHA_NACIMIENTO"] || row["FECHA_NAC"] || ""),
+  }));
+
+  const resultado = [];
+  for (const r of parsed) {
+    const c1 = r.codProgramaCurso.toUpperCase();
+    const c2 = r.codProgramaCurso2.toUpperCase();
+    let matched = null;
+    if (codesSet.has(c1)) matched = c1;
+    else if (codesSet.has(c2)) matched = c2;
+    if (!matched) continue;
+    resultado.push({ ...r, codProgramaCurso: matched });
+  }
+
+  console.log(`[SFTP-Postulantes] Multiples — ${resultado.length} filas para códigos: ${[...codesSet].join(", ")}`);
+  return resultado;
+}
