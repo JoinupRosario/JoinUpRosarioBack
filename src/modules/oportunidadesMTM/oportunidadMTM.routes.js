@@ -59,16 +59,29 @@ import {
   postRegistrarAsistenciaMTM,
   getReporteAsistenciaMTM,
   getReporteAsistenciaMTMStudent,
+  getReporteAsistenciaMTMAdminByPostulacion,
 } from "./oportunidadMTM.controller.js";
 
 const router = express.Router();
+
+const ALLOWED_LEGALIZACION_MON_MTYPES = new Set([
+  "application/pdf",
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
 
 const uploadLegalizacion = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    if (file.mimetype === "application/pdf") return cb(null, true);
-    cb(new Error("Solo se permiten archivos PDF"), false);
+    if (ALLOWED_LEGALIZACION_MON_MTYPES.has(file.mimetype) || String(file.mimetype || "").startsWith("image/")) {
+      return cb(null, true);
+    }
+    cb(new Error("Tipo de archivo no permitido para documentos de legalización"), false);
   },
 });
 
@@ -80,6 +93,7 @@ router.use(verifyToken);
 
 // RQ04_HU010: Link y reporte desde módulo legalización
 router.get("/legalizaciones-admin/:postulacionId/link-asistencia", authorizeRoles("admin", "superadmin", "leader"), getOrCreateLinkAsistenciaMTM);
+router.get("/legalizaciones-admin/:postulacionId/reporte-asistencia", authorizeRoles("admin", "superadmin", "leader"), getReporteAsistenciaMTMAdminByPostulacion);
 router.get("/legalizaciones-admin/reporte-asistencia", authorizeRoles("admin", "superadmin", "leader"), getReporteAsistenciaMTM);
 
 // RQ04_HU001: rutas para estudiante (deben ir antes de /:id)
@@ -90,8 +104,8 @@ router.post("/:id/aplicar", authorizeRoles("student"), aplicarOportunidadMTM);
 
 // RQ04_HU004: Legalización MTM (estudiante)
 router.get("/legalizaciones/:postulacionId", authorizeRoles("student"), getLegalizacionMTM);
-router.get("/legalizaciones/:postulacionId/documentos/:tipo/url", authorizeRoles("student"), getDocumentoLegalizacionUrl);
-router.delete("/legalizaciones/:postulacionId/documentos/:tipo", authorizeRoles("student"), deleteDocumentoLegalizacionMTM);
+router.get("/legalizaciones/:postulacionId/documentos/:definitionId/url", authorizeRoles("student"), getDocumentoLegalizacionUrl);
+router.delete("/legalizaciones/:postulacionId/documentos/:definitionId", authorizeRoles("student"), deleteDocumentoLegalizacionMTM);
 router.put("/legalizaciones/:postulacionId", authorizeRoles("student"), updateLegalizacionMTM);
 router.post("/legalizaciones/:postulacionId/documentos", authorizeRoles("student"), uploadLegalizacion.single("file"), uploadDocLegalizacionMTM);
 router.post("/legalizaciones/:postulacionId/remitir-revision", authorizeRoles("student"), remitirRevisionLegalizacionMTM);
@@ -102,9 +116,9 @@ router.get("/legalizaciones/:postulacionId/reporte-asistencia", authorizeRoles("
 router.get("/legalizaciones-admin", authorizeRoles("admin", "superadmin", "leader"), getLegalizacionesMTMAdmin);
 router.get("/legalizaciones-admin/estadisticas", authorizeRoles("admin", "superadmin", "leader"), getEstadisticasLegalizacionMTM);
 router.get("/legalizaciones-admin/:postulacionId", authorizeRoles("admin", "superadmin", "leader"), getLegalizacionMTMAdmin);
-router.get("/legalizaciones-admin/:postulacionId/documentos/:tipo/url", authorizeRoles("admin", "superadmin", "leader"), getDocumentoLegalizacionUrlAdmin);
-router.get("/legalizaciones-admin/:postulacionId/documentos/:tipo/descarga", authorizeRoles("admin", "superadmin", "leader"), getDocumentoLegalizacionDownloadAdmin);
-router.patch("/legalizaciones-admin/:postulacionId/documentos/:tipo", authorizeRoles("admin", "superadmin", "leader"), patchDocumentoLegalizacionMTM);
+router.get("/legalizaciones-admin/:postulacionId/documentos/:definitionId/url", authorizeRoles("admin", "superadmin", "leader"), getDocumentoLegalizacionUrlAdmin);
+router.get("/legalizaciones-admin/:postulacionId/documentos/:definitionId/descarga", authorizeRoles("admin", "superadmin", "leader"), getDocumentoLegalizacionDownloadAdmin);
+router.patch("/legalizaciones-admin/:postulacionId/documentos/:definitionId", authorizeRoles("admin", "superadmin", "leader"), patchDocumentoLegalizacionMTM);
 router.post("/legalizaciones-admin/:postulacionId/aprobar", authorizeRoles("admin", "superadmin", "leader"), postAprobarLegalizacionMTM);
 router.post("/legalizaciones-admin/:postulacionId/rechazar", authorizeRoles("admin", "superadmin", "leader"), postRechazarLegalizacionMTM);
 

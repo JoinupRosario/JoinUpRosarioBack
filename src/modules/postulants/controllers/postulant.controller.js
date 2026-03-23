@@ -25,7 +25,7 @@ import ProgramFaculty from "../../program/model/programFaculty.model.js";
 import Country from "../../shared/location/models/country.schema.js";
 import State from "../../shared/location/models/state.schema.js";
 import City from "../../shared/location/models/city.schema.js";
-import { MAX_PROFILES_PER_POSTULANT } from "./postulantProfile.controller.js";
+import { MAX_PROFILES_PER_POSTULANT, S3_PREFIX_PERFIL_DOC_SOPORTE } from "./postulantProfile.controller.js";
 import { consultaInfEstudiante, consultaInfAcademica } from "../../../services/uxxiIntegration.service.js";
 import { descargarYFiltrarPostulantes } from "../../estudiantesHabilitados/carguePostulantes.sftp.js";
 import Program from "../../program/model/program.model.js";
@@ -1940,7 +1940,8 @@ export const downloadAttachment = async (req, res) => {
     }
 
     const filepath = attachment.filepath;
-    const isS3Key = filepath.startsWith(`${S3_PREFIX_HOJAS_VIDA}/`);
+    const isS3Key =
+      filepath.startsWith(`${S3_PREFIX_HOJAS_VIDA}/`) || filepath.startsWith(`${S3_PREFIX_PERFIL_DOC_SOPORTE}/`);
     if (isS3Key) {
       if (!s3Config.isConfigured) {
         return res.status(503).json({

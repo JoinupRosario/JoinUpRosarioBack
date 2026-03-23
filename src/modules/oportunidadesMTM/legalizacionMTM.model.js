@@ -5,17 +5,6 @@ import mongoose from "mongoose";
  * Estado: borrador → en_revision → aprobada | rechazada | en_ajuste (coordinador pide ajustes).
  * Por documento: estadoDocumento pendiente | aprobado | rechazado + motivoRechazo (revisión coordinador).
  */
-const docSchema = new mongoose.Schema(
-  {
-    key: { type: String, required: true },
-    originalName: { type: String, default: null },
-    size: { type: Number, default: null },
-    estadoDocumento: { type: String, enum: ["pendiente", "aprobado", "rechazado"], default: "pendiente" },
-    motivoRechazo: { type: String, default: null },
-  },
-  { _id: false }
-);
-
 const legalizacionMTMSchema = new mongoose.Schema(
   {
     postulacionMTM: {
@@ -37,10 +26,14 @@ const legalizacionMTMSchema = new mongoose.Schema(
     tipoCuentaValor: { type: String, enum: ["Ahorros", "Corriente"], default: null },
     banco: { type: mongoose.Schema.Types.ObjectId, ref: "items", default: null },
     numeroCuenta: { type: String, trim: true, default: null },
+    /**
+     * Archivos por definición de documento (DocumentMonitoringDefinition).
+     * Clave: string del _id de la definición. Valor: { key, originalName, size, estadoDocumento, motivoRechazo }
+     * (estructura equivalente a docSchema; Mixed permite claves dinámicas).
+     */
     documentos: {
-      certificadoEps: { type: docSchema, default: null },
-      certificacionBancaria: { type: docSchema, default: null },
-      rut: { type: docSchema, default: null },
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
     },
     enviadoRevisionAt: { type: Date, default: null },
     aprobadoAt: { type: Date, default: null },

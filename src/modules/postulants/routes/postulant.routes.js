@@ -56,11 +56,12 @@ import {
   copyReferenceToProfile,
   deleteProfileCv,
   deleteProfileSupport,
+  uploadProfileSupport,
 } from "../controllers/postulantProfile.controller.js";
 import { verifyToken } from "../../../middlewares/auth.js";
 import { requirePermission } from "../../access/presentation/middlewares/requirePermission.js";
 import { userHasPermission } from "../../access/presentation/helpers/checkPermission.js";
-import { upload, handleUploadError } from "../../../middlewares/upload.js";
+import { upload, handleUploadError, uploadProfileSupportMemory, handleProfileSupportUploadError } from "../../../middlewares/upload.js";
 import Postulant from "../models/postulants.schema.js";
 
 const router = express.Router();
@@ -132,6 +133,13 @@ router.post("/:id/profiles/:profileId/references/copy-from/:sourceReferenceId", 
 router.put("/:id/profiles/:profileId/references/:referenceId", requirePermissionOrOwnPostulant("EPOS", "EMIP"), updateReference);
 router.delete("/:id/profiles/:profileId/references/:referenceId", requirePermissionOrOwnPostulant("EPOS", "EMIP"), deleteReference);
 router.delete("/:id/profiles/:profileId/cvs/:profileCvId", requirePermissionOrOwnPostulant("EPOS", "EMIP"), deleteProfileCv);
+router.post(
+  "/:id/profiles/:profileId/supports",
+  requirePermissionOrOwnPostulant("EPOS", "EMIP"),
+  uploadProfileSupportMemory.single("file"),
+  handleProfileSupportUploadError,
+  uploadProfileSupport
+);
 router.delete("/:id/profiles/:profileId/supports/:profileSupportId", requirePermissionOrOwnPostulant("EPOS", "EMIP"), deleteProfileSupport);
 
 // Ruta "mi postulante" — cualquier usuario autenticado puede ver su propio postulante (el controller solo devuelve el ligado a req.user.id). Sin requirePermission para que estudiantes puedan acceder.

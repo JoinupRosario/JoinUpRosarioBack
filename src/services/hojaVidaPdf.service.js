@@ -168,7 +168,11 @@ function sectionCedula(doc, profileData, postulant) {
   const supports = profileData?.profileSupports || [];
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
   if (supports.length === 0) doc.text("Documento(s) de soporte adjunto(s) en el perfil.", { continued: false });
-  else supports.forEach((s) => doc.text(`• ${safeStr(s?.attachmentId?.name || "Documento")}`, { continued: false }));
+  else
+    supports.forEach((s) => {
+      const label = safeStr(s?.documentLabel || s?.attachmentId?.name || "Documento");
+      doc.text(`• ${label}`, { continued: false });
+    });
 }
 
 function sectionPerfil(doc, profileData, postulant) {

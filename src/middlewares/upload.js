@@ -99,4 +99,48 @@ const handleUploadError = (error, req, res, next) => {
   next(error);
 };
 
-export { upload, handleUploadError };
+/** Tipos permitidos: otros documentos de soporte del perfil (PostulantProfile). Máx. 5 MB en la ruta que lo use. */
+const PROFILE_SUPPORT_MIMES = [
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "image/jpeg",
+  "image/png",
+];
+
+const uploadProfileSupportMemory = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    if (PROFILE_SUPPORT_MIMES.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error(
+          "Tipo no permitido. Use .pdf, .doc, .docx, .xls, .xlsx, .jpg, .jpeg o .png"
+        ),
+        false
+      );
+    }
+  },
+});
+
+/** Mismo que handleUploadError pero mensaje 5 MB para documentos de soporte del perfil. */
+function handleProfileSupportUploadError(error, req, res, next) {
+  if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({ message: "El archivo no puede superar 5 MB." });
+    }
+    if (error.code === "LIMIT_FILE_COUNT") {
+      return res.status(400).json({ message: "Solo se permite un archivo por carga." });
+    }
+  }
+  if (error?.message?.includes("Tipo no permitido")) {
+    return res.status(400).json({ message: error.message });
+  }
+  return handleUploadError(error, req, res, next);
+}
+
+export { upload, handleUploadError, uploadProfileSupportMemory, handleProfileSupportUploadError };

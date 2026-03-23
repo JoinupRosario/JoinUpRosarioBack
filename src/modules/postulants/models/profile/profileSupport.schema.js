@@ -9,6 +9,8 @@ const schema = new mongoose.Schema(
   {
     profileId: { type: mongoose.Schema.Types.ObjectId, ref: "PostulantProfile", required: true, index: true },
     attachmentId: { type: mongoose.Schema.Types.ObjectId, ref: "Attachment", required: true },
+    /** Nombre que el postulante asocia al archivo (ej. "Cédula de ciudadanía"). */
+    documentLabel: { type: String, trim: true, maxlength: 200, default: "" },
   },
   { timestamps: false }
 );

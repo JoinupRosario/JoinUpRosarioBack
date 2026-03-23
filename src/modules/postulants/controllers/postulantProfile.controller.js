@@ -12,9 +12,26 @@ import ProfileAward from "../models/profile/profileAward.schema.js";
 import ProfileReference from "../models/profile/profileReference.schema.js";
 import ProfileCv from "../models/profile/profileCv.schema.js";
 import ProfileSupport from "../models/profile/profileSupport.schema.js";
+import fs from "fs";
+import path from "path";
+import os from "os";
+import crypto from "crypto";
+import { fileURLToPath } from "url";
 import Attachment from "../../shared/attachment/attachment.schema.js";
-import { s3Config, deleteFromS3 } from "../../../config/s3.config.js";
+import { s3Config, deleteFromS3, uploadToS3 } from "../../../config/s3.config.js";
 import { recalcAndSaveProfileCompleteness } from "../services/profileCompleteness.service.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function getUploadsRoot() {
+  if (process.env.VERCEL === "1") return path.join(os.tmpdir(), "uploads");
+  return path.join(__dirname, "..", "..", "..", "uploads");
+}
+
+/** S3/local: perfil-documentos-soporte/{postulantMongoId}/{profileId}/archivo */
+export const S3_PREFIX_PERFIL_DOC_SOPORTE = "perfil-documentos-soporte";
+const MAX_PROFILE_SUPPORTS = 5;
 
 /** RQ03_HU001: Máximo de perfiles (hojas de vida) por postulante */
 export const MAX_PROFILES_PER_POSTULANT = 5;
@@ -1340,6 +1357,97 @@ export const copyReferenceToProfile = async (req, res) => {
 
 const S3_PREFIX_HOJAS_VIDA = "hojas-vida";
 
+function extFromMimetype(mime) {
+  const m = {
+    "application/pdf": ".pdf",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+  };
+  return m[mime] || "";
+}
+
+/**
+ * POST /postulants/:id/profiles/:profileId/supports
+ * Sube un documento de soporte con etiqueta (ej. "Cédula de ciudadanía"). Máx. 5 por perfil, 5 MB.
+ * Ruta S3: perfil-documentos-soporte/{postulantId}/{profileId}/{timestamp}-{rand}.ext
+ */
+export const uploadProfileSupport = async (req, res) => {
+  try {
+    const { id, profileId } = req.params;
+    if (!req.file?.buffer) return res.status(400).json({ message: "No se envió archivo" });
+    const documentLabel = String(req.body?.documentLabel ?? "").trim();
+    if (documentLabel.length < 2) {
+      return res.status(400).json({
+        message: 'Indique qué documento es (mínimo 2 caracteres), por ejemplo: "Cédula de ciudadanía".',
+      });
+    }
+    if (documentLabel.length > 200) {
+      return res.status(400).json({ message: "El nombre no puede superar 200 caracteres" });
+    }
+
+    const postulant = await resolvePostulant(id);
+    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
+    if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
+
+    const count = await ProfileSupport.countDocuments({ profileId: profile._id });
+    if (count >= MAX_PROFILE_SUPPORTS) {
+      return res.status(400).json({ message: `Solo se permiten hasta ${MAX_PROFILE_SUPPORTS} documentos de soporte` });
+    }
+
+    const postulantDocId = postulant.postulantDocId;
+    const originalName = req.file.originalname || "documento";
+    let ext = path.extname(originalName).toLowerCase();
+    const allowedExt = [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".jpg", ".jpeg", ".png"];
+    if (!ext || !allowedExt.includes(ext)) {
+      ext = extFromMimetype(req.file.mimetype);
+    }
+    if (!allowedExt.includes(ext)) {
+      return res.status(400).json({ message: "Extensión no permitida" });
+    }
+
+    const filePart = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}${ext}`;
+    let filepath;
+    if (s3Config.isConfigured) {
+      filepath = `${S3_PREFIX_PERFIL_DOC_SOPORTE}/${postulantDocId}/${profile._id}/${filePart}`;
+      await uploadToS3(filepath, req.file.buffer, { contentType: req.file.mimetype });
+    } else {
+      const dir = path.join(getUploadsRoot(), S3_PREFIX_PERFIL_DOC_SOPORTE, String(postulantDocId), String(profile._id));
+      fs.mkdirSync(dir, { recursive: true });
+      const full = path.join(dir, filePart);
+      fs.writeFileSync(full, req.file.buffer);
+      filepath = `${S3_PREFIX_PERFIL_DOC_SOPORTE}/${postulantDocId}/${profile._id}/${filePart}`.replace(/\\/g, "/");
+    }
+
+    const baseOrig = path.basename(originalName).slice(0, 200);
+    const displayName = `${documentLabel} — ${baseOrig}`.slice(0, 500);
+    const attachment = await Attachment.create({
+      name: displayName,
+      contentType: req.file.mimetype,
+      filepath,
+      status: "active",
+      dateCreation: new Date(),
+      userCreator: req.user?.name || req.user?.email || "api",
+    });
+
+    const ps = await ProfileSupport.create({
+      profileId: profile._id,
+      attachmentId: attachment._id,
+      documentLabel,
+    });
+
+    const populated = await ProfileSupport.findById(ps._id).populate("attachmentId", "name filepath contentType").lean();
+    res.status(201).json(populated);
+  } catch (error) {
+    console.error("[uploadProfileSupport]", error);
+    res.status(500).json({ message: error.message || "Error al subir el documento" });
+  }
+};
+
 /**
  * DELETE /postulants/:id/profiles/:profileId/cvs/:profileCvId
  * Elimina una hoja de vida (documento CV) del perfil: borra ProfileCv, el Attachment y el archivo en S3 si aplica.
@@ -1386,6 +1494,30 @@ export const deleteProfileSupport = async (req, res) => {
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
     const deleted = await ProfileSupport.findOneAndDelete({ _id: profileSupportId, profileId: profile._id });
     if (!deleted) return res.status(404).json({ message: "Documento de soporte no encontrado" });
+
+    const attachmentId = deleted.attachmentId;
+    if (attachmentId) {
+      const attachment = await Attachment.findById(attachmentId).lean();
+      if (attachment?.filepath) {
+        const fp = attachment.filepath;
+        if (s3Config.isConfigured && fp.startsWith(`${S3_PREFIX_PERFIL_DOC_SOPORTE}/`)) {
+          try {
+            await deleteFromS3(fp);
+          } catch (err) {
+            console.error("[deleteProfileSupport] S3:", err);
+          }
+        } else {
+          const fullPath = path.join(getUploadsRoot(), fp);
+          try {
+            if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+          } catch (e) {
+            console.error("[deleteProfileSupport] archivo local:", e);
+          }
+        }
+      }
+      await Attachment.findByIdAndDelete(attachmentId);
+    }
+
     res.json({ message: "Eliminado correctamente", deleted: deleted._id });
   } catch (error) {
     res.status(500).json({ message: error.message });
