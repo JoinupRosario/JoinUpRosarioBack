@@ -19,7 +19,7 @@ export const verifyToken = (req, res, next) => {
 };
 
 // Función para mapear modulo a role (módulo vacío o no definido = estudiante, como en el front)
-const mapModuloToRole = (modulo) => {
+export const mapModuloToRole = (modulo) => {
   const normalized = modulo != null ? String(modulo).trim().toLowerCase() : '';
   const mapping = {
     'entidades': 'company',

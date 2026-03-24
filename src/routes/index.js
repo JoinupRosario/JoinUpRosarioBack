@@ -29,6 +29,8 @@ import documentPracticeDefinitionRoutes from '../modules/documentPracticeDefinit
 import documentMonitoringDefinitionRoutes from '../modules/documentMonitoringDefinition/documentMonitoringDefinition.routes.js';
 import userSucursalRoutes from '../modules/userSucursal/userSucursal.routes.js';
 import estudiantesHabilitadosRoutes from '../modules/estudiantesHabilitados/estudianteHabilitado.routes.js';
+import legalizacionPracticaRoutes from '../modules/legalizacionPractica/legalizacionPractica.routes.js';
+import acuerdoVinculacionPracticaPublicRoutes from '../modules/legalizacionPractica/acuerdoVinculacionPractica.public.routes.js';
 // Notificación: rutas directas desde cada módulo (sin archivo agregador)
 import eventosRoutes from '../modules/notificacion/eventos/evento.routes.js';
 import plantillasNotificacionRoutes from '../modules/notificacion/plantillasNotificacion/plantillaNotificacion.routes.js';
@@ -69,6 +71,8 @@ router.use("/document-practice-definitions", documentPracticeDefinitionRoutes);
 router.use("/document-monitoring-definitions", documentMonitoringDefinitionRoutes);
 router.use("/user-sucursales", userSucursalRoutes);
 router.use("/estudiantes-habilitados", estudiantesHabilitadosRoutes);
+router.use("/acuerdos-vinculacion-practica", acuerdoVinculacionPracticaPublicRoutes);
+router.use("/legalizaciones-practica", legalizacionPracticaRoutes);
 // Notificación: cada submódulo montado bajo /notificacion y en URLs legacy
 router.use("/notificacion/eventos", eventosRoutes);
 router.use("/notificacion/plantillas", plantillasNotificacionRoutes);

@@ -8,6 +8,7 @@ import sharp from "sharp";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import { buildRegistroFirmasRows, firmasTodasPendientes } from "./acuerdoVinculacionFirmas.util.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -254,51 +255,111 @@ function drawTable2Cols(doc, title, rows, startY, logoBuffer) {
   return y + 12;
 }
 
-function drawSignatureLine(doc, x, y, width) {
-  const lineY = y + 2;
-  doc.moveTo(x, lineY).lineTo(x + width, lineY).strokeColor("#111827").lineWidth(0.7).stroke();
-  return y + 8;
+/**
+ * Tabla de firmas electrónicas (se actualiza al regenerar el PDF tras cada aprobación/rechazo).
+ * Columnas: PARTE | NOMBRE | FECHA / HORA | IP | OBSERVACIÓN
+ */
+function drawRegistroFirmasTable(doc, startY, logoBuffer, rows) {
+  const colParte = 78;
+  const colNombre = 108;
+  const colFecha = 96;
+  const colIp = 72;
+  const colObs = TEXT_WIDTH - colParte - colNombre - colFecha - colIp;
+  const pad = 5;
+  const fontHdr = 7;
+  const fontCell = 6.5;
+  const headers = ["PARTE", "NOMBRE", "FECHA / HORA", "IP", "OBSERVACIÓN"];
+  const colXs = [MARGIN, MARGIN + colParte, MARGIN + colParte + colNombre, MARGIN + colParte + colNombre + colFecha, MARGIN + colParte + colNombre + colFecha + colIp];
+  const colWs = [colParte, colNombre, colFecha, colIp, colObs];
+
+  let y = startY;
+
+  function ensureSpace(needH) {
+    if (y + needH > BOTTOM_LIMIT && logoBuffer !== undefined) {
+      doc.addPage({ size: "A4", margin: MARGIN });
+      y = drawHeader(doc, logoBuffer, MARGIN);
+    }
+  }
+
+  ensureSpace(36);
+  doc.font(bodyFontBold).fontSize(10).fillColor("#1f2937");
+  doc.text("REGISTRO DE APROBACIONES ELECTRÓNICAS", MARGIN, y, { width: TEXT_WIDTH });
+  y += 18;
+
+  doc.font(bodyFont).fontSize(8).fillColor("#4b5563");
+  doc.text(
+    "Las partes manifiestan su aceptación o rechazo mediante este medio. Cada registro incluye fecha, hora (Bogotá) y dirección IP cuando está disponible.",
+    MARGIN,
+    y,
+    { width: TEXT_WIDTH, lineGap: 2 }
+  );
+  y += doc.heightOfString(
+    "Las partes manifiestan su aceptación o rechazo mediante este medio. Cada registro incluye fecha, hora (Bogotá) y dirección IP cuando está disponible.",
+    { width: TEXT_WIDTH, lineGap: 2 }
+  ) + 10;
+
+  const headerH = 18;
+  ensureSpace(headerH);
+  doc.font(bodyFontBold).fontSize(fontHdr).fillColor("#111827");
+  for (let c = 0; c < headers.length; c++) {
+    doc.rect(colXs[c], y, colWs[c], headerH).fillAndStroke(HEADER_BG, BORDER);
+    doc.fillColor("#111827").text(headers[c], colXs[c] + pad, y + pad, { width: colWs[c] - pad * 2, lineBreak: false });
+  }
+  y += headerH;
+
+  doc.font(bodyFont).fontSize(fontCell);
+  for (const row of rows) {
+    const cells = [safe(row.parte), safe(row.nombre), safe(row.fechaHora), safe(row.ip), safe(row.observacion)];
+    let rowH = pad * 2;
+    for (let c = 0; c < cells.length; c++) {
+      const h = doc.heightOfString(cells[c], { width: colWs[c] - pad * 2, lineGap: 1 });
+      rowH = Math.max(rowH, h + pad * 2);
+    }
+
+    ensureSpace(rowH + 2);
+    for (let c = 0; c < cells.length; c++) {
+      doc.rect(colXs[c], y, colWs[c], rowH).stroke(BORDER);
+      doc.fillColor("#111827").text(cells[c], colXs[c] + pad, y + pad, { width: colWs[c] - pad * 2, lineGap: 1 });
+    }
+    y += rowH;
+  }
+
+  return y + 14;
 }
 
-function drawClosingAndSignatures(doc, y, logoBuffer, data) {
+function drawClosingAndFirmaTable(doc, y, logoBuffer, data, registroFirmas) {
   const { estudiante = {}, escenario = {}, universidad = {} } = data || {};
   const startX = MARGIN;
   const usableWidth = TEXT_WIDTH;
   const bodySize = 12;
-  const smallSize = 10;
+  const now = new Date();
+  const meses = [
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+  ];
+  const dia = now.getDate();
+  const mes = meses[now.getMonth()];
+  const anio = now.getFullYear();
+  const constanciaLine = `Para constancia, el presente acuerdo se formaliza mediante aceptación electrónica por cada una de LAS PARTES, registrada en el cuadro siguiente. Documento generado con soporte en la plataforma UR Jobs el ${dia} de ${mes} de ${anio}.`;
+
   const closingLines = [
     { text: `**LA UNIVERSIDAD** en ${universidad.direccion || "la ciudad de Bogotá D.C."}`, gapAfter: 12 },
     { text: `**EL ESCENARIO DE PRÁCTICA** en ${escenario.direccion || "—"}`, gapAfter: 12 },
     { text: `**EL PRACTICANTE** en ${estudiante.direccion || "—"}`, gapAfter: 14 },
-    {
-      text: "Para constancia, se firma el presente documento en tres (3) ejemplares del mismo tenor, con destino a cada una de LAS PARTES, a los veinte (20) días del mes de febrero del año dos mil veintiseis (2026).",
-      gapAfter: 22,
-    },
+    { text: constanciaLine, gapAfter: 16 },
   ];
 
-  const signers = [
-    {
-      title: "EL PRACTICANTE,",
-      name: estudiante.nombreApellidos || "—",
-      id: `CC No.${estudiante.numeroDocumento || "—"}`,
-      extra: "",
-    },
-    {
-      title: "LA UNIVERSIDAD,",
-      name: universidad.representanteNombre || "—",
-      id: `CC No. ${universidad.representanteNumeroDoc || "—"} de Bogotá D.C.`,
-      extra: "",
-    },
-    {
-      title: "ESCENARIO DE PRÁCTICA LABORAL",
-      name: escenario.representanteLegalNombre || "—",
-      id: `CC No. ${escenario.representanteNumeroDoc || "—"}`,
-      extra: "",
-    },
-  ];
-
-  const estimateHeight = 220;
-  if (y + estimateHeight > BOTTOM_LIMIT) {
+  if (y + 120 > BOTTOM_LIMIT) {
     doc.addPage({ size: "A4", margin: MARGIN });
     y = drawHeader(doc, logoBuffer, MARGIN);
   }
@@ -310,8 +371,7 @@ function drawClosingAndSignatures(doc, y, logoBuffer, data) {
     const lineList = flowSegmentsToLines(doc, parts, usableWidth, bodySize);
     for (let i = 0; i < lineList.length; i++) {
       const isLast = i === lineList.length - 1;
-      const lineHeight = isLast ? LINE_HEIGHT_BODY : LINE_HEIGHT_BODY;
-      if (y + lineHeight > BOTTOM_LIMIT) {
+      if (y + LINE_HEIGHT_BODY > BOTTOM_LIMIT) {
         doc.addPage({ size: "A4", margin: MARGIN });
         y = drawHeader(doc, logoBuffer, MARGIN);
         doc.font(bodyFont).fontSize(bodySize).fillColor("#000000");
@@ -321,47 +381,13 @@ function drawClosingAndSignatures(doc, y, logoBuffer, data) {
     y += line.gapAfter || 0;
   }
 
-  y += 12;
-  for (const signer of signers) {
-    const blockStart = y;
-    const titleHeight = doc.heightOfString(signer.title, { width: usableWidth });
-    const nameHeight = doc.heightOfString(signer.name, { width: usableWidth });
-    const idHeight = doc.heightOfString(signer.id, { width: usableWidth });
-    const extraHeight = signer.extra ? doc.heightOfString(signer.extra, { width: usableWidth }) + 2 : 0;
-    const blockHeight = 12 + titleHeight + 16 + nameHeight + 4 + idHeight + extraHeight + 12;
-
-    if (y + blockHeight > BOTTOM_LIMIT) {
-      doc.addPage({ size: "A4", margin: MARGIN });
-      y = drawHeader(doc, logoBuffer, MARGIN);
-    }
-
-    doc.font(bodyFontBold).fontSize(smallSize).fillColor("#000000");
-    doc.text(signer.title, startX, y, { width: usableWidth, align: "left" });
-    y += Math.max(12, doc.heightOfString(signer.title, { width: usableWidth }) + 2);
-
-    y += 16;
-    y = drawSignatureLine(doc, startX, y, 220);
-
-    doc.font(bodyFont).fontSize(smallSize).fillColor("#000000");
-    doc.text(signer.name, startX, y, { width: usableWidth, align: "left" });
-    y += Math.max(12, nameHeight + 2);
-    doc.text(signer.id, startX, y, { width: usableWidth, align: "left" });
-    y += Math.max(12, idHeight + 2);
-
-    if (signer.extra) {
-      doc.text(signer.extra, startX, y, { width: usableWidth, align: "left" });
-      y += Math.max(12, extraHeight + 2);
-    }
-
-    y += 18;
-  }
-
-  return y;
+  return drawRegistroFirmasTable(doc, y, logoBuffer, registroFirmas);
 }
 
 /**
  * Genera el buffer del PDF del Acuerdo de Vinculación.
- * @param {object} data - { estudiante, escenario, universidad, practica, parametrizacion }
+ * @param {object} data - { estudiante, escenario, universidad, practica, parametrizacion, registroFirmas? }
+ *   - registroFirmas: filas { parte, nombre, fechaHora, ip, observacion }[]; si no viene, se asume todo pendiente.
  *   - estudiante: { nombreApellidos, tipoDocumento, numeroDocumento, facultad, programa, semestre, creditosAprobados }
  *   - escenario: { nombreOrganizacion, tipoIdentificacion, nit, representanteLegalNombre, representanteTipoDoc, representanteNumeroDoc, tutorNombre, tutorTipoDoc, tutorNumeroDoc }
  *   - universidad: { tipoIdentificacion, numeroIdentificacion, representanteNombre, representanteTipoDoc, representanteNumeroDoc, monitorNombre, monitorTipoDoc, monitorNumeroDoc }
@@ -371,6 +397,10 @@ function drawClosingAndSignatures(doc, y, logoBuffer, data) {
  */
 export async function buildAcuerdoVinculacionPdf(data) {
   const { estudiante = {}, escenario = {}, universidad = {}, practica = {}, parametrizacion = {} } = data;
+  const registroFirmas =
+    Array.isArray(data.registroFirmas) && data.registroFirmas.length > 0
+      ? data.registroFirmas
+      : buildRegistroFirmasRows(firmasTodasPendientes(), data, {});
 
   const rowsEstudiante = [
     { label: "Tipo de documento de identificación", value: estudiante.tipoDocumento || "C.C." },
@@ -493,11 +523,13 @@ export async function buildAcuerdoVinculacionPdf(data) {
       }
     }
 
-    y = drawClosingAndSignatures(doc, y, logoBuffer, {
-      estudiante,
-      escenario,
-      universidad,
-    });
+    y = drawClosingAndFirmaTable(
+      doc,
+      y,
+      logoBuffer,
+      { estudiante, escenario, universidad },
+      registroFirmas
+    );
 
     doc.end();
   });

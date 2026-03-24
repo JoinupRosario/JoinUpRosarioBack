@@ -4,7 +4,6 @@
  * la plataforma genera el PDF con tablas (estudiante, escenario, universidad, características)
  * y datos de la BD. No se usa plantilla externa.
  */
-import Opportunity from "../modules/opportunities/opportunity.model.js";
 import PostulacionOportunidad from "../modules/opportunities/postulacionOportunidad.model.js";
 import Company from "../modules/companies/company.model.js";
 import Postulant from "../modules/postulants/models/postulants.schema.js";
@@ -22,8 +21,41 @@ const VALOR_TIPO_VINCULACION_ACUERDO = "Acuerdo de vinculación";
 
 export function esAcuerdoDeVinculacion(tipoVinculacion) {
   if (!tipoVinculacion) return false;
-  const value = typeof tipoVinculacion === "object" ? tipoVinculacion.value : tipoVinculacion;
-  return String(value || "").trim() === VALOR_TIPO_VINCULACION_ACUERDO;
+  const raw = typeof tipoVinculacion === "object"
+    ? tipoVinculacion.value || tipoVinculacion.description || ""
+    : tipoVinculacion;
+  const n = (s) =>
+    String(s || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .trim()
+      .toLowerCase();
+  return n(raw) === n(VALOR_TIPO_VINCULACION_ACUERDO);
+}
+
+/**
+ * Tutor/monitor empresa: prioriza cierre de oportunidad (cierreDatosTutor por postulación), si no contacto de práctica.
+ */
+export function resolveTutorEmpresaParaAcuerdo(opp, postulacionId) {
+  const arr = opp?.cierreDatosTutor || [];
+  const row = arr.find((t) => t.postulacionId && String(t.postulacionId) === String(postulacionId));
+  if (row) {
+    return {
+      nombres: [row.nombreTutor, row.apellidoTutor].filter(Boolean).join(" ").trim() || "—",
+      tipoIdent: row.tipoIdentTutor || "C.C.",
+      identificacion: safe(row.identificacionTutor) || "—",
+    };
+  }
+  const company = opp?.company;
+  const c = company?.contacts?.find((x) => x.isPracticeTutor) || company?.contacts?.[0];
+  if (!c) {
+    return { nombres: "—", tipoIdent: "C.C.", identificacion: "—" };
+  }
+  return {
+    nombres: [c.firstName, c.lastName].filter(Boolean).join(" ").trim() || "—",
+    tipoIdent: c.idType || "C.C.",
+    identificacion: safe(c.identification) || "—",
+  };
 }
 
 function safe(v) {
@@ -32,43 +64,44 @@ function safe(v) {
 }
 
 /**
- * Inicia el flujo: carga datos, genera el PDF del acuerdo y lo guarda.
+ * Arma el payload del PDF (mismas tablas que la vista previa de parametrización) con datos reales de BD.
+ * Usa tutor/monitor de empresa desde cierreDatosTutor (si existe) o contacto tutor de la compañía.
  */
-export async function iniciarFlujoAcuerdoVinculacion(postulacionId, opportunityId, opportunity = null) {
-  let opp = opportunity;
-  if (!opp) {
-    opp = await Opportunity.findById(opportunityId)
-      .populate("tipoVinculacion", "value")
-      .populate("company")
-      .populate("dedicacion", "value")
-      .populate("periodo", "codigo")
-      .lean();
-  }
-  if (!opp) return;
-
-  const po = await PostulacionOportunidad.findById(postulacionId)
+export async function buildAcuerdoVinculacionPdfDataFromPostulacion(postulacionId) {
+  const pid = String(postulacionId);
+  const po = await PostulacionOportunidad.findById(pid)
     .populate("postulant")
     .populate({
       path: "opportunity",
       populate: [
         { path: "company" },
-        { path: "dedicacion", select: "value" },
+        { path: "tipoVinculacion", select: "value description" },
+        { path: "dedicacion", select: "value description" },
         { path: "periodo", select: "codigo" },
       ],
     })
     .populate("postulantProfile")
     .lean();
-  if (!po || !po.postulant || !po.opportunity) return;
 
-  const companyId = po.opportunity?.company?._id ?? po.opportunity?.company ?? opp?.company?._id ?? opp?.company;
+  if (!po || !po.postulant || !po.opportunity) {
+    return { ok: false, message: "Postulación no encontrada" };
+  }
+
+  const oppData = po.opportunity;
+  const companyId = oppData?.company?._id ?? oppData?.company;
   const company = companyId ? await Company.findById(companyId).lean() : null;
+  const oppForTutor = { ...oppData, company: company || oppData.company };
+
   const postulant = await Postulant.findById(po.postulant._id)
-    .populate("postulantId", "name email")
+    .populate("postulantId", "name email code")
     .populate("typeOfIdentification", "value")
     .populate("cityResidenceId", "name")
     .lean();
+
   const profileId = po.postulantProfile?._id || po.postulantProfile;
-  if (!profileId) return;
+  if (!profileId) {
+    return { ok: false, message: "Perfil de postulante no encontrado" };
+  }
 
   const enrolledPrograms = await ProfileEnrolledProgram.find({ profileId })
     .populate("programId", "name code")
@@ -87,8 +120,8 @@ export async function iniciarFlujoAcuerdoVinculacion(postulacionId, opportunityI
   const extra = firstEnrolled
     ? programExtraInfoList.find((ex) => String(ex.enrolledProgramId) === String(firstEnrolled._id))
     : null;
-  const oppData = po.opportunity || opp;
-  const periodo = oppData?.periodo?.codigo || "";
+  const periodoCodigo = oppData?.periodo?.codigo || "";
+  const semestreCred = extra?.accordingCreditSemester != null ? String(extra.accordingCreditSemester) : null;
 
   const estudiante = {
     nombreApellidos: safe(postulant?.postulantId?.name) || "—",
@@ -97,7 +130,7 @@ export async function iniciarFlujoAcuerdoVinculacion(postulacionId, opportunityI
     direccion: [safe(postulant?.address), safe(postulant?.cityResidenceId?.name)].filter(Boolean).join(" ").trim() || "—",
     facultad: firstEnrolled?.programFacultyId?.facultyId?.name || "—",
     programa: firstEnrolled?.programId?.name || firstEnrolled?.programId?.code || "—",
-    semestre: periodo || "—",
+    semestre: semestreCred || periodoCodigo || "—",
     creditosAprobados: extra?.approvedCredits != null ? String(extra.approvedCredits) : "—",
   };
 
@@ -105,36 +138,35 @@ export async function iniciarFlujoAcuerdoVinculacion(postulacionId, opportunityI
   const repNombre = legalRep?.firstName || legalRep?.lastName
     ? [legalRep.firstName, legalRep.lastName].filter(Boolean).join(" ")
     : company?.contact?.name || "—";
-  const tutorContact = company?.contacts?.find((c) => c.isPracticeTutor) || company?.contacts?.[0];
-  const tutorNombre = tutorContact
-    ? [tutorContact.firstName, tutorContact.lastName].filter(Boolean).join(" ").trim() || "—"
-    : "—";
+
+  const tutorEmp = resolveTutorEmpresaParaAcuerdo(oppForTutor, pid);
 
   const escenario = {
-    nombreOrganizacion: company?.name || company?.legalName || "—",
+    nombreOrganizacion: company?.legalName || company?.name || "—",
     tipoIdentificacion: "NIT",
     nit: safe(company?.nit || company?.idNumber) || "—",
     direccion: [safe(company?.address), safe(company?.city)].filter(Boolean).join(" ").trim() || "—",
     representanteLegalNombre: repNombre,
     representanteTipoDoc: company?.legalRepresentative?.idType || "C.C.",
     representanteNumeroDoc: safe(company?.legalRepresentative?.idNumber) || "—",
-    tutorNombre,
-    tutorTipoDoc: tutorContact?.idType || "C.C.",
-    tutorNumeroDoc: safe(tutorContact?.identification) || "—",
+    tutorNombre: tutorEmp.nombres,
+    tutorTipoDoc: tutorEmp.tipoIdent || "C.C.",
+    tutorNumeroDoc: tutorEmp.identificacion || "—",
   };
 
   const universidad = {
     tipoIdentificacion: "NIT",
-    numeroIdentificacion: "—",
-    representanteNombre: "—",
+    numeroIdentificacion: safe(process.env.ACUERDO_UNIVERSIDAD_NIT) || "—",
+    direccion: safe(process.env.ACUERDO_UNIVERSIDAD_DIRECCION) || "la ciudad de Bogotá D.C.",
+    representanteNombre: safe(process.env.ACUERDO_UNIVERSIDAD_REPRESENTANTE) || "—",
     representanteTipoDoc: "C.C.",
-    representanteNumeroDoc: "—",
-    monitorNombre: "—",
-    monitorTipoDoc: "C.C.",
-    monitorNumeroDoc: "—",
+    representanteNumeroDoc: safe(process.env.ACUERDO_UNIVERSIDAD_REP_DOC) || "—",
+    monitorNombre: tutorEmp.nombres,
+    monitorTipoDoc: tutorEmp.tipoIdent || "C.C.",
+    monitorNumeroDoc: tutorEmp.identificacion || "—",
   };
 
-  const dedicacionValue = oppData?.dedicacion?.value || "";
+  const dedicacionValue = oppData?.dedicacion?.value || oppData?.dedicacion?.description || "";
   const practica = {
     fechaInicio: oppData?.fechaInicioPractica ?? null,
     fechaFin: oppData?.fechaFinPractica ?? null,
@@ -151,13 +183,20 @@ export async function iniciarFlujoAcuerdoVinculacion(postulacionId, opportunityI
     textosLegalesAcuerdo: parametrizacionDoc?.textosLegalesAcuerdo ?? "",
   };
 
-  const pdfBuffer = await buildAcuerdoVinculacionPdf({
-    estudiante,
-    escenario,
-    universidad,
-    practica,
-    parametrizacion,
-  });
+  const payload = { estudiante, escenario, universidad, practica, parametrizacion };
+  return { ok: true, payload };
+}
+
+export { formatFechaHoraPdfBogota, buildRegistroFirmasRows, firmasTodasPendientes } from "./acuerdoVinculacionFirmas.util.js";
+
+/**
+ * Inicia el flujo: carga datos, genera el PDF del acuerdo y lo guarda.
+ */
+export async function iniciarFlujoAcuerdoVinculacion(postulacionId, opportunityId, opportunity = null) {
+  const built = await buildAcuerdoVinculacionPdfDataFromPostulacion(postulacionId);
+  if (!built.ok) return;
+
+  const pdfBuffer = await buildAcuerdoVinculacionPdf(built.payload);
 
   const uploadsRoot = path.join(__dirname, "..", "uploads");
   const acuerdosDir = path.join(uploadsRoot, "acuerdos");

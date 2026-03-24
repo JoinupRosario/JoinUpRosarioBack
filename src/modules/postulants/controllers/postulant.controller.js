@@ -45,6 +45,8 @@ import {
   calculateListFallbackCompleteness,
 } from "../services/profileCompleteness.service.js";
 import { userHasPermission } from "../../access/presentation/helpers/checkPermission.js";
+import PostulacionOportunidad from "../../opportunities/postulacionOportunidad.model.js";
+import PostulacionMTM from "../../oportunidadesMTM/postulacionMTM.model.js";
 
 /** Prefijo S3 para hojas de vida: hojas-vida/{postulantId}/{profileId}/archivo.pdf */
 const S3_PREFIX_HOJAS_VIDA = "hojas-vida";
@@ -2841,5 +2843,106 @@ export const sincronizarPostulantesUxxi = async (req, res) => {
   } catch (err) {
     console.error("[sincronizarUxxi] ERROR FATAL:", err.message, err.stack);
     res.status(500).json({ message: "Error en sincronización UXXI", error: err.message });
+  }
+};
+
+/**
+ * GET /postulants/:id/historial-aplicaciones
+ * Prácticas + monitorías del postulante (misma forma que "mis postulaciones" para el front).
+ * Permiso: VPPO/EMIP o postulante viendo su propio expediente.
+ */
+export const getHistorialAplicacionesPostulant = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "ID de postulante inválido" });
+    }
+    const postulant = await Postulant.findById(id).select("_id").lean();
+    if (!postulant) {
+      return res.status(404).json({ message: "Postulante no encontrado" });
+    }
+
+    const [practicas, mtm] = await Promise.all([
+      PostulacionOportunidad.find({ postulant: postulant._id })
+        .populate({
+          path: "opportunity",
+          select: "nombreCargo company periodo fechaVencimiento estado",
+          populate: { path: "company", select: "name commercialName" },
+        })
+        .populate("postulantProfile", "studentCode")
+        .sort({ fechaAplicacion: -1 })
+        .lean(),
+      PostulacionMTM.find({ postulant: postulant._id })
+        .populate({
+          path: "oportunidadMTM",
+          select: "nombreCargo estado fechaVencimiento nombreProfesor profesorResponsable",
+          populate: { path: "profesorResponsable", select: "nombres apellidos" },
+        })
+        .populate("postulantProfile", "studentCode")
+        .sort({ fechaAplicacion: -1 })
+        .lean(),
+    ]);
+
+    const dataPractica = practicas.map((p) => {
+      const opp = p.opportunity;
+      const company = opp?.company;
+      return {
+        _id: p._id,
+        tipoOportunidad: "Práctica",
+        cargo: opp?.nombreCargo,
+        empresa: company?.name || company?.commercialName,
+        fechaAplicacion: p.fechaAplicacion,
+        estadoOportunidad: opp?.estado,
+        estado: p.estado,
+        empresaConsultoPerfil: !!p.empresaConsultoPerfilAt,
+        empresaDescargoHv: !!p.empresaDescargoHvAt,
+        seleccionadoPorEmpresa: p.estado === "seleccionado_empresa" || p.estado === "aceptado_estudiante",
+        opportunityId: opp?._id,
+        oportunidadId: opp?._id,
+        nombreCoordinador: undefined,
+      };
+    });
+
+    let diasHabiles = 8;
+    try {
+      const Parameter = (await import("../../parameters/parameter.model.js")).default;
+      const param = await Parameter.findOne({ code: "DIAS_HABILES_ACEPTAR_SELECCION_MTM", "metadata.active": true }).lean();
+      if (param != null && typeof param.value === "number" && param.value > 0) diasHabiles = param.value;
+    } catch (_) {
+      /* ignore */
+    }
+
+    const dataMtm = mtm.map((p) => {
+      const opp = p.oportunidadMTM;
+      const nombreCoordinador = opp?.profesorResponsable
+        ? [opp.profesorResponsable.nombres, opp.profesorResponsable.apellidos].filter(Boolean).join(" ").trim() || opp?.nombreProfesor
+        : opp?.nombreProfesor ?? null;
+      return {
+        _id: p._id,
+        cargo: opp?.nombreCargo,
+        fechaAplicacion: p.fechaAplicacion,
+        tipoOportunidad: "Monitoría / Tutoría / Mentoría",
+        estadoOportunidad: opp?.estado,
+        estado: p.estado,
+        empresaConsultoPerfil: !!p.empresaConsultoPerfilAt,
+        empresaDescargoHv: !!p.empresaDescargoHvAt,
+        seleccionado: p.estado === "seleccionado_empresa" || p.estado === "aceptado_estudiante",
+        oportunidadId: opp?._id,
+        opportunityId: opp?._id,
+        nombreCoordinador: nombreCoordinador || undefined,
+        empresa: "Universidad del Rosario",
+        diasHabilesAceptarSeleccion: diasHabiles,
+        seleccionadoAt: p.seleccionadoAt,
+      };
+    });
+
+    const merged = [...dataPractica, ...dataMtm].sort(
+      (a, b) => new Date(b.fechaAplicacion || 0) - new Date(a.fechaAplicacion || 0)
+    );
+
+    res.json({ data: merged, total: merged.length, diasHabilesAceptarSeleccion: diasHabiles });
+  } catch (err) {
+    console.error("[Postulants] getHistorialAplicacionesPostulant:", err);
+    res.status(500).json({ message: err.message || "Error al obtener historial de aplicaciones" });
   }
 };

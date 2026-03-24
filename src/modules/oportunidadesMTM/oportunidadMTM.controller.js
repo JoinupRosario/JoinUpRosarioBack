@@ -752,6 +752,19 @@ export const getOportunidadesMTMParaEstudiante = async (req, res) => {
     const total = filtered.length;
     const opportunities = filtered.slice(skip, skip + limit);
 
+    /** Conteo de postulantes por oferta (misma UX que tarjetas de prácticas). */
+    if (opportunities.length > 0) {
+      const oppIds = opportunities.map((o) => o._id).filter(Boolean);
+      const countRows = await PostulacionMTM.aggregate([
+        { $match: { oportunidadMTM: { $in: oppIds } } },
+        { $group: { _id: "$oportunidadMTM", count: { $sum: 1 } } },
+      ]);
+      const byId = new Map(countRows.map((r) => [String(r._id), r.count]));
+      opportunities.forEach((o) => {
+        o.postulacionesCount = byId.get(String(o._id)) || 0;
+      });
+    }
+
     res.json({
       opportunities,
       totalPages: Math.ceil(total / limit),

@@ -18,6 +18,7 @@ import {
   togglePostulantEstado,
   previewSincronizarUxxi,
   sincronizarPostulantesUxxi,
+  getHistorialAplicacionesPostulant,
 } from "../controllers/postulant.controller.js";
 import {
   getProfilesByPostulantId,
@@ -153,6 +154,7 @@ router.get("/:id/generate-hoja-vida-pdf", requirePermissionOrOwnPostulant("VPPO"
 router.get("/:id/can-generate-carta-presentacion", requirePermissionOrOwnPostulant("VPPO", "EMIP"), canGenerateCartaPresentacion);
 router.get("/:id/generate-carta-presentacion-pdf", requirePermissionOrOwnPostulant("VPPO", "EMIP"), generateCartaPresentacionPdf);
 router.get("/:id/profile-data", requirePermissionOrOwnPostulant("VPPO", "EMIP"), getPostulantProfileData);
+router.get("/:id/historial-aplicaciones", requirePermissionOrOwnPostulant("VPPO", "EMIP"), getHistorialAplicacionesPostulant);
 // Consulta y aplicación desde Sistema Académico: mismo permiso para ver diferencias y aplicar
 router.get("/:id/consulta-inf-estudiante-universitas", requirePermission("ADPS"), consultaInfEstudianteUniversitas);
 router.put("/:id/aplicar-info-universitas", requirePermission("ADPS"), aplicarInfoUniversitas);

@@ -11,7 +11,7 @@ import Country from "../shared/location/models/country.schema.js";
 import City from "../shared/location/models/city.schema.js";
 import Item from "../shared/reference-data/models/item.schema.js";
 import Parameter from "../parameters/parameter.model.js";
-import { esAcuerdoDeVinculacion, iniciarFlujoAcuerdoVinculacion } from "../../services/acuerdoVinculacion.service.js";
+import LegalizacionPractica from "../legalizacionPractica/legalizacionPractica.model.js";
 
 const CODE_MAX_JORNADA_ORDINARIA = "PRACTICE_MAX_JORNADA_ORDINARIA_SEMANAL";
 const CODE_MIN_APOYO_ECONOMICO_COP = "PRACTICE_MIN_APOYO_ECONOMICO_COP";
@@ -25,6 +25,35 @@ async function getMinApoyoEconomicoCop() {
     if (Number.isFinite(n) && n >= 500000 && n <= 50000000) return n;
   } catch (_) {}
   return DEFAULT_MIN_APOYO_COP;
+}
+
+/**
+ * RQ04_HU004: al aceptar la práctica se crea de inmediato el expediente de legalización (borrador),
+ * para que listados/admin vean la gestión sin depender de que el estudiante abra el detalle.
+ */
+async function ensureLegalizacionPracticaOnAcceptance(postulacionOportunidadId, userId = null) {
+  try {
+    const pid = postulacionOportunidadId?.toString?.() ?? postulacionOportunidadId;
+    if (!pid || !mongoose.Types.ObjectId.isValid(pid)) return;
+    const exists = await LegalizacionPractica.exists({ postulacionOportunidad: pid });
+    if (exists) return;
+    await LegalizacionPractica.create({
+      postulacionOportunidad: pid,
+      estado: "borrador",
+      historial: [
+        {
+          estadoAnterior: null,
+          estadoNuevo: "borrador",
+          usuario: userId || null,
+          fecha: new Date(),
+          detalle: "Legalización creada al aceptar la práctica.",
+          ip: null,
+        },
+      ],
+    });
+  } catch (e) {
+    console.error("[opportunities] ensureLegalizacionPracticaOnAcceptance:", e?.message || e);
+  }
 }
 
 async function getMaxJornadaOrdinariaSemanal() {
@@ -1385,14 +1414,8 @@ export const estudianteResponderPostulacion = async (req, res) => {
     }
     await po.save();
 
-    // RQ04_HU006: Si el estudiante confirmó y la oportunidad es tipo "Acuerdo de vinculación", iniciar flujo de generación de acuerdo
     if (accion === "confirmar") {
-      const opp = await Opportunity.findById(opportunityId).populate("tipoVinculacion", "value").lean();
-      if (opp && esAcuerdoDeVinculacion(opp.tipoVinculacion)) {
-        iniciarFlujoAcuerdoVinculacion(po._id.toString(), opportunityId, opp).catch((err) => {
-          console.error("[RQ04_HU006] Error iniciando flujo acuerdo de vinculación:", err);
-        });
-      }
+      await ensureLegalizacionPracticaOnAcceptance(po._id, userId);
     }
 
     res.json({
@@ -1455,6 +1478,8 @@ export const coordinacionAceptarEnNombreEstudiante = async (req, res) => {
         },
       }
     );
+
+    await ensureLegalizacionPracticaOnAcceptance(po._id, req.user?.id || null);
 
     res.json({
       message: "Aceptación registrada en nombre del estudiante",

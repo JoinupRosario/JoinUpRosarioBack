@@ -22,6 +22,9 @@ dotenv.config();
 
 const app = express();
 
+// Tras proxy (Vercel, nginx, etc.) para que req.ip y X-Forwarded-For reflejen al cliente real
+app.set("trust proxy", process.env.TRUST_PROXY === "0" ? false : 1);
+
 // Configurar estrategia SAML en passport
 configureSaml(passport);
 
