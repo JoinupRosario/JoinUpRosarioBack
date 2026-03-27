@@ -79,8 +79,37 @@ function isAllowedPostulantEmail(email) {
   return String(email).trim().toLowerCase().endsWith(ALLOWED_EMAIL_DOMAIN.toLowerCase());
 }
 
+function debugPostulantsApi(event, payload = {}) {
+  try {
+    console.log(
+      "[POSTULANTS_API_DEBUG]",
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        event,
+        module: "postulants",
+        ...payload,
+      })
+    );
+  } catch {
+    console.log("[POSTULANTS_API_DEBUG]", event, payload);
+  }
+}
+
 export const getPostulants = async (req, res) => {
   try {
+    debugPostulantsApi("getPostulants:start", {
+      requesterId: req.user?.id || null,
+      requesterModulo: req.user?.modulo || null,
+      requesterRole: req.user?.role || null,
+      query: {
+        page: req.query?.page || null,
+        limit: req.query?.limit || null,
+        status: req.query?.status || null,
+        search: req.query?.search || null,
+        userEstado: req.query?.userEstado || null,
+      },
+    });
+
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
     const { status, search, userEstado } = req.query;
@@ -98,12 +127,18 @@ export const getPostulants = async (req, res) => {
         .select("programas")
         .lean();
       if (!adminUser) {
+        debugPostulantsApi("getPostulants:adminWithoutAssociation", {
+          requesterId: req.user?.id || null,
+        });
         return res.json({ data: [], total: 0, totalPages: 0, currentPage: page });
       }
       const associatedProgramIds = (adminUser?.programas || [])
         .filter((p) => p?.estado !== false && p?.program)
         .map((p) => String(p.program));
       if (associatedProgramIds.length === 0) {
+        debugPostulantsApi("getPostulants:noProgramsForAdmin", {
+          requesterId: req.user?.id || null,
+        });
         return res.json({ data: [], total: 0, totalPages: 0, currentPage: page });
       }
       const [enrolledProfileIds, graduateProfileIds] = await Promise.all([
@@ -207,6 +242,15 @@ export const getPostulants = async (req, res) => {
         : null,
     }));
 
+    debugPostulantsApi("getPostulants:success", {
+      requesterId: req.user?.id || null,
+      isAdministrativeUser,
+      total,
+      returned: data.length,
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+    });
+
     res.json({
       data,
       total,
@@ -214,6 +258,10 @@ export const getPostulants = async (req, res) => {
       currentPage: page,
     });
   } catch (error) {
+    debugPostulantsApi("getPostulants:error", {
+      requesterId: req.user?.id || null,
+      message: error?.message || String(error),
+    });
     res.status(500).json({ message: error.message });
   }
 };
@@ -323,6 +371,13 @@ export const getPostulantMe = async (req, res) => {
 export const getPostulantById = async (req, res) => {
   try {
     const { id } = req.params;
+    debugPostulantsApi("getPostulantById:start", {
+      requesterId: req.user?.id || null,
+      requesterModulo: req.user?.modulo || null,
+      requesterRole: req.user?.role || null,
+      targetId: id || null,
+    });
+
     const idStr = id && String(id).trim();
     if (!idStr) {
       return res.status(400).json({ message: "ID de postulante es requerido" });
@@ -339,6 +394,10 @@ export const getPostulantById = async (req, res) => {
     }
 
     if (!postulant) {
+      debugPostulantsApi("getPostulantById:notFound", {
+        requesterId: req.user?.id || null,
+        targetId: idStr,
+      });
       return res.status(404).json({ message: "Postulante no encontrado" });
     }
 
@@ -350,8 +409,18 @@ export const getPostulantById = async (req, res) => {
     const profile = await PostulantProfile.findOne({ postulantId: postulant._id }).select("acceptTerms").lean();
     const response = formatPostulantProfileResponse(postulant);
     response.acept_terms = profile?.acceptTerms ?? false;
+    debugPostulantsApi("getPostulantById:success", {
+      requesterId: req.user?.id || null,
+      targetId: idStr,
+      resolvedPostulantId: String(postulant?._id || ""),
+    });
     res.json(response);
   } catch (error) {
+    debugPostulantsApi("getPostulantById:error", {
+      requesterId: req.user?.id || null,
+      targetId: req.params?.id || null,
+      message: error?.message || String(error),
+    });
     console.error("[getPostulantById]", error?.message || error);
     if (process.env.NODE_ENV !== "production") {
       console.error(error?.stack);
@@ -1335,6 +1404,15 @@ export const aplicarInfoAcademicaUniversitas = async (req, res) => {
 export const getPostulantProfileData = async (req, res) => {
   try {
     const { id } = req.params;
+    debugPostulantsApi("getPostulantProfileData:start", {
+      requesterId: req.user?.id || null,
+      requesterModulo: req.user?.modulo || null,
+      requesterRole: req.user?.role || null,
+      targetId: id || null,
+      profileId: req.query?.profileId || null,
+      versionId: req.query?.versionId || null,
+    });
+
     const idStr = id && String(id).trim();
     const { profileId: queryProfileId, versionId: queryVersionId } = req.query;
     if (!idStr) return res.status(400).json({ message: "ID de postulante es requerido" });
@@ -1342,7 +1420,13 @@ export const getPostulantProfileData = async (req, res) => {
     let postulant = null;
     if (isValidObjectId) postulant = await Postulant.findById(idStr).select("_id postulantId").lean();
     if (!postulant) postulant = await Postulant.findOne({ postulantId: idStr }).select("_id postulantId").lean();
-    if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
+    if (!postulant) {
+      debugPostulantsApi("getPostulantProfileData:notFoundPostulant", {
+        requesterId: req.user?.id || null,
+        targetId: idStr,
+      });
+      return res.status(404).json({ message: "Postulante no encontrado" });
+    }
     const postulantDocId = postulant._id;
     const userId = postulant.postulantId ?? null;
     const profileFilter = userId
@@ -1366,6 +1450,10 @@ export const getPostulantProfileData = async (req, res) => {
         .lean();
     }
     if (!postulantProfile) {
+      debugPostulantsApi("getPostulantProfileData:noProfile", {
+        requesterId: req.user?.id || null,
+        targetId: idStr,
+      });
       return res.json({
         profileCompleteness: null,
         postulantProfile: null,
@@ -1485,6 +1573,20 @@ export const getPostulantProfileData = async (req, res) => {
       console.error("[getPostulantProfileData] recalc completeness:", err?.message || err);
     }
 
+    debugPostulantsApi("getPostulantProfileData:success", {
+      requesterId: req.user?.id || null,
+      targetId: idStr,
+      profileId: String(profileId || ""),
+      selectedVersionId: selectedProfileVersion?._id ? String(selectedProfileVersion._id) : null,
+      counts: {
+        enrolledPrograms: enrolledPrograms?.length || 0,
+        graduatePrograms: graduatePrograms?.length || 0,
+        workExperiences: workExperiences?.length || 0,
+        skills: skills?.length || 0,
+        languages: languages?.length || 0,
+      },
+    });
+
     res.json({
       profileCompleteness,
       postulantProfile,
@@ -1505,6 +1607,11 @@ export const getPostulantProfileData = async (req, res) => {
       profileProfileVersions,
     });
   } catch (error) {
+    debugPostulantsApi("getPostulantProfileData:error", {
+      requesterId: req.user?.id || null,
+      targetId: req.params?.id || null,
+      message: error?.message || String(error),
+    });
     console.error("[getPostulantProfileData]", error?.message || error);
     if (process.env.NODE_ENV !== "production") console.error(error?.stack);
     res.status(500).json({

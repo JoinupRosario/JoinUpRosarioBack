@@ -8,15 +8,28 @@ import {
   crearUsuariosBD,
   patchEstadoFinalEstudianteHabilitado,
 } from "./estudianteHabilitado.controller.js";
-import { verifyToken } from "../../middlewares/auth.js";
+import { verifyToken, mapModuloToRole } from "../../middlewares/auth.js";
 import { requirePermission } from "../access/presentation/middlewares/requirePermission.js";
 
 const router = express.Router();
 
 router.use(verifyToken);
 
-// ¿Está el usuario actual autorizado para prácticas? (para home estudiante) — sin permiso de módulo
-router.get("/me-autorizado", requirePermission("AMPR", "BUSP"), getMeAutorizado);
+/**
+ * Permite acceso si:
+ * - es estudiante/postulante autenticado, o
+ * - tiene al menos uno de los permisos administrativos indicados.
+ */
+function requirePermissionOrStudent(...codes) {
+  return async (req, res, next) => {
+    const role = req.user?.role || mapModuloToRole(req.user?.modulo);
+    if (role === "student") return next();
+    return requirePermission(...codes)(req, res, next);
+  };
+}
+
+// ¿Está el usuario actual autorizado para prácticas? (para home estudiante) — solo requiere sesión
+router.get("/me-autorizado", requirePermissionOrStudent("AMPR", "BUSP"), getMeAutorizado);
 
 // AMPR = Acceso módulo prácticas; BUSP = Buscar estudiantes; CEST = Cargar estudiantes
 router.get("/", requirePermission("AMPR", "BUSP"), getEstudiantesHabilitados);

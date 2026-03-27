@@ -59,7 +59,7 @@ import {
   deleteProfileSupport,
   uploadProfileSupport,
 } from "../controllers/postulantProfile.controller.js";
-import { verifyToken } from "../../../middlewares/auth.js";
+import { verifyToken, mapModuloToRole } from "../../../middlewares/auth.js";
 import { requirePermission } from "../../access/presentation/middlewares/requirePermission.js";
 import { userHasPermission } from "../../access/presentation/helpers/checkPermission.js";
 import { upload, handleUploadError, uploadProfileSupportMemory, handleProfileSupportUploadError } from "../../../middlewares/upload.js";
@@ -82,6 +82,15 @@ function requirePermissionOrOwnPostulant(...permissionCodes) {
       if (has) return next();
     }
     return res.status(403).json({ message: "No tiene permiso para esta acción" });
+  };
+}
+
+/** Permite estudiante/postulante o permisos administrativos indicados. */
+function requirePermissionOrStudent(...permissionCodes) {
+  return async (req, res, next) => {
+    const role = req.user?.role || mapModuloToRole(req.user?.modulo);
+    if (role === "student") return next();
+    return requirePermission(...permissionCodes)(req, res, next);
   };
 }
 
@@ -143,8 +152,8 @@ router.post(
 );
 router.delete("/:id/profiles/:profileId/supports/:profileSupportId", requirePermissionOrOwnPostulant("EPOS", "EMIP"), deleteProfileSupport);
 
-// Ruta "mi postulante" — requiere permiso de perfil propio/visualización.
-router.get("/me", requirePermission("EMIP", "VPPO"), getPostulantMe);
+// Ruta "mi postulante" — estudiante autenticado o administrativo con permiso.
+router.get("/me", requirePermissionOrStudent("EMIP", "VPPO"), getPostulantMe);
 
 // LBPO = Listar/Buscar postulante
 router.get("/", requirePermission("LBPO"), getPostulants);
