@@ -28,13 +28,13 @@ const router = express.Router();
 
 router.use(verifyToken);
 
-router.get("/meta", requirePermission("CFDL"), getMeta);
-router.get("/", requirePermission("CFDL"), listDocumentMonitoringDefinitions);
-router.get("/:id/file/:kind/access", requirePermission("CFDL"), getMonitoringDefFileAccess);
-router.get("/:id/file/:kind/stream", requirePermission("CFDL"), streamMonitoringDefFile);
-router.get("/:id", requirePermission("CFDL"), getDocumentMonitoringDefinitionById);
-router.post("/", requirePermission("CFDL"), uploadFields, createDocumentMonitoringDefinition);
-router.put("/:id", requirePermission("CFDL"), uploadFields, updateDocumentMonitoringDefinition);
-router.delete("/:id", requirePermission("CFDL"), deleteDocumentMonitoringDefinition);
+router.get("/meta", requirePermission("CDDM"), getMeta);
+router.get("/", requirePermission("CDDM"), listDocumentMonitoringDefinitions);
+router.get("/:id/file/:kind/access", requirePermission("CDDM"), getMonitoringDefFileAccess);
+router.get("/:id/file/:kind/stream", requirePermission("CDDM"), streamMonitoringDefFile);
+router.get("/:id", requirePermission("CDDM"), getDocumentMonitoringDefinitionById);
+router.post("/", requirePermission("CRDM"), uploadFields, createDocumentMonitoringDefinition);
+router.put("/:id", requirePermission("ACDM"), uploadFields, updateDocumentMonitoringDefinition);
+router.delete("/:id", requirePermission("ELDM"), deleteDocumentMonitoringDefinition);
 
 export default router;

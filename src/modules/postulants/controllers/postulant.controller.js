@@ -3,6 +3,7 @@ import Postulant from "../models/postulants.schema.js";
 import PostulantProfile from "../models/profile/profile.schema.js";
 import PostulantAcademic from "../models/postulant_academic.schema.js";
 import User from "../../users/user.model.js";
+import UserAdministrativo from "../../usersAdministrativos/userAdministrativo.model.js";
 import PostulantStatusHistory from "../models/logs/postulantLogStatus.schema.js";
 import {
   ProfileEnrolledProgram,
@@ -86,6 +87,39 @@ export const getPostulants = async (req, res) => {
 
     const postulantFilter = {};
     if (status && String(status).trim()) postulantFilter.estatePostulant = String(status).trim();
+
+    // Restricción por programas SOLO para usuarios administrativos
+    // (los que se gestionan en Usuarios -> Asociar programas).
+    const userModulo = String(req.user?.modulo || "").trim().toLowerCase();
+    const isAdministrativeUser = userModulo === "administrativo";
+    if (isAdministrativeUser) {
+      // Si no tiene programas asociados activos, no ve estudiantes.
+      const adminUser = await UserAdministrativo.findOne({ user: req.user?.id, estado: true })
+        .select("programas")
+        .lean();
+      if (!adminUser) {
+        return res.json({ data: [], total: 0, totalPages: 0, currentPage: page });
+      }
+      const associatedProgramIds = (adminUser?.programas || [])
+        .filter((p) => p?.estado !== false && p?.program)
+        .map((p) => String(p.program));
+      if (associatedProgramIds.length === 0) {
+        return res.json({ data: [], total: 0, totalPages: 0, currentPage: page });
+      }
+      const [enrolledProfileIds, graduateProfileIds] = await Promise.all([
+        ProfileEnrolledProgram.distinct("profileId", {
+          programId: { $in: associatedProgramIds },
+        }),
+        ProfileGraduateProgram.distinct("profileId", {
+          programId: { $in: associatedProgramIds },
+        }),
+      ]);
+      const profileIds = [...new Set([...enrolledProfileIds, ...graduateProfileIds])];
+      const allowedPostulantIds = await PostulantProfile.distinct("postulantId", {
+        _id: { $in: profileIds },
+      });
+      postulantFilter._id = { $in: allowedPostulantIds };
+    }
 
     // Filtrar por User.estado (activos/inactivos) — sin restringir por modulo
     let allowedUserIds = null; // null = sin restricción de tab

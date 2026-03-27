@@ -183,7 +183,12 @@ const PORT = process.env.PORT || 5000;
 
 // Solo hacer listen si no estamos en Vercel
 if (process.env.VERCEL !== "1") {
-  app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+    import("./modules/notificacion/infrastructure/emailJobProcessor.js")
+      .then((m) => m.startEmailJobProcessor())
+      .catch((e) => console.error("[notificacion] Worker de correo:", e));
+  });
 }
 
 // Exportar para Vercel - debe ser una función handler

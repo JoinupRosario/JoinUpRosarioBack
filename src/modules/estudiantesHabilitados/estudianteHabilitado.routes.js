@@ -16,7 +16,7 @@ const router = express.Router();
 router.use(verifyToken);
 
 // ¿Está el usuario actual autorizado para prácticas? (para home estudiante) — sin permiso de módulo
-router.get("/me-autorizado", getMeAutorizado);
+router.get("/me-autorizado", requirePermission("AMPR", "BUSP"), getMeAutorizado);
 
 // AMPR = Acceso módulo prácticas; BUSP = Buscar estudiantes; CEST = Cargar estudiantes
 router.get("/", requirePermission("AMPR", "BUSP"), getEstudiantesHabilitados);

@@ -5,8 +5,74 @@
  * - Renderizar texto reemplazando [KEY] o {{KEY}} con datos reales
  */
 
-const VARIABLE_REGEX = /\[([A-Z0-9_]+)\]/gi;
-const VARIABLE_REGEX_DOUBLE = /\{\{([A-Z0-9_]+)\}\}/gi;
+/** Acepta [KEY] y [key] (mayúsculas/minúsculas) para plantillas editadas en rich text. */
+const VARIABLE_REGEX = /\[([A-Za-z0-9_]+)\]/gi;
+const VARIABLE_REGEX_DOUBLE = /\{\{([A-Za-z0-9_]+)\}\}/gi;
+
+/**
+ * Claves antiguas → clave canónica en catálogo (misma semántica).
+ * Permite validar y renderizar plantillas que aún usan [IDENTIFICACION_ESTUDIANTE], etc.
+ */
+const VARIABLE_KEY_ALIASES = {
+  IDENTIFICACION_ESTUDIANTE: "NUMERO_IDENTIFICACION",
+  NUMERO_DOCUMENTO_ESTUDIANTE: "NUMERO_IDENTIFICACION",
+  NUMERO_IDENTIFICACION_ENTIDAD: "NUMERO_IDENTIFICACION",
+  TIPO_DOCUMENTO_ESTUDIANTE: "TIPO_IDENTIFICACION",
+  NIT_ENTIDAD: "NUMERO_IDENTIFICACION",
+  NUMERO_NIT: "NUMERO_IDENTIFICACION",
+  DOCUMENTO_ENTIDAD: "NUMERO_IDENTIFICACION",
+  DOMICILIO: "DIRECCION",
+  DIRECCION_ENTIDAD: "DIRECCION",
+};
+
+function canonicalNotificationKey(key) {
+  const u = String(key).toUpperCase();
+  return VARIABLE_KEY_ALIASES[u] || u;
+}
+
+function pickDatumRaw(d, k) {
+  if (k == null) return undefined;
+  const ku = String(k).trim();
+  if (Object.prototype.hasOwnProperty.call(d, ku)) return d[ku];
+  const upper = ku.toUpperCase();
+  if (Object.prototype.hasOwnProperty.call(d, upper)) return d[upper];
+  const found = Object.keys(d).find((k0) => String(k0).trim().toUpperCase() === upper);
+  if (found != null) return d[found];
+  return undefined;
+}
+
+function resolveDatumForKey(key, datos) {
+  const upper = String(key).trim().toUpperCase();
+  const d = datos && typeof datos === "object" ? datos : {};
+  const pick = (k) => {
+    const v = pickDatumRaw(d, k);
+    return v != null && String(v).trim() !== "" ? String(v) : null;
+  };
+  let v = pick(upper);
+  if (v != null) return v;
+  const canon = VARIABLE_KEY_ALIASES[upper];
+  if (canon) {
+    v = pick(canon);
+    if (v != null) return v;
+  }
+  for (const [alias, c] of Object.entries(VARIABLE_KEY_ALIASES)) {
+    if (c === upper) {
+      v = pick(alias);
+      if (v != null) return v;
+    }
+  }
+  return "";
+}
+
+/** Rich text / HTML suele guardar `&#91;` / `&#93;` en lugar de `[` `]`; sin esto no matchea el regex y no se reemplaza. */
+function normalizePlaceholderDelimiters(text) {
+  if (!text || typeof text !== "string") return "";
+  return text
+    .replace(/&#91;/gi, "[")
+    .replace(/&#93;/gi, "]")
+    .replace(/\uFF3B/g, "[")
+    .replace(/\uFF3D/g, "]");
+}
 
 /**
  * Extrae los nombres de variables (sin corchetes) de un texto.
@@ -20,11 +86,11 @@ export function extractVariablesFromText(text) {
   let match;
   const re = new RegExp(VARIABLE_REGEX.source, "gi");
   while ((match = re.exec(text)) !== null) {
-    keys.add(String(match[1]).toUpperCase());
+    keys.add(String(match[1] || "").trim().toUpperCase());
   }
   const re2 = new RegExp(VARIABLE_REGEX_DOUBLE.source, "gi");
   while ((match = re2.exec(text)) !== null) {
-    keys.add(String(match[1]).toUpperCase());
+    keys.add(String(match[1] || "").trim().toUpperCase());
   }
   return Array.from(keys);
 }
@@ -57,13 +123,23 @@ export function validatePlantillaVariables(asunto, cuerpo, validKeys) {
  */
 export function renderPlantillaContent(text, datos = {}) {
   if (!text || typeof text !== "string") return "";
-  let result = text;
-  const keys = extractVariablesFromText(text);
+  let result = normalizePlaceholderDelimiters(text);
+  const keys = extractVariablesFromText(result);
   for (const key of keys) {
-    const value = datos[key] != null ? String(datos[key]) : "";
+    const value = resolveDatumForKey(key, datos);
     const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     result = result.replace(new RegExp(`\\[${escaped}\\]`, "gi"), value);
     result = result.replace(new RegExp(`\\{\\{${escaped}\\}\\}`, "gi"), value);
+  }
+  // Fallback: claves presentes en `datos` pero no detectadas (p. ej. otro formato intermedio)
+  const d = datos && typeof datos === "object" ? datos : {};
+  for (const k of Object.keys(d)) {
+    const ku = String(k).trim().toUpperCase();
+    if (!/^[A-Z0-9_]+$/.test(ku)) continue;
+    const val = resolveDatumForKey(ku, datos);
+    const escaped = ku.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    result = result.replace(new RegExp(`\\[${escaped}\\]`, "gi"), val);
+    result = result.replace(new RegExp(`\\{\\{${escaped}\\}\\}`, "gi"), val);
   }
   return result;
 }

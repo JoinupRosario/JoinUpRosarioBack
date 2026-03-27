@@ -10,24 +10,25 @@ import {
   toggleEstadoCondicion,
   deleteCondicionCurricular,
 } from "./condicionCurricular.controller.js";
-import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
+import { verifyToken } from "../../middlewares/auth.js";
+import { requirePermission } from "../access/presentation/middlewares/requirePermission.js";
 
 const router = express.Router();
 
 router.use(verifyToken);
 
 // Metadatos (variables y operadores disponibles para el builder)
-router.get("/variables", getVariablesDisponibles);
+router.get("/variables", requirePermission("CFCC"), getVariablesDisponibles);
 // Programas con condición curricular activa para un periodo (formación académica en oportunidades)
-router.get("/programas-habilitados", getProgramasHabilitadosPorPeriodo);
-router.get("/program-faculty-en-reglas-activas", getProgramFacultyIdsEnReglasActivas);
+router.get("/programas-habilitados", requirePermission("CFCC"), getProgramasHabilitadosPorPeriodo);
+router.get("/program-faculty-en-reglas-activas", requirePermission("CFCC"), getProgramFacultyIdsEnReglasActivas);
 
 // CRUD
-router.get("/",    getCondicionesCurriculares);
-router.get("/:id", getCondicionCurricularById);
-router.post("/",   authorizeRoles("admin", "superadmin"), createCondicionCurricular);
-router.put("/:id", authorizeRoles("admin", "superadmin"), updateCondicionCurricular);
-router.patch("/:id/toggle-estado", authorizeRoles("admin", "superadmin"), toggleEstadoCondicion);
-router.delete("/:id", authorizeRoles("admin", "superadmin"), deleteCondicionCurricular);
+router.get("/", requirePermission("CFCC"), getCondicionesCurriculares);
+router.get("/:id", requirePermission("CFCC"), getCondicionCurricularById);
+router.post("/", requirePermission("CFCC"), createCondicionCurricular);
+router.put("/:id", requirePermission("CFCC"), updateCondicionCurricular);
+router.patch("/:id/toggle-estado", requirePermission("CFCC"), toggleEstadoCondicion);
+router.delete("/:id", requirePermission("CFCC"), deleteCondicionCurricular);
 
 export default router;

@@ -12,6 +12,19 @@ import City from "../shared/location/models/city.schema.js";
 import Item from "../shared/reference-data/models/item.schema.js";
 import Parameter from "../parameters/parameter.model.js";
 import LegalizacionPractica from "../legalizacionPractica/legalizacionPractica.model.js";
+import UserAdministrativo from "../usersAdministrativos/userAdministrativo.model.js";
+import Program from "../program/model/program.model.js";
+import { dispatchNotificationByEvent } from "../notificacion/application/dispatchNotificationByEvent.service.js";
+import { parseEnvEmailList } from "../notificacion/application/resolveRecipientEmails.js";
+import {
+  loadPracticaPostulacionContext,
+  dispatchPracticaNotification,
+  entityAndCoordinatorsRecipientContext,
+  studentOnlyRecipientContext,
+  buildDatosPracticaSimple,
+  findOtrasPostulacionesActivas,
+  practicaOpportunityDashboardLink,
+} from "../notificacion/application/practicaOpportunityNotifications.helper.js";
 
 const CODE_MAX_JORNADA_ORDINARIA = "PRACTICE_MAX_JORNADA_ORDINARIA_SEMANAL";
 const CODE_MIN_APOYO_ECONOMICO_COP = "PRACTICE_MIN_APOYO_ECONOMICO_COP";
@@ -213,6 +226,41 @@ function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+async function getAdminProgramScope(req) {
+  const userModulo = String(req.user?.modulo || "").trim().toLowerCase();
+  if (userModulo !== "administrativo") return null;
+
+  const adminUser = await UserAdministrativo.findOne({ user: req.user?.id, estado: true })
+    .select("programas")
+    .lean();
+  const programIds = (adminUser?.programas || [])
+    .filter((p) => p?.estado !== false && p?.program)
+    .map((p) => String(p.program));
+  if (programIds.length === 0) return { programIds: [], programTerms: [] };
+
+  const programs = await Program.find({ _id: { $in: programIds } }).select("name code").lean();
+  const programTerms = [
+    ...new Set(
+      programs
+        .flatMap((p) => [String(p?.name || "").trim(), String(p?.code || "").trim()])
+        .filter(Boolean)
+    ),
+  ];
+  return { programIds, programTerms };
+}
+
+function opportunityMatchesAdminProgram(opportunity, programTerms) {
+  if (!programTerms?.length) return false;
+  const oppPrograms = (opportunity?.formacionAcademica || [])
+    .map((f) => String(f?.program || "").trim().toLowerCase())
+    .filter(Boolean);
+  if (!oppPrograms.length) return false;
+  return programTerms.some((term) => {
+    const t = String(term).trim().toLowerCase();
+    return t && oppPrograms.some((p) => p.includes(t) || t.includes(p));
+  });
+}
+
 // Obtener todas las oportunidades
 export const getOpportunities = async (req, res) => {
   try {
@@ -239,6 +287,10 @@ export const getOpportunities = async (req, res) => {
     } = req.query;
 
     const filter = {};
+    const adminScope = await getAdminProgramScope(req);
+    if (adminScope && adminScope.programTerms.length === 0) {
+      return res.json({ opportunities: [], totalPages: 0, currentPage: parseInt(page), total: 0 });
+    }
 
     // Filtros básicos
     if (estado) filter.estado = estado;
@@ -289,6 +341,14 @@ export const getOpportunities = async (req, res) => {
     // Filtro por formación académica
     if (formacionAcademica) {
       filter["formacionAcademica.program"] = { $regex: formacionAcademica, $options: "i" };
+    }
+    if (adminScope?.programTerms?.length) {
+      const adminProgramClause = {
+        $or: adminScope.programTerms.map((term) => ({
+          "formacionAcademica.program": { $regex: escapeRegex(term), $options: "i" },
+        })),
+      };
+      filter.$and = [...(filter.$and || []), adminProgramClause];
     }
 
     // Filtro por estados de revisión
@@ -531,6 +591,7 @@ export const getOfertasParaEstudiantePracticas = async (req, res) => {
 // Obtener oportunidad por ID
 export const getOpportunityById = async (req, res) => {
   try {
+    const adminScope = await getAdminProgramScope(req);
     const opportunity = await Opportunity.findById(req.params.id)
       .populate("company", "name commercialName sector logo contact")
       .populate("periodo", "codigo tipo estado")
@@ -555,6 +616,9 @@ export const getOpportunityById = async (req, res) => {
 
     if (!opportunity) {
       return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+    if (adminScope && !opportunityMatchesAdminProgram(opportunity, adminScope.programTerms)) {
+      return res.status(403).json({ message: "No autorizado para ver esta oportunidad." });
     }
 
     const payload = opportunity.toObject ? opportunity.toObject() : { ...opportunity };
@@ -691,10 +755,73 @@ export const createOpportunity = async (req, res) => {
       }]
     });
 
-    await opportunity.populate("company", "name commercialName sector logo");
+    await opportunity.populate("company", "name commercialName sector logo address phone city country");
     await opportunity.populate("creadoPor", "name email");
     await opportunity.populate("tipoVinculacion", "value description listId");
+    await opportunity.populate("periodo", "codigo tipo estado");
     await opportunity.populate("historialEstados.cambiadoPor", "name email");
+
+    if (String(opportunity.tipo || "").toLowerCase() === "practica") {
+      try {
+        const baseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "http://localhost:5173";
+        const link = `${String(baseUrl).replace(/\/$/, "")}/#/`;
+        const tv = opportunity.tipoVinculacion;
+        const modalidad =
+          tv && typeof tv === "object"
+            ? String(tv.description || tv.value || "").trim()
+            : "";
+        const programasAprobaciones = Array.isArray(opportunity.aprobacionesPorPrograma)
+          ? opportunity.aprobacionesPorPrograma
+              .map((ap) => {
+                const level = String(ap?.programa?.level || "").trim();
+                const program = String(ap?.programa?.program || "").trim();
+                if (level && program) return `${level} - ${program}`;
+                return program || level || "";
+              })
+              .filter(Boolean)
+          : [];
+        const programasFormacion = Array.isArray(opportunity.formacionAcademica)
+          ? opportunity.formacionAcademica
+              .map((f) => {
+                const level = String(f?.level || "").trim();
+                const program = String(f?.program || "").trim();
+                if (level && program) return `${level} - ${program}`;
+                return program || level || "";
+              })
+              .filter(Boolean)
+          : [];
+        const programas = [...new Set([...(programasAprobaciones || []), ...(programasFormacion || [])])];
+        const direccionEntidad = String(opportunity.company?.address || "").trim();
+        const telefonoEntidad = String(opportunity.company?.phone || "").trim();
+        const datos = {
+          NOMBRE_OPORTUNIDAD: opportunity.nombreCargo || "",
+          TIPO_OPORTUNIDAD: "Práctica profesional",
+          MODALIDAD_VINCULACION: modalidad,
+          FUNCIONES: String(opportunity.funciones || "").trim(),
+          PROGRAMA: programas.join(", "),
+          PERIODO: opportunity.periodo?.codigo != null ? String(opportunity.periodo.codigo) : "",
+          LINK: link,
+          DIRECCION: direccionEntidad,
+          TELEFONO: telefonoEntidad,
+          NOMBRE_ENTIDAD:
+            opportunity.company?.commercialName || opportunity.company?.name || "",
+        };
+        const creadorEmail = opportunity.creadoPor?.email;
+        await dispatchNotificationByEvent({
+          eventValue: "creacion_oportunidad",
+          tipo: "practica",
+          datos,
+          recipientContext: {
+            lider_practica: creadorEmail,
+            coordinador: parseEnvEmailList(process.env.NOTIFICATION_EMAILS_COORDINADOR),
+            administrador: parseEnvEmailList(process.env.NOTIFICATION_EMAILS_ADMIN),
+          },
+          metadata: { opportunityId: String(opportunity._id) },
+        });
+      } catch (notifyErr) {
+        console.error("[opportunities] creacion_oportunidad notificación:", notifyErr?.message || notifyErr);
+      }
+    }
 
     res.status(201).json({
       message: "Oportunidad creada correctamente",
@@ -867,10 +994,47 @@ export const changeStatus = async (req, res) => {
 
     const finalOpportunity = await Opportunity.findById(id)
       .populate("company", "name commercialName sector logo")
+      .populate("creadoPor", "name email")
       .populate("revisadoPor", "name email")
       .populate("activadoPor", "name email")
       .populate("rechazadoPor", "name email")
       .populate("historialEstados.cambiadoPor", "name email");
+
+    if (estadoAnterior !== estado) {
+      try {
+        const tipoPr = String(finalOpportunity?.tipo || "").toLowerCase();
+        if (tipoPr === "practica") {
+          const link = practicaOpportunityDashboardLink(finalOpportunity?._id || id);
+          const isActivaORechazada = estado === "Activa" || estado === "Rechazada";
+          const eventValue = isActivaORechazada
+            ? "activacion_rechazo_oportunidad"
+            : "actualizacion_estado_oportunidad";
+          const creador = finalOpportunity?.creadoPor?.email;
+          await dispatchNotificationByEvent({
+            eventValue,
+            tipo: "practica",
+            datos: {
+              NOMBRE_OPORTUNIDAD: finalOpportunity?.nombreCargo || "",
+              ESTADO_OPORTUNIDAD: estado || "",
+              OBSERVACION: comentarios || "",
+              LINK: link,
+            },
+            recipientContext: {
+              ...entityAndCoordinatorsRecipientContext(creador),
+              lider_practica: [
+                creador,
+                finalOpportunity?.revisadoPor?.email,
+                finalOpportunity?.activadoPor?.email,
+                finalOpportunity?.rechazadoPor?.email,
+              ].filter(Boolean),
+            },
+            metadata: { opportunityId: String(finalOpportunity?._id || id) },
+          });
+        }
+      } catch (notifyErr) {
+        console.error("[opportunities] cambio estado oportunidad notificación:", notifyErr?.message || notifyErr);
+      }
+    }
 
     res.json({
       message: `Estado cambiado a "${estado}" correctamente`,
@@ -971,6 +1135,22 @@ export const closeOpportunity = async (req, res) => {
       .populate("rechazadoPor", "name email")
       .populate("historialEstados.cambiadoPor", "name email");
 
+    if (String(opportunity.tipo || "").toLowerCase() === "practica" && seleccionados.length > 0) {
+      const obs = contratoBool
+        ? "Ha sido seleccionado(a) en el cierre de la oportunidad. Revise los siguientes pasos en la plataforma."
+        : String(motivoNoContrato || "Cierre de oportunidad.").trim();
+      for (const sid of seleccionados) {
+        const ctxC = await loadPracticaPostulacionContext(sid);
+        if (!ctxC) continue;
+        await dispatchPracticaNotification(
+          "notificacion_resultados_postulacion_estudiantes",
+          { ...ctxC.datos, OBSERVACION: obs },
+          studentOnlyRecipientContext(ctxC.postulantEmail),
+          { opportunityId: String(id), postulacionId: String(sid), source: "closeOpportunity" }
+        );
+      }
+    }
+
     res.json({
       message: "Oportunidad cerrada correctamente",
       opportunity: updated,
@@ -1030,8 +1210,38 @@ export const rejectOpportunity = async (req, res) => {
 
     const finalOpportunity = await Opportunity.findById(id)
       .populate("company", "name commercialName sector logo")
+      .populate("creadoPor", "name email")
       .populate("rechazadoPor", "name email")
       .populate("historialEstados.cambiadoPor", "name email");
+
+    if (String(finalOpportunity?.tipo || "").toLowerCase() === "practica") {
+      try {
+        const motivoTxt =
+          motivoRechazo === "Otro"
+            ? String(motivoRechazoOtro || "").trim()
+            : String(motivoRechazo || "").trim();
+        await dispatchNotificationByEvent({
+          eventValue: "activacion_rechazo_oportunidad",
+          tipo: "practica",
+          datos: {
+            NOMBRE_OPORTUNIDAD: finalOpportunity?.nombreCargo || "",
+            ESTADO_OPORTUNIDAD: "Rechazada",
+            OBSERVACION: motivoTxt,
+            LINK: practicaOpportunityDashboardLink(id),
+          },
+          recipientContext: {
+            ...entityAndCoordinatorsRecipientContext(finalOpportunity?.creadoPor?.email),
+            lider_practica: [
+              finalOpportunity?.creadoPor?.email,
+              finalOpportunity?.rechazadoPor?.email,
+            ].filter(Boolean),
+          },
+          metadata: { opportunityId: String(id), source: "rejectOpportunity" },
+        });
+      } catch (e) {
+        console.error("[opportunities] rejectOpportunity notificación:", e?.message || e);
+      }
+    }
 
     res.json({
       message: "Oportunidad rechazada correctamente",
@@ -1193,6 +1403,25 @@ export const applyToOpportunity = async (req, res) => {
     const populatedOpportunity = await Opportunity.findById(id)
       .populate("postulaciones.estudiante", "studentId faculty program");
 
+    if (String(opportunity.tipo || "").toLowerCase() === "practica") {
+      try {
+        const oppPop = await Opportunity.findById(id)
+          .populate("company", "name commercialName")
+          .populate("creadoPor", "email name")
+          .lean();
+        const studentPop = await Student.findById(student._id).populate("user", "name email").lean();
+        const datos = buildDatosPracticaSimple(oppPop, studentPop?.user);
+        await dispatchPracticaNotification(
+          "postulacion_estudiantes_entidad_lideres",
+          datos,
+          entityAndCoordinatorsRecipientContext(oppPop?.creadoPor?.email),
+          { opportunityId: String(id), source: "applyToOpportunity_legacy" }
+        );
+      } catch (e) {
+        console.error("[opportunities] postulacion legacy notificación:", e?.message || e);
+      }
+    }
+
     res.status(201).json({
       message: "Postulación enviada correctamente",
       postulacion: populatedOpportunity.postulaciones[populatedOpportunity.postulaciones.length - 1]
@@ -1284,6 +1513,18 @@ export const aplicarOportunidad = async (req, res) => {
       .populate("postulant", "postulantId")
       .populate("postulantProfile", "studentCode");
 
+    if (String(opportunity.tipo || "").toLowerCase() === "practica") {
+      const ctx = await loadPracticaPostulacionContext(postulacion._id);
+      if (ctx) {
+        await dispatchPracticaNotification(
+          "postulacion_estudiantes_entidad_lideres",
+          ctx.datos,
+          entityAndCoordinatorsRecipientContext(ctx.creadorEmail),
+          { postulacionId: String(postulacion._id), opportunityId: String(opportunityId) }
+        );
+      }
+    }
+
     res.status(201).json({
       message: "Postulación enviada correctamente",
       postulacion: populated,
@@ -1374,6 +1615,7 @@ export const estudianteResponderPostulacion = async (req, res) => {
     }
 
     const now = new Date();
+    let otrasPostulacionIds = [];
     if (accion === "confirmar") {
       const yaTieneAceptada = await PostulacionOportunidad.exists({
         postulant: postulant._id,
@@ -1385,6 +1627,9 @@ export const estudianteResponderPostulacion = async (req, res) => {
           message: "Ya confirmó otra oportunidad. Solo puede aceptar una entidad definitivamente.",
         });
       }
+      const otrosDocs = await findOtrasPostulacionesActivas(postulant._id, po._id);
+      otrasPostulacionIds = otrosDocs.map((d) => d._id);
+
       po.estado = "aceptado_estudiante";
       po.aceptadoEstudianteAt = now;
       po.rechazadoAt = null;
@@ -1414,6 +1659,60 @@ export const estudianteResponderPostulacion = async (req, res) => {
     }
     await po.save();
 
+    const oppTipoCheck = await Opportunity.findById(opportunityId).select("tipo").lean();
+    if (String(oppTipoCheck?.tipo || "").toLowerCase() === "practica") {
+      if (accion === "confirmar") {
+        const ctx = await loadPracticaPostulacionContext(po._id);
+        if (ctx) {
+          await dispatchPracticaNotification(
+            "aceptacion_inscripcion_oportunidad_estudiantes",
+            { ...ctx.datos },
+            studentOnlyRecipientContext(ctx.postulantEmail),
+            { postulacionId: String(po._id), opportunityId: String(opportunityId) }
+          );
+          await dispatchPracticaNotification(
+            "actualizacion_estado_oportunidad_aceptacion_rechazo_entidad",
+            {
+              ...ctx.datos,
+              ESTADO_OPORTUNIDAD: "Aceptado por el estudiante",
+              COMENTARIO: po.comentarios || "",
+            },
+            entityAndCoordinatorsRecipientContext(ctx.creadorEmail),
+            { postulacionId: String(po._id), opportunityId: String(opportunityId) }
+          );
+        }
+        for (const oid of otrasPostulacionIds) {
+          const ctxO = await loadPracticaPostulacionContext(oid);
+          if (!ctxO) continue;
+          await dispatchPracticaNotification(
+            "notificacion_entidad_estudiante_no_continua",
+            {
+              ...ctxO.datos,
+              OBSERVACION:
+                "El estudiante aceptó de forma definitiva otra oportunidad. Esta postulación quedó sin continuidad.",
+            },
+            entityAndCoordinatorsRecipientContext(ctxO.creadorEmail),
+            { postulacionId: String(oid), opportunityId: String(ctxO.po.opportunity) }
+          );
+        }
+      } else {
+        const ctx = await loadPracticaPostulacionContext(po._id);
+        if (ctx) {
+          await dispatchPracticaNotification(
+            "actualizacion_estado_oportunidad_aceptacion_rechazo_entidad",
+            {
+              ...ctx.datos,
+              ESTADO_OPORTUNIDAD: "Rechazado por el estudiante",
+              COMENTARIO: po.comentarios || "",
+            },
+            entityAndCoordinatorsRecipientContext(ctx.creadorEmail),
+            { postulacionId: String(po._id), opportunityId: String(opportunityId) }
+          );
+        }
+      }
+    }
+
+    // RQ04_HU006: Si el estudiante confirmó y la oportunidad es tipo "Acuerdo de vinculación", iniciar flujo de generación de acuerdo
     if (accion === "confirmar") {
       await ensureLegalizacionPracticaOnAcceptance(po._id, userId);
     }
@@ -1456,6 +1755,9 @@ export const coordinacionAceptarEnNombreEstudiante = async (req, res) => {
       return res.status(400).json({ message: "El estudiante ya tiene otra oportunidad aceptada definitivamente" });
     }
 
+    const otrosDocs = await findOtrasPostulacionesActivas(po.postulant, po._id);
+    const otrasPostulacionIds = otrosDocs.map((d) => d._id);
+
     po.estado = "aceptado_estudiante";
     po.aceptadoEstudianteAt = now;
     po.rechazadoAt = null;
@@ -1481,6 +1783,43 @@ export const coordinacionAceptarEnNombreEstudiante = async (req, res) => {
 
     await ensureLegalizacionPracticaOnAcceptance(po._id, req.user?.id || null);
 
+    const oppTipoCoord = await Opportunity.findById(opportunityId).select("tipo").lean();
+    if (String(oppTipoCoord?.tipo || "").toLowerCase() === "practica") {
+      const ctx = await loadPracticaPostulacionContext(po._id);
+      if (ctx) {
+        await dispatchPracticaNotification(
+          "aceptacion_inscripcion_oportunidad_estudiantes",
+          { ...ctx.datos, COMENTARIO: "Aceptación registrada por coordinación en nombre del estudiante." },
+          studentOnlyRecipientContext(ctx.postulantEmail),
+          { postulacionId: String(po._id), opportunityId: String(opportunityId), source: "coord_aceptar" }
+        );
+        await dispatchPracticaNotification(
+          "actualizacion_estado_oportunidad_aceptacion_rechazo_entidad",
+          {
+            ...ctx.datos,
+            ESTADO_OPORTUNIDAD: "Aceptado (coordinación en nombre del estudiante)",
+            COMENTARIO: po.comentarios || "",
+          },
+          entityAndCoordinatorsRecipientContext(ctx.creadorEmail),
+          { postulacionId: String(po._id), opportunityId: String(opportunityId), source: "coord_aceptar" }
+        );
+      }
+      for (const oid of otrasPostulacionIds) {
+        const ctxO = await loadPracticaPostulacionContext(oid);
+        if (!ctxO) continue;
+        await dispatchPracticaNotification(
+          "notificacion_entidad_estudiante_no_continua",
+          {
+            ...ctxO.datos,
+            OBSERVACION:
+              "Coordinación aceptó en nombre del estudiante otra oportunidad. Esta postulación quedó sin continuidad.",
+          },
+          entityAndCoordinatorsRecipientContext(ctxO.creadorEmail),
+          { postulacionId: String(oid), opportunityId: String(ctxO.po.opportunity), source: "coord_aceptar" }
+        );
+      }
+    }
+
     res.json({
       message: "Aceptación registrada en nombre del estudiante",
       estado: po.estado,
@@ -1494,6 +1833,7 @@ export const coordinacionAceptarEnNombreEstudiante = async (req, res) => {
 // Obtener postulaciones de una oportunidad (legacy Student + PostulacionOportunidad de postulantes)
 export const getApplications = async (req, res) => {
   try {
+    const adminScope = await getAdminProgramScope(req);
     const opportunity = await Opportunity.findById(req.params.id)
       .populate({
         path: "postulaciones.estudiante",
@@ -1504,6 +1844,9 @@ export const getApplications = async (req, res) => {
 
     if (!opportunity) {
       return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+    if (adminScope && !opportunityMatchesAdminProgram(opportunity, adminScope.programTerms)) {
+      return res.status(403).json({ message: "No autorizado para ver postulaciones de esta oportunidad." });
     }
 
     const postulantesList = await PostulacionOportunidad.find({ opportunity: req.params.id })
@@ -1556,6 +1899,22 @@ export const getApplications = async (req, res) => {
       return map[est] || est || "—";
     };
 
+    const allowedProfileIdsSet =
+      adminScope?.programIds?.length
+        ? new Set(
+            [
+              ...(await ProfileEnrolledProgram.distinct("profileId", {
+                profileId: { $in: profileIds },
+                programId: { $in: adminScope.programIds },
+              })),
+              ...(await ProfileGraduateProgram.distinct("profileId", {
+                profileId: { $in: profileIds },
+                programId: { $in: adminScope.programIds },
+              })),
+            ].map((id) => String(id))
+          )
+        : null;
+
     const postulacionesLegacy = (opportunity.postulaciones || []).map((p) => {
       const po = p.toObject?.() || p;
       const estudiante = po.estudiante || {};
@@ -1575,6 +1934,10 @@ export const getApplications = async (req, res) => {
         descargada: false,
         estadoLabel: "Enviado",
       };
+    }).filter((p) => {
+      if (!adminScope?.programTerms?.length) return true;
+      const programs = (p.programasEnCurso || []).map((x) => String(x).toLowerCase());
+      return adminScope.programTerms.some((t) => programs.some((pname) => pname.includes(String(t).toLowerCase())));
     });
 
     const postulacionesPostulantes = postulantesList.map((p) => {
@@ -1605,6 +1968,10 @@ export const getApplications = async (req, res) => {
         revisada: !!p.empresaConsultoPerfilAt,
         descargada: !!p.empresaDescargoHvAt,
       };
+    }).filter((p) => {
+      if (!adminScope?.programIds?.length) return true;
+      const profileId = p.postulantProfile?._id?.toString();
+      return profileId ? allowedProfileIdsSet?.has(profileId) : false;
     });
 
     res.json({
@@ -1620,9 +1987,13 @@ export const getApplications = async (req, res) => {
 export const getApplicationDetail = async (req, res) => {
   try {
     const { id: opportunityId, postulacionId } = req.params;
+    const adminScope = await getAdminProgramScope(req);
     const opportunity = await Opportunity.findById(opportunityId);
     if (!opportunity) {
       return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+    if (adminScope && !opportunityMatchesAdminProgram(opportunity, adminScope.programTerms)) {
+      return res.status(403).json({ message: "No autorizado para ver esta postulación." });
     }
 
     let po = await PostulacionOportunidad.findOne({
@@ -1635,6 +2006,27 @@ export const getApplicationDetail = async (req, res) => {
       .lean();
 
     if (po) {
+      if (adminScope?.programIds?.length) {
+        const scopedProfileIdRaw = po.postulantProfile?._id ?? po.postulantProfile;
+        const profileIdStr = scopedProfileIdRaw ? String(scopedProfileIdRaw) : "";
+        const [enrolledOk, graduateOk] = await Promise.all([
+          profileIdStr
+            ? ProfileEnrolledProgram.exists({
+                profileId: profileIdStr,
+                programId: { $in: adminScope.programIds },
+              })
+            : false,
+          profileIdStr
+            ? ProfileGraduateProgram.exists({
+                profileId: profileIdStr,
+                programId: { $in: adminScope.programIds },
+              })
+            : false,
+        ]);
+        if (!enrolledOk && !graduateOk) {
+          return res.status(403).json({ message: "No autorizado para ver esta postulación." });
+        }
+      }
       if (po.estado === "aplicado" && !po.empresaConsultoPerfilAt) {
         await PostulacionOportunidad.updateOne(
           { _id: postulacionId },
@@ -1733,6 +2125,11 @@ export const getApplicationDetail = async (req, res) => {
     if (legacy) {
       const leg = legacy;
       const estudiante = leg.estudiante || {};
+      if (adminScope?.programTerms?.length) {
+        const programName = String(estudiante.program || "").toLowerCase();
+        const allowed = adminScope.programTerms.some((t) => programName.includes(String(t).toLowerCase()));
+        if (!allowed) return res.status(403).json({ message: "No autorizado para ver esta postulación." });
+      }
       const name = (estudiante.user?.name || estudiante.name || "").trim();
       const [nombres = "", ...rest] = name ? name.split(/\s+/) : [];
       const apellidos = rest.join(" ") || "—";
@@ -1798,6 +2195,19 @@ export const updateApplicationState = async (req, res) => {
     }
     await po.save();
 
+    if (estado === "rechazado") {
+      const ctx = await loadPracticaPostulacionContext(postulacionId);
+      if (ctx) {
+        const razon = (motivoNoAprobacion ?? motivo ?? comentarios ?? "").toString().trim();
+        await dispatchPracticaNotification(
+          "no_aceptacion_inscripcion_oportunidad_estudiantes",
+          { ...ctx.datos, COMENTARIO: razon || "Su postulación no fue aceptada." },
+          studentOnlyRecipientContext(ctx.postulantEmail),
+          { postulacionId: String(postulacionId), opportunityId: String(opportunityId) }
+        );
+      }
+    }
+
     const estadoLabel = estado === "rechazado" ? "Rechazado" : "Revisado";
     res.json({
       message: estado === "rechazado" ? "Postulante rechazado" : "Rechazo revertido",
@@ -1825,6 +2235,21 @@ export const markApplicationDescargoHv = async (req, res) => {
       po.estado = "empresa_descargo_hv";
     }
     await po.save();
+
+    const ctxHv = await loadPracticaPostulacionContext(postulacionId);
+    if (ctxHv) {
+      await dispatchPracticaNotification(
+        "envio_hojas_vida_estudiante_entidad",
+        {
+          ...ctxHv.datos,
+          OBSERVACION:
+            "La entidad registró la descarga o consulta de la hoja de vida del postulante en el sistema.",
+        },
+        entityAndCoordinatorsRecipientContext(ctxHv.creadorEmail),
+        { postulacionId: String(postulacionId), opportunityId: String(opportunityId), source: "descargo_hv" }
+      );
+    }
+
     res.json({
       message: "HV marcada como descargada",
       empresaDescargoHvAt: po.empresaDescargoHvAt,
@@ -1870,6 +2295,38 @@ export const reviewApplication = async (req, res) => {
     const updatedOpportunity = await Opportunity.findById(id)
       .populate("postulaciones.estudiante", "studentId faculty program user")
       .populate("postulaciones.revisadoPor", "name email");
+
+    if (String(opportunity.tipo || "").toLowerCase() === "practica" && (estado === "seleccionado" || estado === "rechazado")) {
+      try {
+        const oppPop = await Opportunity.findById(id)
+          .populate("company", "name commercialName")
+          .populate("creadoPor", "email name")
+          .lean();
+        const stud = await Student.findById(postulacion.estudiante).populate("user", "name email").lean();
+        const datos = buildDatosPracticaSimple(oppPop, stud?.user, {
+          COMENTARIO: comentarios || "",
+          OBSERVACION: comentarios || "",
+        });
+        const meta = { opportunityId: String(id), source: "reviewApplication_legacy_embedded" };
+        if (estado === "seleccionado") {
+          await dispatchPracticaNotification(
+            "aceptacion_inscripcion_oportunidad_estudiantes",
+            datos,
+            studentOnlyRecipientContext(stud?.user?.email),
+            meta
+          );
+        } else {
+          await dispatchPracticaNotification(
+            "no_aceptacion_inscripcion_oportunidad_estudiantes",
+            datos,
+            studentOnlyRecipientContext(stud?.user?.email),
+            meta
+          );
+        }
+      } catch (notifyErr) {
+        console.error("[opportunities] reviewApplication notificación:", notifyErr?.message || notifyErr);
+      }
+    }
 
     res.json({
       message: `Postulación ${estado === "seleccionado" ? "seleccionada" : "actualizada"} correctamente`,
@@ -1925,6 +2382,32 @@ export const selectMultipleApplications = async (req, res) => {
     const updatedOpportunity = await Opportunity.findById(id)
       .populate("postulaciones.estudiante", "studentId faculty program user")
       .populate("postulaciones.revisadoPor", "name email");
+
+    if (String(opportunity.tipo || "").toLowerCase() === "practica") {
+      try {
+        const oppPop = await Opportunity.findById(id)
+          .populate("company", "name commercialName")
+          .populate("creadoPor", "email name")
+          .lean();
+        for (const pid of postulacionIds) {
+          const sub = opportunity.postulaciones.id(pid);
+          if (!sub) continue;
+          const stud = await Student.findById(sub.estudiante).populate("user", "name email").lean();
+          const datos = buildDatosPracticaSimple(oppPop, stud?.user, {
+            COMENTARIO: comentarios || "",
+            OBSERVACION: comentarios || "",
+          });
+          await dispatchPracticaNotification(
+            "aceptacion_inscripcion_oportunidad_estudiantes",
+            datos,
+            studentOnlyRecipientContext(stud?.user?.email),
+            { opportunityId: String(id), source: "selectMultipleApplications_legacy_embedded" }
+          );
+        }
+      } catch (notifyErr) {
+        console.error("[opportunities] selectMultipleApplications notificación:", notifyErr?.message || notifyErr);
+      }
+    }
 
     res.json({
       message: `${postulacionIds.length} postulante(s) seleccionado(s) correctamente`,
@@ -1983,6 +2466,23 @@ export const approveProgram = async (req, res) => {
       .populate("aprobacionesPorPrograma.aprobadoPor", "name email")
       .populate("creadoPor", "name email");
 
+    if (String(updatedOpportunity?.tipo || "").toLowerCase() === "practica") {
+      await dispatchPracticaNotification(
+        "actualizacion_estado_oportunidad",
+        {
+          NOMBRE_OPORTUNIDAD: updatedOpportunity?.nombreCargo || "",
+          ESTADO_OPORTUNIDAD: `Programa académico aprobado: ${programa.program} (${programa.level})`,
+          OBSERVACION: (comentarios || "").toString().trim(),
+          LINK: practicaOpportunityDashboardLink(id),
+        },
+        {
+          ...entityAndCoordinatorsRecipientContext(updatedOpportunity?.creadoPor?.email),
+          lider_practica: [updatedOpportunity?.creadoPor?.email].filter(Boolean),
+        },
+        { opportunityId: String(id), source: "approveProgram" }
+      );
+    }
+
     res.json({
       message: `Programa ${programa.program} aprobado correctamente`,
       opportunity: updatedOpportunity
@@ -2039,6 +2539,23 @@ export const rejectProgram = async (req, res) => {
       .populate("company", "name commercialName sector logo")
       .populate("aprobacionesPorPrograma.aprobadoPor", "name email")
       .populate("creadoPor", "name email");
+
+    if (String(updatedOpportunity?.tipo || "").toLowerCase() === "practica") {
+      await dispatchPracticaNotification(
+        "actualizacion_estado_oportunidad",
+        {
+          NOMBRE_OPORTUNIDAD: updatedOpportunity?.nombreCargo || "",
+          ESTADO_OPORTUNIDAD: `Programa académico no aprobado: ${programa.program} (${programa.level})`,
+          OBSERVACION: (comentarios || "").toString().trim(),
+          LINK: practicaOpportunityDashboardLink(id),
+        },
+        {
+          ...entityAndCoordinatorsRecipientContext(updatedOpportunity?.creadoPor?.email),
+          lider_practica: [updatedOpportunity?.creadoPor?.email].filter(Boolean),
+        },
+        { opportunityId: String(id), source: "rejectProgram" }
+      );
+    }
 
     res.json({
       message: `Programa ${programa.program} rechazado correctamente`,

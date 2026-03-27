@@ -143,8 +143,8 @@ router.post(
 );
 router.delete("/:id/profiles/:profileId/supports/:profileSupportId", requirePermissionOrOwnPostulant("EPOS", "EMIP"), deleteProfileSupport);
 
-// Ruta "mi postulante" — cualquier usuario autenticado puede ver su propio postulante (el controller solo devuelve el ligado a req.user.id). Sin requirePermission para que estudiantes puedan acceder.
-router.get("/me", getPostulantMe);
+// Ruta "mi postulante" — requiere permiso de perfil propio/visualización.
+router.get("/me", requirePermission("EMIP", "VPPO"), getPostulantMe);
 
 // LBPO = Listar/Buscar postulante
 router.get("/", requirePermission("LBPO"), getPostulants);

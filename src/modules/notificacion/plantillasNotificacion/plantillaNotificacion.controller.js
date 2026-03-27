@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import PlantillaNotificacion from "./plantillaNotificacion.model.js";
 import Evento from "../eventos/evento.model.js";
 import NotificationVariable from "../variablesNotificacion/variableNotificacion.model.js";
@@ -6,27 +7,127 @@ import {
   renderPlantilla,
 } from "./plantillaNotificacion.utils.js";
 
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const TIPOS_EVENTO = ["practica", "monitoria", "general"];
+
+/** "practica" | "practica,general" → lista validada */
+function parseTiposQuery(tipoRaw) {
+  if (tipoRaw == null || String(tipoRaw).trim() === "") return null;
+  const parts = String(tipoRaw)
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  if (parts.length === 0) return null;
+  const bad = parts.filter((t) => !TIPOS_EVENTO.includes(t));
+  if (bad.length > 0) return { error: `tipo inválido: ${bad.join(", ")}` };
+  return { tipos: [...new Set(parts)] };
+}
+
 /**
  * GET /notificacion/plantillas
- * Lista plantillas. Query: tipo=practica|monitoria|general, parametroPlantillaId=
+ * Query: tipo=practica|monitoria|general o varios separados por coma (ej. practica,general), parametroPlantillaId=, search=, page=, limit=
  */
 export const list = async (req, res) => {
   try {
-    const { tipo, parametroPlantillaId } = req.query;
-    const filter = {};
+    const { tipo, parametroPlantillaId, search } = req.query;
+    let page = parseInt(req.query.page, 10);
+    let limit = parseInt(req.query.limit, 10);
+    if (Number.isNaN(page) || page < 1) page = 1;
+    if (Number.isNaN(limit) || limit < 1) limit = 10;
+    limit = Math.min(limit, 100);
+    const skip = (page - 1) * limit;
 
+    let paramIds = null;
     if (parametroPlantillaId) {
-      filter.parametroPlantillaId = parametroPlantillaId;
-    } else if (tipo && ["practica", "monitoria", "general"].includes(tipo)) {
-      const parametros = await Evento.find({ tipo }).select("_id").lean();
-      filter.parametroPlantillaId = { $in: parametros.map((p) => p._id) };
+      if (!mongoose.Types.ObjectId.isValid(parametroPlantillaId)) {
+        return res.status(400).json({ message: "parametroPlantillaId inválido" });
+      }
+      paramIds = [new mongoose.Types.ObjectId(parametroPlantillaId)];
+    } else if (tipo) {
+      const parsed = parseTiposQuery(tipo);
+      if (parsed?.error) {
+        return res.status(400).json({ message: parsed.error });
+      }
+      if (parsed?.tipos?.length) {
+        const parametros = await Evento.find({ tipo: { $in: parsed.tipos } }).select("_id").lean();
+        paramIds = parametros.map((p) => p._id);
+      }
     }
 
-    const list = await PlantillaNotificacion.find(filter)
-      .populate("parametroPlantillaId", "value tipo nombre variables")
-      .sort({ createdAt: -1 })
-      .lean();
-    res.json({ data: list });
+    const matchPlantilla =
+      paramIds !== null
+        ? { parametroPlantillaId: { $in: paramIds } }
+        : {};
+
+    const pipeline = [
+      { $match: matchPlantilla },
+      {
+        $lookup: {
+          from: "eventos",
+          localField: "parametroPlantillaId",
+          foreignField: "_id",
+          as: "ev",
+        },
+      },
+      { $unwind: { path: "$ev", preserveNullAndEmptyArrays: true } },
+    ];
+
+    const q = typeof search === "string" ? search.trim() : "";
+    if (q.length > 0) {
+      const rx = new RegExp(escapeRegex(q), "i");
+      pipeline.push({
+        $match: {
+          $or: [
+            { asunto: rx },
+            { cuerpo: rx },
+            { "ev.nombre": rx },
+            { "ev.value": rx },
+          ],
+        },
+      });
+    }
+
+    // Más antigua primero (createdAt ascendente)
+    pipeline.push({ $sort: { createdAt: 1 } });
+    pipeline.push({
+      $facet: {
+        totalCount: [{ $count: "total" }],
+        pageData: [
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $addFields: {
+              parametroPlantillaId: {
+                _id: "$ev._id",
+                value: "$ev.value",
+                tipo: "$ev.tipo",
+                nombre: "$ev.nombre",
+                variables: "$ev.variables",
+              },
+            },
+          },
+          { $project: { ev: 0 } },
+        ],
+      },
+    });
+
+    const [aggRow] = await PlantillaNotificacion.aggregate(pipeline);
+    const total = aggRow?.totalCount?.[0]?.total ?? 0;
+    const list = aggRow?.pageData ?? [];
+    const pages = Math.max(1, Math.ceil(total / limit));
+
+    res.json({
+      data: list,
+      pagination: {
+        total,
+        pages,
+        page,
+        limit,
+      },
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

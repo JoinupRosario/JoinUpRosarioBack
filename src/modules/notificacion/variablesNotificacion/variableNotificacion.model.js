@@ -24,7 +24,7 @@ const notificationVariableSchema = new mongoose.Schema(
     descripcion: {
       type: String,
       trim: true,
-      maxlength: 200,
+      maxlength: 500,
       default: null,
     },
     categoria: {
@@ -37,7 +37,7 @@ const notificationVariableSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-notificationVariableSchema.index({ key: 1 }, { unique: true });
+/** key ya tiene unique: true en el campo (índice único); no duplicar con schema.index */
 notificationVariableSchema.index({ categoria: 1 });
 
 export default mongoose.model("NotificationVariable", notificationVariableSchema);

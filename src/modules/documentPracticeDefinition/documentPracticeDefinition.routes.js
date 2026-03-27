@@ -29,13 +29,13 @@ const router = express.Router();
 
 router.use(verifyToken);
 
-router.get("/meta", requirePermission("CFDL"), getMeta);
-router.get("/", requirePermission("CFDL"), listDocumentPracticeDefinitions);
-router.get("/:id/file/:kind/access", requirePermission("CFDL"), getPracticeDefFileAccess);
-router.get("/:id/file/:kind/stream", requirePermission("CFDL"), streamPracticeDefFile);
-router.get("/:id", requirePermission("CFDL"), getDocumentPracticeDefinitionById);
-router.post("/", requirePermission("CFDL"), uploadFields, createDocumentPracticeDefinition);
-router.put("/:id", requirePermission("CFDL"), uploadFields, updateDocumentPracticeDefinition);
-router.delete("/:id", requirePermission("CFDL"), deleteDocumentPracticeDefinition);
+router.get("/meta", requirePermission("CDDP"), getMeta);
+router.get("/", requirePermission("CDDP"), listDocumentPracticeDefinitions);
+router.get("/:id/file/:kind/access", requirePermission("CDDP"), getPracticeDefFileAccess);
+router.get("/:id/file/:kind/stream", requirePermission("CDDP"), streamPracticeDefFile);
+router.get("/:id", requirePermission("CDDP"), getDocumentPracticeDefinitionById);
+router.post("/", requirePermission("CRDD"), uploadFields, createDocumentPracticeDefinition);
+router.put("/:id", requirePermission("ACDD"), uploadFields, updateDocumentPracticeDefinition);
+router.delete("/:id", requirePermission("ELDD"), deleteDocumentPracticeDefinition);
 
 export default router;

@@ -5,6 +5,9 @@ import User from "../users/user.model.js";
 import bcrypt from "bcryptjs";
 import { logHelper } from "../logs/log.service.js";
 import { s3Config, uploadToS3, getSignedDownloadUrl } from "../../config/s3.config.js";
+import { dispatchNotificationByEvent } from "../notificacion/application/dispatchNotificationByEvent.service.js";
+import { parseEnvEmailList } from "../notificacion/application/resolveRecipientEmails.js";
+import { buildDatosPlantillaEntidad } from "./companyNotificationTemplate.helper.js";
 
 const COMPANY_DOC_URL_FIELDS = [
   "chamberOfCommerceCertificate",
@@ -14,6 +17,44 @@ const COMPANY_DOC_URL_FIELDS = [
 ];
 
 const COMPANIES_S3_PREFIX = (process.env.COMPANIES_S3_PREFIX || "companies-practicas").replace(/\/$/, "");
+
+async function dispatchCompanyCreationNotifications({ company, userEmail, password, metadata = {} }) {
+  try {
+    const baseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "http://localhost:5173";
+    const link = `${String(baseUrl).replace(/\/$/, "")}/#/login`;
+    const usuario = userEmail || company?.contact?.email || company?.email || "";
+    const context = {
+      lider_practica: usuario,
+      coordinador: parseEnvEmailList(process.env.NOTIFICATION_EMAILS_COORDINADOR),
+      administrador: parseEnvEmailList(process.env.NOTIFICATION_EMAILS_ADMIN),
+      usuario,
+      entidad: usuario,
+    };
+
+    const datosCompletos = buildDatosPlantillaEntidad(company, { userEmail: usuario, link, password });
+
+    await dispatchNotificationByEvent({
+      eventValue: "registro_entidad",
+      tipo: "general",
+      datos: {
+        ...datosCompletos,
+        CONTRASENA_TEMPORAL: "",
+      },
+      recipientContext: context,
+      metadata,
+    });
+
+    await dispatchNotificationByEvent({
+      eventValue: "envio_usuario_contrasena_entidad",
+      tipo: "general",
+      datos: datosCompletos,
+      recipientContext: context,
+      metadata,
+    });
+  } catch (err) {
+    console.error("[companies] notificación de creación entidad:", err?.message || err);
+  }
+}
 
 function safeExt(originalname, mimetype, fallback = ".bin") {
   const ext = path.extname(originalname || "").toLowerCase();
@@ -93,9 +134,14 @@ export const uploadCompanyInitialFiles = async (req, res) => {
   }
 };
 
+/** Solo dígitos; acepta NIT escrito con puntos, guiones o espacios (ej. 900.123.456-7). */
+function normalizeNitColombiaDigits(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
 /** Validar NIT Colombia: 10 dígitos (9 base + 1 dígito de verificación), algoritmo módulo 11 DIAN */
 function validarNitColombia(nit) {
-  const str = String(nit || '').replace(/\D/g, '');
+  const str = normalizeNitColombiaDigits(nit);
   if (str.length !== 10) return false;
   const weights = [41, 37, 29, 23, 19, 17, 13, 7, 3];
   let sum = 0;
@@ -249,8 +295,8 @@ export const createCompany = async (req, res) => {
       size: req.body.size || 'mediana',
       arl: req.body.arl || '',
       
-      // Contacto y ubicación
-      address: req.body.address || '',
+      // Contacto y ubicación (el front a veces envía `direccion`)
+      address: req.body.address || req.body.direccion || '',
       city: req.body.city || '',
       country: req.body.country || '',
       countryCode: req.body.countryCode || '',
@@ -326,21 +372,24 @@ export const createCompany = async (req, res) => {
     }
 
     // Validar NIT Colombia (10 dígitos + dígito de verificación) cuando el tipo es NIT
-    const tipoNit = (req.body.idType || '').toUpperCase();
-    if (tipoNit === 'NIT' && companyData.nit) {
-      if (!/^\d{10}$/.test(String(companyData.nit).replace(/\s/g, ''))) {
+    const tipoNit = (req.body.idType || companyData.idType || "").toUpperCase();
+    if (tipoNit === "NIT" && (companyData.nit || companyData.idNumber)) {
+      const nitLimpio = normalizeNitColombiaDigits(companyData.nit || companyData.idNumber);
+      if (nitLimpio.length !== 10) {
         return res.status(400).json({
           success: false,
-          message: 'El NIT debe tener exactamente 10 dígitos numéricos (9 dígitos base + 1 dígito de verificación).'
+          message:
+            "El NIT debe tener exactamente 10 dígitos (9 base + dígito de verificación). Puede escribirlo con o sin puntos o guiones (ej. 9001234567 o 900.123.456-7).",
         });
       }
-      const nitLimpio = String(companyData.nit).replace(/\D/g, '');
       if (!validarNitColombia(nitLimpio)) {
         return res.status(400).json({
           success: false,
-          message: 'El dígito de verificación del NIT no es válido según el algoritmo de la DIAN (Colombia).'
+          message: "El dígito de verificación del NIT no es válido según el algoritmo de la DIAN (Colombia).",
         });
       }
+      companyData.nit = nitLimpio;
+      companyData.idNumber = nitLimpio;
     }
 
     // Verificar si ya existe un usuario con ese email antes de crear la empresa
@@ -477,6 +526,13 @@ export const createCompany = async (req, res) => {
       }
     );
 
+    await dispatchCompanyCreationNotifications({
+      company,
+      userEmail: companyData.contact?.email?.toLowerCase?.() || companyData.contact?.email || "",
+      password,
+      metadata: { companyId: String(company._id), source: "createCompany" },
+    });
+
     res.status(201).json({
       success: true,
       message: 'Empresa y usuario creados exitosamente',
@@ -504,12 +560,13 @@ export const updateCompany = async (req, res) => {
     const idTypeUpdate = req.body.idType !== undefined ? req.body.idType : empresaAnterior.idType;
     const nitUpdate = req.body.nit !== undefined ? req.body.nit : req.body.idNumber;
     const tipoNit = String(idTypeUpdate || '').toUpperCase();
-    if (tipoNit === 'NIT' && nitUpdate) {
-      const nitStr = String(nitUpdate).replace(/\D/g, '');
+    if (tipoNit === "NIT" && nitUpdate) {
+      const nitStr = normalizeNitColombiaDigits(nitUpdate);
       if (nitStr.length !== 10) {
         return res.status(400).json({
           success: false,
-          message: 'El NIT debe tener exactamente 10 dígitos numéricos (9 base + 1 dígito de verificación).'
+          message:
+            "El NIT debe tener exactamente 10 dígitos (9 base + dígito de verificación). Puede escribirlo con o sin puntos o guiones.",
         });
       }
       if (!validarNitColombia(nitStr)) {
@@ -913,6 +970,30 @@ export const addContact = async (req, res) => {
       { accion: 'agregar_contacto' }
     );
 
+    if (isPracticeTutor === true || isPracticeTutor === "true") {
+      try {
+        const baseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || "http://localhost:5173";
+        const link = `${String(baseUrl).replace(/\/$/, "")}/#/`;
+        await dispatchNotificationByEvent({
+          eventValue: "creacion_tutores",
+          tipo: "general",
+          datos: {
+            NOMBRE_TUTOR: `${firstName} ${lastName}`.trim(),
+            PROGRAMA: position || "—",
+            LINK: link,
+            COMENTARIO: `Tutor de práctica — entidad ${company.commercialName || company.name || ""}`,
+          },
+          recipientContext: {
+            coordinador: parseEnvEmailList(process.env.NOTIFICATION_EMAILS_COORDINADOR),
+            administrador: parseEnvEmailList(process.env.NOTIFICATION_EMAILS_ADMIN),
+          },
+          metadata: { companyId: String(company._id), source: "addContact_tutor_practica" },
+        });
+      } catch (e) {
+        console.error("[companies] creacion_tutores notificación:", e?.message || e);
+      }
+    }
+
     res.json({
       message: "Contacto agregado correctamente",
       contact: nuevoContacto
@@ -1162,7 +1243,7 @@ export const publicRegisterCompany = async (req, res) => {
     // Preparar datos básicos
     const legalName = (req.body.legalName || req.body.name || '').trim();
     const idType = (req.body.idType || 'NIT').trim();
-    const nit = String(req.body.nit || req.body.idNumber || '').replace(/\s/g, '');
+    const nit = normalizeNitColombiaDigits(req.body.nit || req.body.idNumber || "");
 
     if (!legalName) {
       return res.status(400).json({ success: false, message: 'La razón social es requerida.' });
@@ -1173,8 +1254,12 @@ export const publicRegisterCompany = async (req, res) => {
 
     // Validar NIT Colombia
     if (idType.toUpperCase() === 'NIT') {
-      if (!/^\d{10}$/.test(nit)) {
-        return res.status(400).json({ success: false, message: 'El NIT debe tener exactamente 10 dígitos (9 base + 1 dígito de verificación).' });
+      if (nit.length !== 10) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "El NIT debe tener exactamente 10 dígitos (9 base + dígito de verificación). Puede escribirlo con o sin puntos o guiones (ej. 9001234567 o 900.123.456-7).",
+        });
       }
       if (!validarNitColombia(nit)) {
         return res.status(400).json({ success: false, message: 'El dígito de verificación del NIT no es válido según el algoritmo de la DIAN.' });
@@ -1369,7 +1454,7 @@ export const publicRegisterCompany = async (req, res) => {
       size: req.body.size || '',
       arl: req.body.arl || '',
       ciiuCodes: ciiuCodes.slice(0, 3),
-      address: req.body.address || '',
+      address: req.body.address || req.body.direccion || '',
       city: req.body.city || '',
       country: req.body.country || 'Colombia',
       phone: repPhone,
@@ -1417,6 +1502,13 @@ export const publicRegisterCompany = async (req, res) => {
       uploadWarning =
         " La entidad quedó registrada, pero hubo un error al guardar uno o más archivos. La coordinación podrá solicitarlos de nuevo.";
     }
+
+    await dispatchCompanyCreationNotifications({
+      company: newCompany,
+      userEmail: repEmail,
+      password: nit,
+      metadata: { companyId: String(newCompany._id), source: "publicRegisterCompany" },
+    });
 
     return res.status(201).json({
       success: true,
