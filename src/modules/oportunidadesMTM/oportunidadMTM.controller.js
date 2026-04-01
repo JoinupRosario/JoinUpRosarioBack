@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import OportunidadMTM from "./oportunidadMTM.model.js";
 import PostulacionMTM from "./postulacionMTM.model.js";
 import LegalizacionMTM from "./legalizacionMTM.model.js";
+import DocumentMonitoringDefinition from "../documentMonitoringDefinition/documentMonitoringDefinition.model.js";
 import PlanDeTrabajoMTM from "./planDeTrabajoMTM.model.js";
 import SeguimientoMTM from "./seguimientoMTM.model.js";
 import AsistenciaMTM from "./asistenciaMTM.model.js";
@@ -1329,6 +1330,92 @@ export const getStatusHistoryMTM = async (req, res) => {
 // ─── Legalización MTM (RQ04_HU004) ───────────────────────────────────────────
 const S3_PREFIX_LEGALIZACIONES = "legalizaciones-mtm";
 
+const MIME_TO_EXT_LEG_MTM = {
+  "application/pdf": "pdf",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "application/msword": "doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+};
+
+function normalizeExtCodeLegMtm(v) {
+  return String(v || "")
+    .replace(/^\./, "")
+    .trim()
+    .toLowerCase();
+}
+
+function archivoPermitidoPorDefinicionMonitoringMtm(file, def) {
+  const codes = (def?.extensionCodes || []).map(normalizeExtCodeLegMtm).filter(Boolean);
+  const orig = (file.originalname || "").toLowerCase();
+  const dot = orig.lastIndexOf(".");
+  const fileExt = dot >= 0 ? orig.slice(dot + 1) : "";
+  const fromMime = MIME_TO_EXT_LEG_MTM[file.mimetype];
+  if (!codes.length) {
+    return file.mimetype === "application/pdf" && (!fileExt || fileExt === "pdf");
+  }
+  const candidates = [fileExt, fromMime].filter(Boolean);
+  return candidates.some((c) => codes.includes(c));
+}
+
+function s3ExtensionFromUploadMonitoringMtm(file) {
+  const orig = (file.originalname || "").toLowerCase();
+  const dot = orig.lastIndexOf(".");
+  if (dot >= 0) {
+    const ext = orig.slice(dot);
+    if (/^\.[a-z0-9]{1,10}$/i.test(ext)) return ext.toLowerCase();
+  }
+  const fromMime = MIME_TO_EXT_LEG_MTM[file.mimetype];
+  return fromMime ? `.${fromMime}` : ".pdf";
+}
+
+async function listDefinicionesDocumentosMonitoring() {
+  return DocumentMonitoringDefinition.find({})
+    .populate([
+      { path: "documentTypeItem", select: "value description listId mysqlId" },
+      { path: "extensionItems", select: "value description listId mysqlId" },
+    ])
+    .sort({ documentOrder: 1, documentName: 1 })
+    .lean();
+}
+
+const DOC_TIPO_TO_FIELD = { certificado_eps: "certificadoEps", certificacion_bancaria: "certificacionBancaria", rut: "rut" };
+
+/** Resuelve documento en legalización: rutas usan `definitionId` (ObjectId) o slugs legacy (certificado_eps, …). */
+function getMtmDocByParam(leg, paramId) {
+  if (!paramId || typeof paramId !== "string") return null;
+  const legacyField = DOC_TIPO_TO_FIELD[paramId];
+  if (legacyField && leg.documentos?.[legacyField]?.key) {
+    return { storageKey: legacyField, doc: leg.documentos[legacyField] };
+  }
+  if (isValidObjectId24(paramId) && leg.documentos?.[paramId]?.key) {
+    return { storageKey: paramId, doc: leg.documentos[paramId] };
+  }
+  return null;
+}
+
+async function collectMtmDocEntriesForApproval(leg) {
+  const docs = leg.documentos || {};
+  const defs = await listDefinicionesDocumentosMonitoring();
+  const out = [];
+  if (defs.length > 0) {
+    for (const d of defs) {
+      const id = String(d._id);
+      if (docs[id]?.key) out.push({ key: id, doc: docs[id], defName: d.documentName });
+    }
+    for (const legacy of ["certificadoEps", "certificacionBancaria", "rut"]) {
+      if (docs[legacy]?.key) out.push({ key: legacy, doc: docs[legacy], defName: legacy });
+    }
+  } else {
+    for (const legacy of ["certificadoEps", "certificacionBancaria", "rut"]) {
+      if (docs[legacy]?.key) out.push({ key: legacy, doc: docs[legacy], defName: legacy });
+    }
+  }
+  return out;
+}
+
 function isValidObjectId24(id) {
   return typeof id === "string" && /^[a-fA-F0-9]{24}$/.test(id);
 }
@@ -1396,6 +1483,12 @@ export const getLegalizacionMTM = async (req, res) => {
         ? { _id: cedulaSupport.attachmentId._id, name: cedulaSupport.attachmentId.name || "Documento de identidad" }
         : null;
 
+    const [definicionesDocumentos, planTrabajo] = await Promise.all([
+      listDefinicionesDocumentosMonitoring(),
+      PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).select("estado").lean(),
+    ]);
+    const planAprobado = planTrabajo?.estado === "aprobado";
+
     res.json({
       legalizacion: leg,
       oportunidad: opp,
@@ -1414,6 +1507,8 @@ export const getLegalizacionMTM = async (req, res) => {
         cedulaAttachment,
         postulantId: result.po.postulant?._id ?? null,
       },
+      definicionesDocumentos,
+      planAprobado,
     });
   } catch (err) {
     console.error("[MTM] getLegalizacionMTM:", err);
@@ -1450,12 +1545,8 @@ export const updateLegalizacionMTM = async (req, res) => {
 export const uploadDocLegalizacionMTM = async (req, res) => {
   try {
     const { postulacionId } = req.params;
-    const tipo = (req.body?.tipo || req.file?.fieldname || "").toLowerCase().replace(/-/g, "_");
-    const validTipos = { certificado_eps: "certificadoEps", certificacion_bancaria: "certificacionBancaria", rut: "rut" };
-    const docField = validTipos[tipo] || validTipos.certificado_eps;
     if (!req.file || !req.file.buffer) return res.status(400).json({ message: "No se envió archivo" });
     if (req.file.size > 5 * 1024 * 1024) return res.status(400).json({ message: "El archivo no puede superar 5 MB" });
-    if (req.file.mimetype !== "application/pdf") return res.status(400).json({ message: "Solo se permiten archivos PDF" });
 
     const result = await getLegalizacionMTMForStudent(req, postulacionId);
     if (result.error) return res.status(result.error).json({ message: result.message });
@@ -1466,19 +1557,57 @@ export const uploadDocLegalizacionMTM = async (req, res) => {
     }
     if (leg.estado !== "borrador" && leg.estado !== "en_ajuste") return res.status(400).json({ message: "Solo se puede subir documentos en estado borrador o en ajuste" });
 
-    const ext = ".pdf";
-    const key = `${S3_PREFIX_LEGALIZACIONES}/${postulacionId}/${tipo}${ext}`;
-    await uploadToS3(key, req.file.buffer, { contentType: "application/pdf" });
+    const definitionId = (req.body?.definitionId ?? "").toString().trim();
 
-    const docInfo = {
-      key,
-      originalName: req.file.originalname || `${tipo}${ext}`,
-      size: req.file.size,
-      estadoDocumento: "pendiente",
-      motivoRechazo: null,
-    };
-    leg.documentos = leg.documentos || {};
-    leg.documentos[docField] = docInfo;
+    if (definitionId && isValidObjectId24(definitionId)) {
+      const defFull = await DocumentMonitoringDefinition.findById(definitionId).lean();
+      if (!defFull) return res.status(404).json({ message: "Definición de documento no encontrada" });
+      if (!archivoPermitidoPorDefinicionMonitoringMtm(req.file, defFull)) {
+        const allowed = (defFull.extensionCodes || []).map(normalizeExtCodeLegMtm).filter(Boolean).join(", ") || "pdf";
+        return res.status(400).json({ message: `Extensión no permitida para este documento (${allowed}).` });
+      }
+      const ext = s3ExtensionFromUploadMonitoringMtm(req.file);
+      const key = `${S3_PREFIX_LEGALIZACIONES}/${postulacionId}/def-${definitionId}${ext}`;
+      const contentType = req.file.mimetype || "application/octet-stream";
+      await uploadToS3(key, req.file.buffer, { contentType });
+
+      leg.documentos = leg.documentos || {};
+      const prev = leg.documentos[definitionId];
+      if (prev?.key && prev.key !== key) {
+        try {
+          await deleteFromS3(prev.key);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      leg.documentos[definitionId] = {
+        key,
+        originalName: req.file.originalname || `documento${ext}`,
+        size: req.file.size,
+        estadoDocumento: "pendiente",
+        motivoRechazo: null,
+      };
+      leg.markModified("documentos");
+    } else {
+      const tipo = (req.body?.tipo || req.file?.fieldname || "").toLowerCase().replace(/-/g, "_");
+      const validTipos = { certificado_eps: "certificadoEps", certificacion_bancaria: "certificacionBancaria", rut: "rut" };
+      const docField = validTipos[tipo] || validTipos.certificado_eps;
+      if (req.file.mimetype !== "application/pdf") return res.status(400).json({ message: "Solo se permiten archivos PDF" });
+      const ext = ".pdf";
+      const key = `${S3_PREFIX_LEGALIZACIONES}/${postulacionId}/${tipo}${ext}`;
+      await uploadToS3(key, req.file.buffer, { contentType: "application/pdf" });
+      const docInfo = {
+        key,
+        originalName: req.file.originalname || `${tipo}${ext}`,
+        size: req.file.size,
+        estadoDocumento: "pendiente",
+        motivoRechazo: null,
+      };
+      leg.documentos = leg.documentos || {};
+      leg.documentos[docField] = docInfo;
+      leg.markModified("documentos");
+    }
+
     await leg.save();
 
     const updated = await LegalizacionMTM.findById(leg._id).populate("eps tipoCuenta banco", "value description listId").lean();
@@ -1492,13 +1621,9 @@ export const uploadDocLegalizacionMTM = async (req, res) => {
   }
 };
 
-const DOC_TIPO_TO_FIELD = { certificado_eps: "certificadoEps", certificacion_bancaria: "certificacionBancaria", rut: "rut" };
-
 export const getDocumentoLegalizacionUrl = async (req, res) => {
   try {
-    const { postulacionId, tipo } = req.params;
-    const docField = DOC_TIPO_TO_FIELD[tipo];
-    if (!docField) return res.status(400).json({ message: "Tipo de documento no válido" });
+    const { postulacionId, definitionId } = req.params;
 
     const result = await getLegalizacionMTMForStudent(req, postulacionId);
     if (result.error) return res.status(result.error).json({ message: result.message });
@@ -1506,8 +1631,9 @@ export const getDocumentoLegalizacionUrl = async (req, res) => {
     const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId }).lean();
     if (!leg) return res.status(404).json({ message: "Legalización no encontrada" });
 
-    const doc = leg.documentos?.[docField];
-    if (!doc?.key) return res.status(404).json({ message: "Documento no encontrado" });
+    const resolved = getMtmDocByParam(leg, definitionId);
+    if (!resolved) return res.status(404).json({ message: "Documento no encontrado" });
+    const doc = resolved.doc;
 
     const url = await getSignedDownloadUrl(doc.key, 3600);
     res.json({ url });
@@ -1522,9 +1648,7 @@ export const getDocumentoLegalizacionUrl = async (req, res) => {
 
 export const deleteDocumentoLegalizacionMTM = async (req, res) => {
   try {
-    const { postulacionId, tipo } = req.params;
-    const docField = DOC_TIPO_TO_FIELD[tipo];
-    if (!docField) return res.status(400).json({ message: "Tipo de documento no válido" });
+    const { postulacionId, definitionId } = req.params;
 
     const result = await getLegalizacionMTMForStudent(req, postulacionId);
     if (result.error) return res.status(result.error).json({ message: result.message });
@@ -1533,12 +1657,15 @@ export const deleteDocumentoLegalizacionMTM = async (req, res) => {
     if (!leg) return res.status(404).json({ message: "Legalización no encontrada" });
     if (leg.estado !== "borrador" && leg.estado !== "en_ajuste") return res.status(400).json({ message: "Solo se puede eliminar documentos en estado borrador o en ajuste" });
 
-    const doc = leg.documentos?.[docField];
-    if (!doc?.key) return res.status(404).json({ message: "Documento no encontrado" });
+    const resolved = getMtmDocByParam(leg, definitionId);
+    if (!resolved) return res.status(404).json({ message: "Documento no encontrado" });
+    const doc = resolved.doc;
+    const storageKey = resolved.storageKey;
 
     await deleteFromS3(doc.key);
     leg.documentos = leg.documentos || {};
-    leg.documentos[docField] = null;
+    leg.documentos[storageKey] = null;
+    leg.markModified("documentos");
     await leg.save();
 
     const updated = await LegalizacionMTM.findById(leg._id).populate("eps tipoCuenta banco", "value description listId").lean();
@@ -1563,7 +1690,23 @@ export const remitirRevisionLegalizacionMTM = async (req, res) => {
     if (leg.estado !== "borrador" && leg.estado !== "en_ajuste") return res.status(400).json({ message: "Solo se puede remitir desde estado borrador o en ajuste" });
 
     const docs = leg.documentos || {};
-    if (!docs.certificadoEps?.key || !docs.certificacionBancaria?.key || !docs.rut?.key) {
+    const defs = await listDefinicionesDocumentosMonitoring();
+    if (defs.length > 0) {
+      const obligatorias = defs.filter((d) => d.documentMandatory);
+      if (obligatorias.length > 0) {
+        const faltante = obligatorias.find((d) => !docs[String(d._id)]?.key);
+        if (faltante) {
+          return res.status(400).json({
+            message: `Falta cargar el documento obligatorio: ${faltante.documentName || "documento"}`,
+          });
+        }
+      } else {
+        const algun = defs.some((d) => docs[String(d._id)]?.key);
+        if (!algun) {
+          return res.status(400).json({ message: "Debe cargar al menos un documento para enviar a revisión." });
+        }
+      }
+    } else if (!docs.certificadoEps?.key || !docs.certificacionBancaria?.key || !docs.rut?.key) {
       return res.status(400).json({ message: "Debe cargar los tres documentos: Certificado EPS, Certificación bancaria y RUT" });
     }
     const tieneTipoCuenta = leg.tipoCuentaValor || leg.tipoCuenta;
@@ -1739,7 +1882,8 @@ export const getLegalizacionMTMAdmin = async (req, res) => {
     const { postulacionId } = req.params;
     const result = await getLegalizacionMTMAdminByPostulacion(postulacionId);
     if (!result) return res.status(404).json({ message: "Legalización no encontrada" });
-    res.json(result);
+    const definicionesDocumentos = await listDefinicionesDocumentosMonitoring();
+    res.json({ ...result, definicionesDocumentos });
   } catch (err) {
     console.error("[MTM] getLegalizacionMTMAdmin:", err);
     res.status(500).json({ message: err.message });
@@ -1748,12 +1892,12 @@ export const getLegalizacionMTMAdmin = async (req, res) => {
 
 export const getDocumentoLegalizacionUrlAdmin = async (req, res) => {
   try {
-    const { postulacionId, tipo } = req.params;
-    const docField = DOC_TIPO_TO_FIELD[tipo];
-    if (!docField) return res.status(400).json({ message: "Tipo de documento no válido" });
+    const { postulacionId, definitionId } = req.params;
     const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId }).lean();
     if (!leg) return res.status(404).json({ message: "Legalización no encontrada" });
-    const doc = leg.documentos?.[docField];
+    const resolved = getMtmDocByParam(leg, definitionId);
+    if (!resolved) return res.status(404).json({ message: "Documento no encontrado" });
+    const doc = resolved.doc;
     if (!doc?.key) return res.status(404).json({ message: "Documento no encontrado" });
     const url = await getSignedDownloadUrl(doc.key, 3600);
     res.json({ url });
@@ -1769,15 +1913,15 @@ export const getDocumentoLegalizacionUrlAdmin = async (req, res) => {
 /** GET descargar documento (stream directo, para guardar en Descargas sin abrir pestaña). */
 export const getDocumentoLegalizacionDownloadAdmin = async (req, res) => {
   try {
-    const { postulacionId, tipo } = req.params;
-    const docField = DOC_TIPO_TO_FIELD[tipo];
-    if (!docField) return res.status(400).json({ message: "Tipo de documento no válido" });
+    const { postulacionId, definitionId } = req.params;
     const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId }).lean();
     if (!leg) return res.status(404).json({ message: "Legalización no encontrada" });
-    const doc = leg.documentos?.[docField];
+    const resolved = getMtmDocByParam(leg, definitionId);
+    if (!resolved) return res.status(404).json({ message: "Documento no encontrado" });
+    const doc = resolved.doc;
     if (!doc?.key) return res.status(404).json({ message: "Documento no encontrado" });
     const { body, contentType } = await getObjectFromS3(doc.key);
-    const fileName = (doc.originalName || `${tipo}.pdf`).replace(/[^a-zA-Z0-9._-]/g, "_") || "documento.pdf";
+    const fileName = (doc.originalName || `${definitionId}.pdf`).replace(/[^a-zA-Z0-9._-]/g, "_") || "documento.pdf";
     res.setHeader("Content-Type", contentType || "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
     res.send(body);
@@ -1792,10 +1936,8 @@ export const getDocumentoLegalizacionDownloadAdmin = async (req, res) => {
 
 export const patchDocumentoLegalizacionMTM = async (req, res) => {
   try {
-    const { postulacionId, tipo } = req.params;
+    const { postulacionId, definitionId } = req.params;
     const { estadoDocumento, motivoRechazo } = req.body || {};
-    const docField = DOC_TIPO_TO_FIELD[tipo];
-    if (!docField) return res.status(400).json({ message: "Tipo de documento no válido" });
     if (!["aprobado", "rechazado"].includes(estadoDocumento)) {
       return res.status(400).json({ message: "estadoDocumento debe ser aprobado o rechazado" });
     }
@@ -1804,18 +1946,27 @@ export const patchDocumentoLegalizacionMTM = async (req, res) => {
     if (leg.estado !== "en_revision") {
       return res.status(400).json({ message: "Solo se puede revisar documentos cuando la legalización está en revisión" });
     }
-    const doc = leg.documentos?.[docField];
+    const resolved = getMtmDocByParam(leg, definitionId);
+    if (!resolved) return res.status(404).json({ message: "Documento no encontrado" });
+    const docField = resolved.storageKey;
+    const doc = resolved.doc;
     if (!doc?.key) return res.status(404).json({ message: "Documento no encontrado" });
     leg.documentos[docField] = {
       ...doc.toObject ? doc.toObject() : doc,
       estadoDocumento,
       motivoRechazo: estadoDocumento === "rechazado" ? (motivoRechazo || "").trim() || null : null,
     };
+    leg.markModified("documentos");
     await leg.save();
     if (estadoDocumento === "rechazado") {
       const ctxDoc = await loadMtmPostulacionContext(postulacionId);
       if (ctxDoc) {
-        const labelDoc = { certificado_eps: "Certificado EPS", certificacion_bancaria: "Certificación bancaria", rut: "RUT" }[tipo] || tipo;
+        let labelDoc = { certificado_eps: "Certificado EPS", certificacion_bancaria: "Certificación bancaria", rut: "RUT" }[definitionId] || null;
+        if (!labelDoc && isValidObjectId24(definitionId)) {
+          const def = await DocumentMonitoringDefinition.findById(definitionId).select("documentName").lean();
+          labelDoc = def?.documentName || definitionId;
+        }
+        if (!labelDoc) labelDoc = definitionId;
         const motivo = (motivoRechazo || "").trim();
         await dispatchMonitoriaNotificacion(
           "rechazo_documento_legalizacion_monitoria",
@@ -1845,10 +1996,11 @@ export const postAprobarLegalizacionMTM = async (req, res) => {
     if (leg.estado !== "en_revision") {
       return res.status(400).json({ message: "Solo se puede aprobar una legalización en estado en revisión" });
     }
-    const docs = leg.documentos || {};
-    const docFields = ["certificadoEps", "certificacionBancaria", "rut"];
-    const algunRechazado = docFields.some((f) => docs[f]?.estadoDocumento === "rechazado");
-    const algunPendiente = docFields.some((f) => docs[f]?.key && (!docs[f].estadoDocumento || docs[f].estadoDocumento === "pendiente"));
+    const entries = await collectMtmDocEntriesForApproval(leg);
+    const algunRechazado = entries.some((e) => e.doc.estadoDocumento === "rechazado");
+    const algunPendiente = entries.some(
+      (e) => e.doc?.key && (!e.doc.estadoDocumento || e.doc.estadoDocumento === "pendiente")
+    );
     if (algunRechazado) {
       return res.status(400).json({ message: "No se puede aprobar: hay documentos rechazados. Solicite ajustes al estudiante." });
     }
