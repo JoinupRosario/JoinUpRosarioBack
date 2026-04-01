@@ -12,6 +12,8 @@
  *   markApplicationDescargoHv → envio_hojas_vida_estudiante_entidad; closeOpportunity → notificacion_resultados_*
  * - oportunidadMTM.controller: dispatchMonitoriaNotificacion en eventos monitoría del flujo
  *   de postulaciones, legalización, plan, seguimiento y asistencia
+ * - legalizacionPractica.controller: actualizacion_documento_legalizacion_practica (carga/actualización doc. → coordinación);
+ *   rechazo_documento_legalizacion_practica (doc. rechazado → estudiante); aprobacion_legalizacion_practica / rechazo_legalizacion_practica
  * - opportunities reviewApplication / selectMultipleApplications (postulaciones embebidas legacy, tipo practica)
  *
  * Eventos con plantilla HU pero sin hook automático en código (requieren job/cron u otro módulo):
@@ -47,6 +49,14 @@ export function practicaOpportunityDashboardLink(opportunityId) {
 export function practicaMisAplicacionesLink(opportunityId, postulacionId) {
   const base = practicaFrontendLink();
   return `${base}${withQuery("/dashboard/mis-aplicaciones", { opportunityId, postulacionId })}`;
+}
+
+/** RQ04_HU005: enlace directo a la revisión admin de legalización de práctica (misma vista que coordinación). */
+export function practicaLegalizacionRevisionLink(postulacionId) {
+  const base = practicaFrontendLink();
+  const id = postulacionId != null ? String(postulacionId).trim() : "";
+  if (!id) return base;
+  return `${base}dashboard/legalizaciones/revision/${id}`;
 }
 
 /** Entidad + coordinación (sin estudiante): evita que el fallback envíe el mismo cuerpo al estudiante. */
@@ -152,7 +162,7 @@ export async function loadPracticaPostulacionContext(postulacionId) {
     .populate({
       path: "opportunity",
       populate: [
-        { path: "company", select: "name commercialName address phone contact branches" },
+        { path: "company", select: "name commercialName address phone contact branches email contacts" },
         { path: "creadoPor", select: "email name" },
       ],
     })

@@ -48,6 +48,27 @@ const EVENTOS = [
   { value: "notificacion_entidad_estudiante_no_continua", tipo: "practica", nombre: "Posterior a la configuración de notificación a entidades de que el estudiante no continuará en el proceso al que se presentó (seleccionado por otra entidad)" },
   { value: "actualizacion_estado_oportunidad_aceptacion_rechazo_entidad", tipo: "practica", nombre: "Posterior a la actualización de estado a oportunidad (aceptación o rechazo) para la entidad" },
   { value: "envio_hojas_vida_estudiante_entidad", tipo: "practica", nombre: "Posterior al envío de hojas de vida de estudiante a entidad" },
+  /** RQ04_HU005 — Aprobación legalización práctica / pasantía (hooks en legalizacionPractica.controller) */
+  {
+    value: "actualizacion_documento_legalizacion_practica",
+    tipo: "practica",
+    nombre: "Posterior a carga o actualización de documento en legalización de práctica (coordinación)",
+  },
+  {
+    value: "rechazo_documento_legalizacion_practica",
+    tipo: "practica",
+    nombre: "Posterior al rechazo de un documento en legalización de práctica",
+  },
+  {
+    value: "aprobacion_legalizacion_practica",
+    tipo: "practica",
+    nombre: "Posterior a la aprobación de la legalización de práctica / pasantía",
+  },
+  {
+    value: "rechazo_legalizacion_practica",
+    tipo: "practica",
+    nombre: "Posterior al rechazo o envío a ajuste de la legalización de práctica / pasantía",
+  },
 
   // ---- MONITORÍA (MTM: 22 eventos) ----
   { value: "notificacion_monitor", tipo: "monitoria", nombre: "Posterior a la notificación a monitor" },

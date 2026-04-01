@@ -26,7 +26,10 @@ import {
   rejectOpportunity,
   closeOpportunity,
   getStatusHistory,
-  duplicateOpportunity
+  duplicateOpportunity,
+  buscarPerfilParaAutogestionada,
+  getEmpresasParaAutogestionada,
+  crearPracticaAutogestionada,
 } from "./opportunity.controller.js";
 import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
 
@@ -89,6 +92,18 @@ router.use(verifyToken);
 
 // Rutas para oportunidades
 router.get("/", getOpportunities);
+// RQ04_HU004 práctica autogestionada (líder): antes de /:id
+router.get(
+  "/autogestionada/buscar-perfil",
+  authorizeRoles("admin", "superadmin", "leader"),
+  buscarPerfilParaAutogestionada
+);
+router.get("/autogestionada/empresas", authorizeRoles("admin", "superadmin", "leader"), getEmpresasParaAutogestionada);
+router.post(
+  "/practica-autogestionada",
+  authorizeRoles("admin", "superadmin", "leader"),
+  crearPracticaAutogestionada
+);
 // Ofertas de práctica para estudiante autorizado (periodo + programa). Debe ir antes de /:id
 router.get("/para-estudiante-practicas", getOfertasParaEstudiantePracticas);
 // RQ04_HU002: Mis postulaciones del estudiante (postulante). Debe ir antes de /:id

@@ -12,8 +12,24 @@ import { ProfileEnrolledProgram, ProfileProgramExtraInfo } from "../postulants/m
 import { uploadToS3, deleteFromS3, getSignedDownloadUrl, getObjectFromS3 } from "../../config/s3.config.js";
 import { esAcuerdoDeVinculacion, buildAcuerdoVinculacionPdfDataFromPostulacion } from "../../services/acuerdoVinculacion.service.js";
 import { buildAcuerdoVinculacionPdf } from "../../services/acuerdoVinculacionPdf.service.js";
+import {
+  loadPracticaPostulacionContext,
+  dispatchPracticaNotification,
+  entityAndCoordinatorsRecipientContext,
+  studentOnlyRecipientContext,
+  practicaLegalizacionRevisionLink,
+} from "../notificacion/application/practicaOpportunityNotifications.helper.js";
 
 const S3_PREFIX = "legalizaciones-practica";
+
+/** Correo de contacto de la entidad (RQ04_HU005: notificar escenario). */
+function emailEntidadDesdeCompany(company) {
+  if (!company || typeof company !== "object") return "";
+  const fromContacts = Array.isArray(company.contacts)
+    ? company.contacts.map((x) => x?.email).find((e) => e && String(e).trim())
+    : null;
+  return String(company.contact?.email || company.email || fromContacts || "").trim();
+}
 
 const MIME_TO_EXT = {
   "application/pdf": "pdf",
@@ -108,6 +124,7 @@ function pushHistorial(leg, { estadoAnterior, estadoNuevo, userId, detalle, ip }
 
 const populateOppLegalizacion = [
   { path: "company", populate: { path: "contacts" } }, // incluye legalRepresentative en el documento company
+  { path: "creadoPor", select: "name email" },
   { path: "periodo", select: "codigo fechaLegalizacion" },
   { path: "tipoVinculacion", select: "value description" },
   { path: "dedicacion", select: "value description" },
@@ -278,7 +295,7 @@ export async function listDefinicionesPracticaParaPostulacion(po) {
   });
 }
 
-function resolveTutorPractica(opp, postulacionId) {
+export function resolveTutorPractica(opp, postulacionId) {
   const arr = opp?.cierreDatosTutor || [];
   const row = arr.find((t) => t.postulacionId && String(t.postulacionId) === String(postulacionId));
   if (row) {
@@ -441,6 +458,7 @@ export const getMisLegalizacionesPractica = async (req, res) => {
             }[leg.estado] || leg.estado
           : "Pendiente de iniciar",
         aceptadoEstudianteAt: po.aceptadoEstudianteAt,
+        practicaAutogestionada: Boolean(opp?.practicaAutogestionada),
       };
     });
 
@@ -612,6 +630,27 @@ export const uploadDocLegalizacionPractica = async (req, res) => {
       motivoRechazo: null,
     });
     await leg.save();
+
+    /** RQ04_HU005: notificación a coordinación sin exigir “enviar a revisión”. */
+    try {
+      const ctx = await loadPracticaPostulacionContext(postulacionId);
+      if (ctx) {
+        const docName = defFull?.documentName || def?.documentName || definitionId;
+        await dispatchPracticaNotification(
+          "actualizacion_documento_legalizacion_practica",
+          {
+            ...ctx.datos,
+            COMENTARIO: `El estudiante cargó o actualizó un documento: ${docName}. Revise la legalización en el sistema.`,
+            LINK_REVISION: practicaLegalizacionRevisionLink(postulacionId),
+          },
+          entityAndCoordinatorsRecipientContext(ctx.creadorEmail),
+          { postulacionId: String(postulacionId), definitionId: String(definitionId), source: "legalizacion_practica_upload" }
+        );
+      }
+    } catch (e) {
+      console.error("[LegalizacionPractica] notif actualizacion_documento_legalizacion_practica:", e?.message || e);
+    }
+
     res.json({ legalizacion: await LegalizacionPractica.findById(leg._id).lean(), message: "Documento subido correctamente" });
   } catch (err) {
     if (err.message?.includes("S3 no está configurado")) {
@@ -820,7 +859,7 @@ export const getLegalizacionesPracticaAdmin = async (req, res) => {
         populate: [
           {
             path: "opportunity",
-            select: "nombreCargo periodo company",
+            select: "nombreCargo periodo company practicaAutogestionada",
             populate: [
               { path: "periodo", select: "codigo" },
               { path: "company", select: "name commercialName" },
@@ -858,7 +897,7 @@ export const getLegalizacionesPracticaAdmin = async (req, res) => {
         const profileId = po.postulantProfile?._id ?? po.postulantProfile;
         let programaRow = "—";
         if (profileId) {
-          const enr = await ProfileEnrolledProgram.findOne({ profileId }).populate("programId", "name code").lean();
+          const enr = await ProfileEnrolledProgram.findOne({ profileId }).sort({ _id: 1 }).populate("programId", "name code").lean();
           programaRow = enr?.programId?.name || enr?.programId?.code || "—";
         }
         return {
@@ -873,6 +912,7 @@ export const getLegalizacionesPracticaAdmin = async (req, res) => {
           empresa: po.opportunity?.company?.commercialName || po.opportunity?.company?.name,
           estadoLegalizacion: l.estado,
           estadoPostulacion: po.estado,
+          practicaAutogestionada: Boolean(po.opportunity?.practicaAutogestionada),
         };
       })
     );
@@ -1088,6 +1128,28 @@ export const patchDocumentoLegalizacionPracticaAdmin = async (req, res) => {
       ip: getClientIp(req),
     });
     await leg.save();
+
+    if (estadoDocumento === "rechazado") {
+      try {
+        const ctx = await loadPracticaPostulacionContext(postulacionId);
+        if (ctx) {
+          const mr = (motivoRechazo || "").trim();
+          await dispatchPracticaNotification(
+            "rechazo_documento_legalizacion_practica",
+            {
+              ...ctx.datos,
+              COMENTARIO: mr || "Su documento requiere corrección según observaciones de coordinación.",
+              OBSERVACION: mr || "",
+            },
+            studentOnlyRecipientContext(ctx.postulantEmail),
+            { postulacionId: String(postulacionId), definitionId: String(definitionId), source: "legalizacion_practica_doc_rechazo" }
+          );
+        }
+      } catch (e) {
+        console.error("[LegalizacionPractica] notif rechazo_documento_legalizacion_practica:", e?.message || e);
+      }
+    }
+
     res.json({ legalizacion: await LegalizacionPractica.findById(leg._id).lean() });
   } catch (err) {
     console.error("[LegalizacionPractica] patchDocumentoLegalizacionPracticaAdmin:", err);
@@ -1131,6 +1193,24 @@ export const postAprobarLegalizacionPractica = async (req, res) => {
       ip: getClientIp(req),
     });
     await leg.save();
+
+    try {
+      const ctx = await loadPracticaPostulacionContext(postulacionId);
+      if (ctx) {
+        await dispatchPracticaNotification(
+          "aprobacion_legalizacion_practica",
+          {
+            ...ctx.datos,
+            COMENTARIO: "Coordinación aprobó la legalización de su práctica. Puede continuar con el plan de práctica según corresponda.",
+          },
+          studentOnlyRecipientContext(ctx.postulantEmail),
+          { postulacionId: String(postulacionId), source: "legalizacion_practica_aprobacion" }
+        );
+      }
+    } catch (e) {
+      console.error("[LegalizacionPractica] notif aprobacion_legalizacion_practica:", e?.message || e);
+    }
+
     res.json({ legalizacion: await LegalizacionPractica.findById(leg._id).lean(), message: "Legalización aprobada" });
   } catch (err) {
     console.error("[LegalizacionPractica] postAprobarLegalizacionPractica:", err);
@@ -1173,6 +1253,40 @@ export const postRechazarLegalizacionPractica = async (req, res) => {
       });
     }
     await leg.save();
+
+    try {
+      const ctx = await loadPracticaPostulacionContext(postulacionId);
+      if (ctx) {
+        const motivoStr = (motivo || "").trim() || "";
+        const entidadEmail = emailEntidadDesdeCompany(ctx.po?.opportunity?.company);
+        await dispatchPracticaNotification(
+          "rechazo_legalizacion_practica",
+          {
+            ...ctx.datos,
+            COMENTARIO:
+              motivoStr ||
+              (enviarAjuste
+                ? "La legalización fue enviada a ajuste: puede cargar de nuevo los documentos indicados."
+                : "La legalización fue rechazada."),
+            OBSERVACION: motivoStr,
+          },
+          {
+            ...entityAndCoordinatorsRecipientContext(ctx.creadorEmail),
+            estudiante: ctx.postulantEmail,
+            postulante: ctx.postulantEmail,
+            ...(entidadEmail ? { entidad: entidadEmail } : {}),
+          },
+          {
+            postulacionId: String(postulacionId),
+            source: "legalizacion_practica_rechazo_total",
+            enviarAjuste: Boolean(enviarAjuste),
+          }
+        );
+      }
+    } catch (e) {
+      console.error("[LegalizacionPractica] notif rechazo_legalizacion_practica:", e?.message || e);
+    }
+
     res.json({
       legalizacion: await LegalizacionPractica.findById(leg._id).lean(),
       message: enviarAjuste ? "Enviado a ajuste" : "Legalización rechazada",

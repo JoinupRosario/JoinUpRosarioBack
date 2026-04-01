@@ -352,6 +352,13 @@ const opportunitySchema = new mongoose.Schema(
       }
     }],
 
+    /** RQ04_HU004: práctica registrada por líder de práctica (autogestionada) para cargue de legalización. */
+    practicaAutogestionada: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
     // Usuario que creó la oportunidad
     creadoPor: {
       type: mongoose.Schema.Types.ObjectId,
