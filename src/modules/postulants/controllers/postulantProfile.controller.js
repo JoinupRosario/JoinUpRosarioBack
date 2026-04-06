@@ -475,19 +475,28 @@ export const createGraduateProgram = async (req, res) => {
     if (!postulant) return res.status(404).json({ message: "Postulante no encontrado" });
     const profile = await findProfileForPostulant(postulant.postulantDocId, postulant.userId, profileId);
     if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
-    const { programId, programFacultyId, title, endDate, university, anotherUniversity, countryId, stateId, cityId } = req.body;
-    if (!programId) return res.status(400).json({ message: "programId es requerido" });
+    const { programId, programFacultyId, externalProgramName, title, endDate, university, anotherUniversity, countryId, stateId, cityId } = req.body;
+    const extName = externalProgramName != null ? String(externalProgramName).trim() : "";
+    const facultyNull = programFacultyId == null || programFacultyId === "";
+    if (facultyNull) {
+      if (!extName && !programId) {
+        return res.status(400).json({ message: "Indique el nombre del programa o un programa del catálogo" });
+      }
+    } else if (!programId) {
+      return res.status(400).json({ message: "programId es requerido" });
+    }
     const doc = await ProfileGraduateProgram.create({
       profileId: profile._id,
-      programId,
-      programFacultyId: programFacultyId || null,
+      programId: programId || null,
+      externalProgramName: extName || undefined,
+      programFacultyId: programFacultyId === undefined ? null : programFacultyId || null,
       title: title || undefined,
       endDate: endDate ? new Date(endDate) : undefined,
-      university: university || undefined,
-      anotherUniversity: anotherUniversity || undefined,
-      countryId: countryId || undefined,
-      stateId: stateId || undefined,
-      cityId: cityId || undefined,
+      university: university === undefined ? undefined : university || null,
+      anotherUniversity: anotherUniversity === undefined ? undefined : anotherUniversity || null,
+      countryId: countryId === undefined ? undefined : countryId || null,
+      stateId: stateId === undefined ? undefined : stateId || null,
+      cityId: cityId === undefined ? undefined : cityId || null,
     });
     const populated = await ProfileGraduateProgram.findById(doc._id)
       .populate("programId", "name code level labelLevel")
@@ -516,16 +525,26 @@ export const updateGraduateProgram = async (req, res) => {
       profileId: profile._id,
     });
     if (!graduate) return res.status(404).json({ message: "Programa finalizado no encontrado" });
-    const { programId, programFacultyId, title, endDate, university, anotherUniversity, countryId, stateId, cityId } = req.body;
-    if (programId !== undefined) graduate.programId = programId;
-    if (programFacultyId !== undefined) graduate.programFacultyId = programFacultyId;
+    const { programId, programFacultyId, externalProgramName, title, endDate, university, anotherUniversity, countryId, stateId, cityId } = req.body;
+    if (programId !== undefined) graduate.programId = programId || null;
+    if (programFacultyId !== undefined) graduate.programFacultyId = programFacultyId || null;
+    if (externalProgramName !== undefined) {
+      graduate.externalProgramName = String(externalProgramName).trim() || null;
+    }
     if (title !== undefined) graduate.title = title;
     if (endDate !== undefined) graduate.endDate = endDate ? new Date(endDate) : null;
-    if (university !== undefined) graduate.university = university;
-    if (anotherUniversity !== undefined) graduate.anotherUniversity = anotherUniversity;
-    if (countryId !== undefined) graduate.countryId = countryId;
-    if (stateId !== undefined) graduate.stateId = stateId;
-    if (cityId !== undefined) graduate.cityId = cityId;
+    if (university !== undefined) graduate.university = university || null;
+    if (anotherUniversity !== undefined) graduate.anotherUniversity = anotherUniversity || null;
+    if (countryId !== undefined) graduate.countryId = countryId || null;
+    if (stateId !== undefined) graduate.stateId = stateId || null;
+    if (cityId !== undefined) graduate.cityId = cityId || null;
+    const facultyNull = graduate.programFacultyId == null;
+    if (facultyNull) {
+      const ext = (graduate.externalProgramName || "").trim();
+      if (!ext && !graduate.programId) {
+        return res.status(400).json({ message: "Indique el nombre del programa o un programa del catálogo" });
+      }
+    }
     await graduate.save();
     const populated = await ProfileGraduateProgram.findById(graduate._id)
       .populate("programId", "name code level labelLevel")

@@ -15,6 +15,7 @@ import {
   publicRegisterCompany,
   uploadCompanyInitialFiles,
   getCompanyDocumentSignedUrl,
+  deleteCompanyDocument,
 } from "./company.controller.js";
 import { verifyToken } from "../../middlewares/auth.js";
 import { requirePermission } from "../access/presentation/middlewares/requirePermission.js";
@@ -61,6 +62,11 @@ router.get(
   "/:id/document/:field",
   requirePermission("AAME", "LEMP", "EEMP", "CEEE", "AIEO"),
   getCompanyDocumentSignedUrl
+);
+router.delete(
+  "/:id/document/:field",
+  requirePermission("CEMP", "EEMP"),
+  deleteCompanyDocument
 );
 router.get("/:id", requirePermission("AAME", "LEMP"), getCompanyById);
 router.post("/", requirePermission("CEMP"), createCompany);

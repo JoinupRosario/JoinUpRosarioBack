@@ -1,10 +1,12 @@
 import path from "path";
+import crypto from "crypto";
+import mongoose from "mongoose";
 import Company from "./company.model.js";
 import Document from "../documents/document.model.js";
 import User from "../users/user.model.js";
 import bcrypt from "bcryptjs";
 import { logHelper } from "../logs/log.service.js";
-import { s3Config, uploadToS3, getSignedDownloadUrl } from "../../config/s3.config.js";
+import { s3Config, uploadToS3, getSignedDownloadUrl, deleteFromS3 } from "../../config/s3.config.js";
 import { dispatchNotificationByEvent } from "../notificacion/application/dispatchNotificationByEvent.service.js";
 import { parseEnvEmailList } from "../notificacion/application/resolveRecipientEmails.js";
 import { buildDatosPlantillaEntidad } from "./companyNotificationTemplate.helper.js";
@@ -65,6 +67,74 @@ function safeExt(originalname, mimetype, fallback = ".bin") {
   if (/webp/i.test(mimetype || "")) return ".webp";
   if (/pdf/i.test(mimetype || "")) return ".pdf";
   return fallback;
+}
+
+function normalizeIdDigits(s) {
+  return String(s || "").replace(/\D/g, "");
+}
+
+function idTypesCompatible(lt, ct) {
+  const a = String(lt || "").toUpperCase().trim();
+  const b = String(ct || "").toUpperCase().trim();
+  if (!a || !b) return true;
+  return a === b;
+}
+
+/**
+ * Misma persona que legalRepresentative (no usa isPrincipal):
+ * 1) idNumber === identification (normalizado) y tipo compatible
+ * 2) correo igual al R. legal (antes o después del guardado)
+ * 3) primer contacto del array si no hay conflicto de documento con el R. legal
+ */
+function contactMatchesLegalRepresentative(c, legalRep, { oldLegalEmail, lrEmail, contactIndex }) {
+  const ce = String(c.userEmail || "").toLowerCase().trim();
+  const lrId = String(legalRep?.idNumber || "").trim();
+  const cId = String(c.identification || "").trim();
+  const ndL = normalizeIdDigits(lrId);
+  const ndC = normalizeIdDigits(cId);
+  if (ndL && ndC && ndL === ndC && idTypesCompatible(legalRep?.idType, c.idType)) {
+    return true;
+  }
+  const matchesByEmail =
+    (oldLegalEmail && ce === oldLegalEmail) || (lrEmail && ce === lrEmail);
+  if (matchesByEmail) return true;
+  if (contactIndex === 0) {
+    if (ndL && ndC && idTypesCompatible(legalRep?.idType, c.idType) && ndL !== ndC) {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Para PUT contacto: decide si este subdocumento es el R. legal y debe escribir en legalRepresentative.
+ * Usa correo anterior del contacto (datosAnteriores) para no perder la vinculación al cambiar email.
+ */
+function shouldSyncContactToLegalRepresentative(
+  contacto,
+  lrBefore,
+  datosAnteriores,
+  contactIndex
+) {
+  const lrEm = String(lrBefore.email || "").toLowerCase().trim();
+  const ce = String(contacto.userEmail || "").toLowerCase().trim();
+  const prevMail = String(datosAnteriores.userEmail || "").toLowerCase().trim();
+  const lrId = String(lrBefore.idNumber || "").trim();
+  const cId = String(contacto.identification || "").trim();
+  const ndL = normalizeIdDigits(lrId);
+  const ndC = normalizeIdDigits(cId);
+  if (ndL && ndC && ndL === ndC && idTypesCompatible(lrBefore.idType, contacto.idType)) {
+    return true;
+  }
+  if (lrEm && (ce === lrEm || prevMail === lrEm)) return true;
+  if (contactIndex === 0) {
+    if (ndL && ndC && idTypesCompatible(lrBefore.idType, contacto.idType) && ndL !== ndC) {
+      return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -269,6 +339,44 @@ export const getCompanyDocumentSignedUrl = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: err.message || "Error al generar enlace de descarga",
+    });
+  }
+};
+
+/** DELETE /companies/:id/document/:field — quita referencia en BD y borra objeto en S3 si aplica */
+export const deleteCompanyDocument = async (req, res) => {
+  try {
+    const field = req.params.field;
+    if (!COMPANY_DOC_URL_FIELDS.includes(field)) {
+      return res.status(400).json({
+        success: false,
+        message: "Tipo de documento no válido.",
+      });
+    }
+    const company = await Company.findById(req.params.id);
+    if (!company) {
+      return res.status(404).json({ success: false, message: "Empresa no encontrada" });
+    }
+    const raw = company[field];
+    if (raw == null || (typeof raw === "string" && !String(raw).trim())) {
+      return res.json({ success: true, message: "No había archivo registrado." });
+    }
+    const trimmed = String(raw).trim();
+    if (!/^https?:\/\//i.test(trimmed) && s3Config.isConfigured) {
+      try {
+        await deleteFromS3(trimmed);
+      } catch (e) {
+        console.error("[deleteCompanyDocument] S3:", e?.message || e);
+      }
+    }
+    company[field] = "";
+    await company.save();
+    return res.json({ success: true, message: "Documento eliminado." });
+  } catch (err) {
+    console.error("[deleteCompanyDocument]", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Error al eliminar el documento",
     });
   }
 };
@@ -674,31 +782,124 @@ export const updateCompany = async (req, res) => {
       }
     }
 
-    const company = await Company.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      { new: true, runValidators: true }
-    ).populate("approvedBy", "name email");
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    let company;
+    try {
+      company = await Company.findById(req.params.id).session(session);
+      if (!company) {
+        await session.abortTransaction();
+        return res.status(404).json({ message: "Empresa no encontrada" });
+      }
 
-    if (!company) {
-      return res.status(404).json({ message: "Empresa no encontrada" });
-    }
+      const oldLegalEmail = String(
+        company.legalRepresentative?.email || company.contact?.email || ""
+      )
+        .toLowerCase()
+        .trim();
 
-    // Si se cambió el estado, actualizar también el estado de todos los usuarios asociados (contactos)
-    if (req.body.status !== undefined && empresaAnterior.contacts && empresaAnterior.contacts.length > 0) {
-      const nuevoEstadoUsuario = company.status === 'active';
-      // Actualizar estado de todos los usuarios de los contactos
-      for (const contacto of empresaAnterior.contacts) {
-        if (contacto.userId) {
-          await User.findByIdAndUpdate(contacto.userId, { estado: nuevoEstadoUsuario });
+      company.set(updateData);
+      await company.validate();
+
+      const lrEmail = String(
+        company.legalRepresentative?.email || company.contact?.email || ""
+      )
+        .toLowerCase()
+        .trim();
+      const lrFn = company.legalRepresentative?.firstName || "";
+      const lrLn = company.legalRepresentative?.lastName || "";
+      const lrRep = company.legalRepresentative || {};
+
+      for (let i = 0; i < company.contacts.length; i++) {
+        const c = company.contacts[i];
+        const ce = String(c.userEmail || "")
+          .toLowerCase()
+          .trim();
+        const isLegalRepRow = contactMatchesLegalRepresentative(c, lrRep, {
+          oldLegalEmail,
+          lrEmail,
+          contactIndex: i,
+        });
+        const matchesByEmail =
+          (oldLegalEmail && ce === oldLegalEmail) || (lrEmail && ce === lrEmail);
+        if (!isLegalRepRow && !matchesByEmail) continue;
+
+        if (lrEmail && lrEmail !== ce) {
+          const dup = await User.findOne({
+            email: lrEmail,
+            modulo: "entidades",
+          }).session(session);
+          if (dup && c.userId && String(dup._id) !== String(c.userId)) {
+            await session.abortTransaction();
+            return res.status(400).json({
+              success: false,
+              message:
+                "El correo del representante legal ya está en uso por otro usuario de entidades.",
+            });
+          }
+        }
+
+        if (isLegalRepRow) {
+          if (lrEmail) c.userEmail = lrEmail;
+          const idn = lrRep.idNumber;
+          if (idn != null && String(idn).trim() !== "") {
+            c.identification = String(idn).trim();
+          }
+          if (lrRep.idType) c.idType = lrRep.idType;
+        } else if (
+          oldLegalEmail &&
+          lrEmail &&
+          ce === oldLegalEmail &&
+          lrEmail !== oldLegalEmail
+        ) {
+          c.userEmail = lrEmail;
+        }
+        c.firstName = lrFn;
+        c.lastName = lrLn;
+
+        if (c.userId && lrEmail) {
+          const u = await User.findById(c.userId).session(session);
+          if (u) {
+            u.email = lrEmail;
+            u.code = lrEmail;
+            u.name = `${lrFn} ${lrLn}`.trim();
+            await u.save({ session });
+          }
         }
       }
-      // También actualizar el estado de los contactos en el array
-      company.contacts = company.contacts.map(contacto => ({
-        ...contacto.toObject ? contacto.toObject() : contacto,
-        status: nuevoEstadoUsuario ? 'active' : 'inactive'
-      }));
-      await company.save();
+
+      if (req.body.status !== undefined && company.contacts && company.contacts.length > 0) {
+        const nuevoEstadoUsuario = company.status === "active";
+        for (const c of company.contacts) {
+          c.status = nuevoEstadoUsuario ? "active" : "inactive";
+          if (c.userId) {
+            await User.findByIdAndUpdate(
+              c.userId,
+              { estado: nuevoEstadoUsuario },
+              { session }
+            );
+          }
+        }
+      }
+
+      await company.save({ session });
+      await session.commitTransaction();
+    } catch (err) {
+      await session.abortTransaction();
+      if (err.code === 11000) {
+        return res.status(400).json({
+          success: false,
+          message: "Ya existe un usuario con ese correo en el sistema.",
+        });
+      }
+      throw err;
+    } finally {
+      session.endSession();
+    }
+
+    company = await Company.findById(req.params.id).populate("approvedBy", "name email");
+    if (!company) {
+      return res.status(404).json({ message: "Empresa no encontrada" });
     }
 
     // Registrar log de actualización
@@ -1006,69 +1207,189 @@ export const addContact = async (req, res) => {
 
 // Actualizar contacto
 export const updateContact = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
   try {
-    const company = await Company.findById(req.params.id);
+    const company = await Company.findById(req.params.id).session(session);
     if (!company) {
+      await session.abortTransaction();
       return res.status(404).json({ message: "Empresa no encontrada" });
     }
 
     const contactId = req.params.contactId;
     const contacto = company.contacts.id(contactId);
     if (!contacto) {
+      await session.abortTransaction();
       return res.status(404).json({ message: "Contacto no encontrado" });
     }
 
     const datosAnteriores = { ...contacto.toObject() };
+    const oldEmail = String(contacto.userEmail || "")
+      .toLowerCase()
+      .trim();
+    const lrBefore =
+      company.legalRepresentative &&
+      typeof company.legalRepresentative.toObject === "function"
+        ? company.legalRepresentative.toObject()
+        : { ...(company.legalRepresentative || {}) };
+    const lrBeforeMerged = {
+      ...lrBefore,
+      email: lrBefore.email || company.contact?.email || "",
+    };
+    const contactIndex = company.contacts.findIndex(
+      (x) => x._id.toString() === contactId
+    );
 
-    // Actualizar campos permitidos
     const camposPermitidos = [
-      'firstName', 'lastName', 'alternateEmail', 'country', 'countryCode', 'state', 'stateCode', 'city', 'address',
-      'phone', 'extension', 'mobile', 'idType', 'identification',
-      'dependency', 'isPrincipal', 'position', 'isPracticeTutor', 'status'
+      "firstName",
+      "lastName",
+      "alternateEmail",
+      "country",
+      "countryCode",
+      "state",
+      "stateCode",
+      "city",
+      "address",
+      "phone",
+      "extension",
+      "mobile",
+      "idType",
+      "identification",
+      "userEmail",
+      "dependency",
+      "isPrincipal",
+      "position",
+      "isPracticeTutor",
+      "status",
     ];
 
-    camposPermitidos.forEach(campo => {
+    camposPermitidos.forEach((campo) => {
       if (req.body[campo] !== undefined) {
-        contacto[campo] = req.body[campo];
+        if (campo === "userEmail" && typeof req.body[campo] === "string") {
+          contacto[campo] = req.body[campo].toLowerCase().trim();
+        } else {
+          contacto[campo] = req.body[campo];
+        }
       }
     });
 
-    // Si se marca como principal, quitar el flag de otros contactos
+    const allowedDomains = (company.domains || [])
+      .map((d) => String(d).replace(/^@/, "").toLowerCase().trim())
+      .filter(Boolean);
+    if (allowedDomains.length > 0 && contacto.userEmail) {
+      const dom = contacto.userEmail.split("@")[1]?.toLowerCase();
+      if (!dom || !allowedDomains.includes(dom)) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          message: `El correo del contacto debe pertenecer a uno de los dominios de la entidad: ${allowedDomains.join(", ")}`,
+        });
+      }
+    }
+
     if (req.body.isPrincipal && !datosAnteriores.isPrincipal) {
-      company.contacts.forEach(c => {
+      company.contacts.forEach((c) => {
         if (c._id.toString() !== contactId) {
           c.isPrincipal = false;
         }
       });
     }
 
-    // Actualizar estado del usuario si cambió el status
-    if (req.body.status !== undefined && contacto.userId) {
-      const nuevoEstadoUsuario = req.body.status === 'active';
-      await User.findByIdAndUpdate(contacto.userId, { estado: nuevoEstadoUsuario });
+    if (
+      shouldSyncContactToLegalRepresentative(
+        contacto,
+        lrBeforeMerged,
+        datosAnteriores,
+        contactIndex
+      )
+    ) {
+      const fn = (contacto.firstName || "").trim();
+      const ln = (contacto.lastName || "").trim();
+      const em = String(contacto.userEmail || "").toLowerCase().trim();
+      const lrObj = { ...lrBeforeMerged };
+      company.legalRepresentative = {
+        ...lrObj,
+        firstName: fn,
+        lastName: ln,
+        email: em,
+        idType: contacto.idType || lrObj.idType || "CC",
+        idNumber: contacto.identification || lrObj.idNumber || "",
+      };
+      const ct = company.contact || {};
+      const ctObj =
+        ct && typeof ct.toObject === "function" ? ct.toObject() : { ...ct };
+      company.contact = {
+        ...ctObj,
+        name: `${fn} ${ln}`.trim(),
+        email: em,
+        phone: contacto.phone || ctObj.phone || company.phone || "",
+      };
+      company.markModified("legalRepresentative");
+      company.markModified("contact");
     }
 
-    await company.save();
+    const newEmail = String(contacto.userEmail || "")
+      .toLowerCase()
+      .trim();
 
-    // Registrar log
+    if (contacto.userId) {
+      const u = await User.findById(contacto.userId).session(session);
+      if (u) {
+        if (req.body.userEmail !== undefined && newEmail !== oldEmail) {
+          const dup = await User.findOne({
+            email: newEmail,
+            modulo: "entidades",
+          }).session(session);
+          if (dup && String(dup._id) !== String(u._id)) {
+            await session.abortTransaction();
+            return res.status(400).json({
+              message: "Ya existe otro usuario de entidades con ese correo.",
+            });
+          }
+          u.email = newEmail;
+          u.code = newEmail;
+        }
+        if (
+          req.body.firstName !== undefined ||
+          req.body.lastName !== undefined
+        ) {
+          u.name = `${contacto.firstName} ${contacto.lastName}`.trim();
+        }
+        if (req.body.status !== undefined) {
+          u.estado = req.body.status === "active";
+        }
+        await u.save({ session });
+      }
+    }
+
+    await company.save({ session });
+    await session.commitTransaction();
+
     await logHelper.crear(
       req,
-      'UPDATE',
-      'companies',
+      "UPDATE",
+      "companies",
       `Contacto actualizado: ${company.commercialName || company.name} - ${contacto.firstName} ${contacto.lastName}`,
       company._id,
       datosAnteriores,
       { ...contacto.toObject() },
-      { accion: 'actualizar_contacto' }
+      { accion: "actualizar_contacto" }
     );
 
     res.json({
       message: "Contacto actualizado correctamente",
-      contact: contacto
+      contact: contacto,
     });
   } catch (error) {
-    console.error('Error al actualizar contacto:', error);
+    await session.abortTransaction();
+    console.error("Error al actualizar contacto:", error);
+    if (error.code === 11000) {
+      return res.status(400).json({
+        message: "Ya existe un usuario con ese correo en el sistema.",
+      });
+    }
     res.status(500).json({ message: error.message });
+  } finally {
+    session.endSession();
   }
 };
 
@@ -1127,35 +1448,53 @@ export const resetContactPassword = async (req, res) => {
       return res.status(404).json({ message: "Contacto no encontrado o sin usuario asociado" });
     }
 
-    // Generar nueva contraseña (usar identificación o generar una aleatoria)
-    const nuevaPassword = contacto.identification && contacto.identification.length >= 6
-      ? contacto.identification
-      : Math.random().toString(36).slice(-8);
+    const user = await User.findById(contacto.userId);
+    if (!user) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+    if (user.modulo !== "entidades") {
+      return res.status(400).json({
+        message: "Solo se puede restablecer la contraseña de usuarios del módulo entidades.",
+      });
+    }
 
-    // Actualizar contraseña del usuario
-    await User.findByIdAndUpdate(contacto.userId, {
-      password: await bcrypt.hash(nuevaPassword, 10)
-    });
+    const idStr = String(contacto.identification || "").trim();
+    const useIdentificationAsTemp =
+      idStr.length >= 6 && idStr.length <= 128;
+    const nuevaPassword = useIdentificationAsTemp
+      ? idStr
+      : crypto.randomBytes(12).toString("base64url");
 
-    // Registrar log
+    await User.findByIdAndUpdate(
+      contacto.userId,
+      {
+        password: await bcrypt.hash(nuevaPassword, 10),
+        debeCambiarPassword: true,
+      },
+      { runValidators: true }
+    );
+
     await logHelper.crear(
       req,
-      'UPDATE',
-      'companies',
+      "UPDATE",
+      "companies",
       `Contraseña reseteada para contacto: ${company.commercialName || company.name} - ${contacto.firstName} ${contacto.lastName}`,
       company._id,
       null,
-      { accion: 'resetear_contraseña_contacto', contactoId: contactId },
-      { accion: 'resetear_contraseña_contacto' }
+      {
+        accion: "resetear_contraseña_contacto",
+        contactoId,
+        tempFromIdentification: useIdentificationAsTemp,
+      },
+      { accion: "resetear_contraseña_contacto", contactoId }
     );
 
-    res.json({ 
-      message: "Contraseña reseteada correctamente",
-      // En producción, no deberías enviar la contraseña. Esto es solo para desarrollo
-      password: nuevaPassword
+    res.json({
+      message: "Contraseña reseteada correctamente. El usuario deberá cambiarla al iniciar sesión.",
+      password: nuevaPassword,
     });
   } catch (error) {
-    console.error('Error al resetear contraseña:', error);
+    console.error("Error al resetear contraseña:", error);
     res.status(500).json({ message: error.message });
   }
 };

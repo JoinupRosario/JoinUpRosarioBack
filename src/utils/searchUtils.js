@@ -46,3 +46,8 @@ export function buildSearchRegex(str) {
     .join("");
   return { $regex: pattern, $options: "i" };
 }
+
+/** Escapa caracteres especiales para usar el texto del usuario dentro de $regex literal (sin mapa de acentos). */
+export function escapeRegex(s) {
+  return String(s ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

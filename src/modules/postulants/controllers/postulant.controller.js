@@ -1067,7 +1067,7 @@ function comparePostulantAcademicWithUniversitas(enrolledPrograms, graduateProgr
   );
 
   const actualEnrolledNames = [...new Set((enrolledPrograms || []).map((e) => e.programId?.name || e.programId?.code).filter(Boolean))].join(", ") || "—";
-  const actualGraduateNames = [...new Set((graduatePrograms || []).map((g) => g.programId?.name || g.programId?.code).filter(Boolean))].join(", ") || "—";
+  const actualGraduateNames = [...new Set((graduatePrograms || []).map((g) => g.externalProgramName || g.programId?.name || g.programId?.code).filter(Boolean))].join(", ") || "—";
   const nuevoEnrolledNames = [...new Set(nuevoEnrolledEntries.map(([, v]) => v.nombre || "—").filter((n) => n !== "—"))].join(", ") || "—";
   const nuevoGraduateNames = [...new Set(nuevoGraduateEntries.map(([, v]) => v.nombre || "—").filter((n) => n !== "—"))].join(", ") || "—";
 

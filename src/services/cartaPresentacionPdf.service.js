@@ -74,7 +74,7 @@ function formatFechaActual() {
 function normalizeEncabezadoSaltos(text) {
   if (!text || typeof text !== "string") return text;
   return text
-    .replace(/Señores\s*/gi, "Señores\n")
+    .replace(/Señores\s*/gi, "Señores\n\n")
     .replace(/\n(Asunto\s*:)/gi, "\n\n$1");
 }
 
@@ -93,80 +93,30 @@ function replaceVars(text, vars) {
   return out;
 }
 
-/** Escapa caracteres especiales para usarlos en RegExp. */
-function escapeRegex(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * Convierte saltos de línea "suaves" (un solo \n) en espacio para que el párrafo fluya.
+ * Los párrafos reales siguen separados por \n\n (o más). Así PDFKit puede justificar líneas
+ * intermedias; si cada línea del Word/plantilla viene con \n, antes se trataba como última línea
+ * y quedaba alineada a la izquierda.
+ */
+function collapseSoftLineBreaks(text) {
+  if (!text || typeof text !== "string") return text;
+  return text.replace(/([^\n])\n(?!\n)/g, "$1 ");
 }
 
 /**
- * Obtiene rangos [inicio, fin] de posiciones donde hay que poner negrita (por frase buscada).
- * Busca sin distinguir mayúsculas/minúsculas para que negrilla aplique aunque la plantilla tenga el texto en MAYÚSCULAS.
- * Fusiona rangos solapados.
+ * Bloque de texto justificado. Un solo font + una sola llamada a text() permite que PDFKit
+ * reparta espacio entre palabras en todas las líneas (salvo la última de cada párrafo).
+ * Mezclar Helvetica/Helvetica-Bold en segmentos con continued rompe la justificación.
  */
-function getBoldRanges(text, phrases) {
-  if (!text || typeof text !== "string") return [];
-  const ranges = [];
-  for (const phrase of phrases) {
-    if (phrase == null || String(phrase).trim() === "" || String(phrase) === "—") continue;
-    const p = String(phrase).trim();
-    if (p.length === 0) continue;
-    try {
-      const re = new RegExp(escapeRegex(p), "gi");
-      let match;
-      while ((match = re.exec(text)) !== null) {
-        ranges.push([match.index, match.index + match[0].length]);
-      }
-    } catch (_) {
-      const idx = text.indexOf(p);
-      if (idx !== -1) ranges.push([idx, idx + p.length]);
-    }
-  }
-  ranges.sort((a, b) => a[0] - b[0]);
-  const merged = [];
-  for (const [s, e] of ranges) {
-    if (merged.length && s <= merged[merged.length - 1][1]) {
-      merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], e);
-    } else {
-      merged.push([s, e]);
-    }
-  }
-  return merged;
-}
-
-/**
- * Divide el texto en segmentos { text, bold } para dibujar con negrita donde corresponda.
- */
-function getSegments(text, boldRanges) {
-  if (!text || typeof text !== "string") return [];
-  const segments = [];
-  let last = 0;
-  for (const [s, e] of boldRanges) {
-    if (s > last) segments.push({ text: text.slice(last, s), bold: false });
-    segments.push({ text: text.slice(s, e), bold: true });
-    last = e;
-  }
-  if (last < text.length) segments.push({ text: text.slice(last), bold: false });
-  return segments.filter((seg) => seg.text.length > 0);
-}
-
-/**
- * Dibuja un bloque de texto con negrita en nombre, cédula y programas (segmentos según phrasesToBold).
- */
-function drawMixedText(doc, text, phrasesToBold, textOpts) {
+function drawJustifiedBlock(doc, text, textOpts) {
   if (!text || typeof text !== "string") return;
-  const ranges = getBoldRanges(text, phrasesToBold);
-  const segments = getSegments(text, ranges);
-  if (segments.length === 0) return;
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    doc.font(seg.bold ? "Helvetica-Bold" : "Helvetica").fontSize(textOpts.fontSize ?? FONT_SIZE_BODY).fillColor(textOpts.fillColor ?? COLOR_BODY);
-    doc.text(seg.text, {
-      continued: i < segments.length - 1,
-      width: textOpts.width ?? TEXT_WIDTH,
-      lineGap: textOpts.lineGap ?? LINE_GAP,
-      align: textOpts.align ?? "justify",
-    });
-  }
+  doc.font("Helvetica").fontSize(textOpts.fontSize ?? FONT_SIZE_BODY).fillColor(textOpts.fillColor ?? COLOR_BODY);
+  doc.text(text, {
+    width: textOpts.width ?? TEXT_WIDTH,
+    lineGap: textOpts.lineGap ?? LINE_GAP,
+    align: "justify",
+  });
 }
 
 /**
@@ -422,22 +372,19 @@ export async function buildCartaPresentacionPdf(postulant, profileData, parametr
 
     doc.x = MARGIN;
     doc.y = y;
-    const textOpts = { width: TEXT_WIDTH, lineGap: LINE_GAP, align: "justify", fontSize: FONT_SIZE_BODY, fillColor: COLOR_BODY };
-    const phrasesToBold = [cartaData.NOMBRE_COMPLETO, cartaData.NUMERO_DOCUMENTO, cartaData.NOMBRE_PROGRAMA].filter(
-      (p) => p != null && String(p).trim() !== "" && String(p) !== "—"
-    );
+    const textOpts = { width: TEXT_WIDTH, lineGap: LINE_GAP, fontSize: FONT_SIZE_BODY, fillColor: COLOR_BODY };
     if (encabezado) {
-      drawMixedText(doc, encabezado, phrasesToBold, textOpts);
+      drawJustifiedBlock(doc, encabezado, textOpts);
       doc.moveDown(0.5);
     }
     doc.x = MARGIN;
     if (cuerpo) {
-      drawMixedText(doc, cuerpo, phrasesToBold, textOpts);
+      drawJustifiedBlock(doc, collapseSoftLineBreaks(cuerpo), textOpts);
       doc.moveDown(0.5);
     }
     doc.x = MARGIN;
     if (cierre) {
-      drawMixedText(doc, cierre, phrasesToBold, textOpts);
+      drawJustifiedBlock(doc, collapseSoftLineBreaks(cierre), textOpts);
       doc.moveDown(0.8);
     }
 

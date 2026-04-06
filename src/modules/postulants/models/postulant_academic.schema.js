@@ -1,5 +1,9 @@
 import mongoose from "mongoose";
 
+/**
+ * Datos académicos agregados del postulante (legacy / sync).
+ * La formación finalizada detallada por perfil (incl. otras instituciones) vive en ProfileGraduateProgram.
+ */
 const postulant_academicSchema = new mongoose.Schema({
    postulant: {
     type: mongoose.Types.ObjectId,

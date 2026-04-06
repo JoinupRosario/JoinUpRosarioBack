@@ -205,7 +205,7 @@ function sectionFormacionRosarioEnCurso(doc, profileData, postulant) {
 }
 
 function sectionFormacionRosarioFinalizada(doc, profileData, postulant) {
-  const list = profileData?.graduatePrograms || [];
+  const list = (profileData?.graduatePrograms || []).filter((gp) => gp.programFacultyId != null);
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
   list.forEach((gp) => {
     const program = gp.programId?.name || gp.programId?.code || "—";
@@ -233,6 +233,22 @@ function sectionFormacionEnCursoOtras(doc, profileData, postulant) {
 }
 
 function sectionFormacionFinalizadaOtras(doc, profileData, postulant) {
+  const list = (profileData?.graduatePrograms || []).filter((gp) => gp.programFacultyId == null);
+  doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
+  list.forEach((gp) => {
+    const program = gp.externalProgramName || gp.programId?.name || gp.programId?.code || "—";
+    const titulo = safeStr(gp.title) || "—";
+    const dateStr = gp.endDate ? formatDate(gp.endDate) : gp.dateObtained ? formatDate(gp.dateObtained) : "—";
+    const country = gp.countryId?.name || "—";
+    doc.text(`Programa: ${safeStr(program)}`, { continued: false });
+    doc.text(`Título formación académica: ${titulo}`, { continued: false });
+    doc.text(`Fecha de obtención de título: ${dateStr}`, { continued: false });
+    doc.text(`País: ${country}`, { continued: false });
+    doc.moveDown(0.4);
+  });
+}
+
+function sectionOtrosEstudios(doc, profileData, postulant) {
   const list = profileData?.otherStudies || [];
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
   list.forEach((os) => {
@@ -243,10 +259,6 @@ function sectionFormacionFinalizadaOtras(doc, profileData, postulant) {
     doc.text(safeStr(inst), { continued: false });
     doc.moveDown(0.3);
   });
-}
-
-function sectionOtrosEstudios(doc, profileData, postulant) {
-  sectionFormacionFinalizadaOtras(doc, profileData, postulant);
 }
 
 function sectionExperienciaLaboral(doc, profileData, postulant) {
@@ -339,10 +351,11 @@ function hasSectionData(key, profileData) {
     case "formacion_rosario_en_curso":
       return (profileData?.enrolledPrograms || []).filter((ep) => ep.programFacultyId != null).length > 0;
     case "formacion_rosario_finalizada":
-      return (profileData?.graduatePrograms || []).length > 0;
+      return (profileData?.graduatePrograms || []).filter((g) => g.programFacultyId != null).length > 0;
     case "formacion_en_curso_otras":
       return (profileData?.enrolledPrograms || []).filter((ep) => ep.programFacultyId == null).length > 0;
     case "formacion_finalizada_otras":
+      return (profileData?.graduatePrograms || []).filter((g) => g.programFacultyId == null).length > 0;
     case "otros_estudios":
       return (profileData?.otherStudies || []).length > 0;
     case "experiencia_laboral":
@@ -357,35 +370,37 @@ function hasSectionData(key, profileData) {
   }
 }
 
-/** Dibuja idiomas y habilidades en dos columnas. */
+/**
+ * Idiomas y habilidades digitales en bloques apilados a ancho completo.
+ * El layout en dos columnas hacía que, al paginar, el texto largo de habilidades
+ * siguiera en la columna derecha en la página siguiente y dejara la mitad izquierda en blanco.
+ */
 function drawIdiomasYHabilidades(doc, profileData) {
   const languages = profileData?.languages || [];
   const skills = profileData?.skills || [];
   const p = profileData?.postulantProfile;
   const skillsText = p?.skillsTechnicalSoftware || (skills.length ? skills.map((s) => s?.skillId?.name || s?.skillId).filter(Boolean).join(", ") : "—");
-  const colWidth = (PAGE_WIDTH - 2 * MARGIN - 24) / 2;
-  const leftX = MARGIN;
-  const rightX = MARGIN + colWidth + 24;
-  const startY = doc.y;
+  const fullWidth = PAGE_WIDTH - 2 * MARGIN;
 
   doc.fontSize(SECTION_TITLE_FONT_SIZE).font("Helvetica-Bold").fillColor(COLOR_TITLE);
-  doc.text("IDIOMAS", leftX, startY, { width: colWidth });
-  doc.text("HABILIDADES DIGITALES", rightX, startY, { width: colWidth });
-  const afterTitlesY = doc.y;
-  doc.strokeColor(COLOR_LINE).lineWidth(0.5).moveTo(MARGIN, afterTitlesY + 3).lineTo(PAGE_WIDTH - MARGIN, afterTitlesY + 3).stroke();
+  doc.text("IDIOMAS", MARGIN, doc.y, { width: fullWidth });
+  const yAfterIdiomasTitle = doc.y;
+  doc.strokeColor(COLOR_LINE).lineWidth(0.5).moveTo(MARGIN, yAfterIdiomasTitle + 3).lineTo(PAGE_WIDTH - MARGIN, yAfterIdiomasTitle + 3).stroke();
   doc.strokeColor("#000").lineWidth(1);
-  const contentStartY = afterTitlesY + 10;
-
   doc.fontSize(BODY_FONT_SIZE).font("Helvetica").fillColor(COLOR_BODY);
   const langLines = languages.length
     ? languages.map((l) => `${l?.language?.name ?? l?.language?.value ?? "—"}: ${l?.level?.name ?? l?.level?.value ?? "—"}${l?.certificationExam ? " (Examen)" : ""}`)
     : ["—"];
-  doc.text(langLines.join("\n"), leftX, contentStartY, { width: colWidth, lineGap: 3 });
-  const leftBottom = doc.y;
-  doc.y = contentStartY;
-  doc.text(safeStr(skillsText), rightX, contentStartY, { width: colWidth, lineGap: 3 });
-  const rightBottom = doc.y;
-  doc.y = Math.max(leftBottom, rightBottom);
+  doc.text(langLines.join("\n"), MARGIN, doc.y + 4, { width: fullWidth, lineGap: 3 });
+  doc.moveDown(0.75);
+
+  doc.fontSize(SECTION_TITLE_FONT_SIZE).font("Helvetica-Bold").fillColor(COLOR_TITLE);
+  doc.text("HABILIDADES DIGITALES", MARGIN, doc.y, { width: fullWidth });
+  const yAfterHabTitle = doc.y;
+  doc.strokeColor(COLOR_LINE).lineWidth(0.5).moveTo(MARGIN, yAfterHabTitle + 3).lineTo(PAGE_WIDTH - MARGIN, yAfterHabTitle + 3).stroke();
+  doc.strokeColor("#000").lineWidth(1);
+  doc.fontSize(BODY_FONT_SIZE).font("Helvetica").fillColor(COLOR_BODY);
+  doc.text(safeStr(skillsText), MARGIN, doc.y + 4, { width: fullWidth, lineGap: 3 });
   doc.moveDown(0.5);
 }
 
@@ -428,17 +443,6 @@ export async function buildHojaVidaPdf(postulant, profileData, parametrizacion) 
     doc.text(fullName, nameAreaX, y + 8, { align: "center", width: nameAreaWidth });
     doc.fontSize(HEADER_ROLE_FONT_SIZE).font("Helvetica").fillColor(COLOR_BODY);
     doc.text("Estudiante", nameAreaX, doc.y + 4, { align: "center", width: nameAreaWidth });
-    const enCurso = (profileData?.enrolledPrograms || []).filter((ep) => ep.programFacultyId != null);
-    if (enCurso.length > 0) {
-      const progLine = enCurso
-        .map((ep) => safeStr(ep.programId?.name || ep.programId?.code))
-        .filter(Boolean)
-        .join(" · ");
-      if (progLine) {
-        doc.fontSize(9).font("Helvetica").fillColor(COLOR_SUBTLE);
-        doc.text(progLine, nameAreaX, doc.y + 6, { align: "center", width: nameAreaWidth, lineGap: 2 });
-      }
-    }
     const afterHeaderText = doc.y;
     const logoBottom = logoBuffer ? y + LOGO_HEIGHT : afterHeaderText;
     doc.y = Math.max(afterHeaderText + 10, logoBottom);

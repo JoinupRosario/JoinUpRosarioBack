@@ -26,6 +26,7 @@ import {
   findOtrasPostulacionesActivas,
   practicaOpportunityDashboardLink,
 } from "../notificacion/application/practicaOpportunityNotifications.helper.js";
+import { buildSearchRegex, escapeRegex } from "../../utils/searchUtils.js";
 
 const CODE_MAX_JORNADA_ORDINARIA = "PRACTICE_MAX_JORNADA_ORDINARIA_SEMANAL";
 const CODE_MIN_APOYO_ECONOMICO_COP = "PRACTICE_MIN_APOYO_ECONOMICO_COP";
@@ -233,10 +234,6 @@ async function normalizeOpportunityRefs(data) {
       }
     }
   }
-}
-
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -715,55 +712,82 @@ export const getOpportunities = async (req, res) => {
       return res.json({ opportunities: [], totalPages: 0, currentPage: parseInt(page), total: 0 });
     }
 
-    // Filtros básicos
-    if (estado) filter.estado = estado;
-    if (tipo) filter.tipo = tipo;
-    if (tipoOportunidad) filter.tipo = tipoOportunidad;
-    if (company) filter.company = company;
-    if (empresa) {
-      filter.company = empresa;
+    // Tipo
+    if (tipo) filter.tipo = String(tipo).trim();
+    if (tipoOportunidad) filter.tipo = String(tipoOportunidad).trim();
+
+    // Empresa: ObjectId directo o búsqueda por razón social / nombre comercial (normalizada)
+    const empresaTrim = empresa != null ? String(empresa).trim() : "";
+    if (company && mongoose.Types.ObjectId.isValid(String(company))) {
+      filter.company = new mongoose.Types.ObjectId(String(company));
+    } else if (empresaTrim) {
+      if (mongoose.Types.ObjectId.isValid(empresaTrim) && empresaTrim.length === 24) {
+        filter.company = new mongoose.Types.ObjectId(empresaTrim);
+      } else {
+        const rx = buildSearchRegex(empresaTrim);
+        const companyDocs = await Company.find({
+          $or: [{ name: rx }, { commercialName: rx }, { legalName: rx }],
+        })
+          .select("_id")
+          .lean();
+        const ids = companyDocs.map((c) => c._id);
+        if (ids.length === 0) {
+          return res.json({
+            opportunities: [],
+            totalPages: 0,
+            currentPage: parseInt(page),
+            total: 0,
+          });
+        }
+        filter.company = { $in: ids };
+      }
     }
 
-    // Filtro por número de oportunidad (últimos 6 caracteres del ID)
-    if (numeroOportunidad) {
-      const opportunities = await Opportunity.find({}).select('_id');
-      const matchingIds = opportunities
-        .filter(opp => opp._id.toString().slice(-6).toLowerCase() === numeroOportunidad.toLowerCase())
-        .map(opp => opp._id);
-      if (matchingIds.length > 0) {
-        filter._id = { $in: matchingIds };
-      } else {
-        // Si no hay coincidencias, retornar array vacío
+    // Número / fragmento del ID (coincide con cualquier subcadena del ObjectId en hex)
+    const numTrim = numeroOportunidad != null ? String(numeroOportunidad).trim().toLowerCase() : "";
+    if (numTrim) {
+      const allIds = await Opportunity.find({}).select("_id").lean();
+      const matchingIds = allIds
+        .filter((opp) => opp._id.toString().toLowerCase().includes(numTrim))
+        .map((opp) => opp._id);
+      if (matchingIds.length === 0) {
         return res.json({
           opportunities: [],
           totalPages: 0,
           currentPage: parseInt(page),
-          total: 0
+          total: 0,
         });
       }
+      filter._id = { $in: matchingIds };
     }
 
-    // Filtro por nombre de cargo
-    if (nombreCargo) {
-      filter.nombreCargo = { $regex: nombreCargo, $options: "i" };
+    // Nombre de cargo (insensible a acentos / mayúsculas)
+    const nombreCargoTrim = nombreCargo != null ? String(nombreCargo).trim() : "";
+    if (nombreCargoTrim) {
+      filter.nombreCargo = buildSearchRegex(nombreCargoTrim);
     }
 
-    // Filtro por fechas de cierre
+    // Fechas de cierre (incluye todo el día "hasta")
     if (fechaCierreDesde || fechaCierreHasta) {
       filter.fechaVencimiento = {};
       if (fechaCierreDesde) {
-        filter.fechaVencimiento.$gte = new Date(fechaCierreDesde);
+        const d = new Date(fechaCierreDesde);
+        d.setHours(0, 0, 0, 0);
+        filter.fechaVencimiento.$gte = d;
       }
       if (fechaCierreHasta) {
-        filter.fechaVencimiento.$lte = new Date(fechaCierreHasta);
+        const d = new Date(fechaCierreHasta);
+        d.setHours(23, 59, 59, 999);
+        filter.fechaVencimiento.$lte = d;
       }
     } else if (fechaVencimiento) {
       filter.fechaVencimiento = { $lte: new Date(fechaVencimiento) };
     }
 
-    // Filtro por formación académica
-    if (formacionAcademica) {
-      filter["formacionAcademica.program"] = { $regex: formacionAcademica, $options: "i" };
+    // Formación académica (programa)
+    const formacionTrim = formacionAcademica != null ? String(formacionAcademica).trim() : "";
+    if (formacionTrim) {
+      filter["formacionAcademica.program"] = buildSearchRegex(formacionTrim);
     }
     if (adminScope?.programTerms?.length) {
       const adminProgramClause = {
@@ -774,40 +798,43 @@ export const getOpportunities = async (req, res) => {
       filter.$and = [...(filter.$and || []), adminProgramClause];
     }
 
-    // Filtro por estados de revisión
-    if (estadosRevision) {
-      filter.estado = estadosRevision;
+    // Estado: un solo campo en el modelo; prioriza "estado" sobre "estadosRevision" si vienen ambos
+    const estadoTrim = estado != null && String(estado).trim() !== "" ? String(estado).trim() : null;
+    const estadoRevTrim =
+      estadosRevision != null && String(estadosRevision).trim() !== "" ? String(estadosRevision).trim() : null;
+    if (estadoTrim) {
+      filter.estado = estadoTrim;
+    } else if (estadoRevTrim) {
+      filter.estado = estadoRevTrim;
     }
 
-    // Filtro por requisitos
-    if (requisitos) {
-      filter.requisitos = { $regex: requisitos, $options: "i" };
+    // Requisitos
+    const requisitosTrim = requisitos != null ? String(requisitos).trim() : "";
+    if (requisitosTrim) {
+      filter.requisitos = buildSearchRegex(requisitosTrim);
     }
 
-    // Filtro por empresas confidenciales
-    if (empresaConfidenciales === 'true') {
-      // Asumimos que las empresas confidenciales tienen requiereConfidencialidad = true
+    // Solo oportunidades marcadas como confidenciales
+    if (String(empresaConfidenciales) === "true" || empresaConfidenciales === true) {
       filter.requiereConfidencialidad = true;
     }
 
-    // Búsqueda por texto general
-    if (search) {
-      filter.$or = [
-        { nombreCargo: { $regex: search, $options: "i" } },
-        { funciones: { $regex: search, $options: "i" } },
-        { requisitos: { $regex: search, $options: "i" } }
-      ];
+    // Búsqueda libre (compatibilidad API): varios campos con normalización
+    const searchTrim = search != null ? String(search).trim() : "";
+    if (searchTrim) {
+      const rx = buildSearchRegex(searchTrim);
+      filter.$or = [{ nombreCargo: rx }, { funciones: rx }, { requisitos: rx }];
     }
 
     // Ordenamiento
     const sortOptions = {};
     const sortFieldMap = {
-      'fechaCreacion': 'createdAt',
-      'nombreCargo': 'nombreCargo',
-      'fechaVencimiento': 'fechaVencimiento',
-      'estado': 'estado'
+      fechaCreacion: "createdAt",
+      nombreCargo: "nombreCargo",
+      fechaVencimiento: "fechaVencimiento",
+      estado: "estado",
     };
-    const actualSortField = sortFieldMap[sortField] || sortField || 'createdAt';
+    const actualSortField = sortFieldMap[sortField] || "createdAt";
     sortOptions[actualSortField] = sortDirection === 'asc' ? 1 : -1;
 
     const opportunities = await Opportunity.find(filter)

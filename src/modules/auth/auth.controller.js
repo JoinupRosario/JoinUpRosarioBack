@@ -92,6 +92,7 @@ export const loginUser = async (req, res) => {
       active: user.estado !== undefined ? user.estado : true,
       estado: user.estado !== undefined ? user.estado : true, // Mantener compatibilidad
       sucursales: sucursales || [],
+      debeCambiarPassword: user.debeCambiarPassword === true,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt
     };

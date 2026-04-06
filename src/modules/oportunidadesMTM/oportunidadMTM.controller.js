@@ -10,6 +10,7 @@ import crypto from "crypto";
 import { uploadToS3, getSignedDownloadUrl, getObjectFromS3, deleteFromS3 } from "../../config/s3.config.js";
 import Item from "../shared/reference-data/models/item.schema.js"; // asegura registro del modelo "items"
 import { buildSearchRegex } from "../../utils/searchUtils.js";
+import Company from "../companies/company.model.js";
 import Postulant from "../postulants/models/postulants.schema.js";
 import PostulantProfile from "../postulants/models/profile/profile.schema.js";
 import { ProfileEnrolledProgram, ProfileGraduateProgram, ProfileSkill, ProfileCv, ProfileSupport } from "../postulants/models/profile/index.js";
@@ -76,18 +77,82 @@ export const getOportunidadesMTM = async (req, res) => {
       page = 1,
       limit = 10,
       search = "",
+      nombreCargo,
+      empresa,
       estado,
       periodo,
-      categoria
+      categoria,
+      numeroOportunidad,
+      fechaCierreDesde,
+      fechaCierreHasta,
+      requisitos,
     } = req.query;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const filter = {};
 
-    if (search) {
-      filter.nombreCargo = buildSearchRegex(search);
+    const empresaTrim = empresa != null ? String(empresa).trim() : "";
+    if (empresaTrim) {
+      if (mongoose.Types.ObjectId.isValid(empresaTrim) && empresaTrim.length === 24) {
+        filter.company = new mongoose.Types.ObjectId(empresaTrim);
+      } else {
+        const rx = buildSearchRegex(empresaTrim);
+        const companyDocs = await Company.find({
+          $or: [{ name: rx }, { commercialName: rx }, { legalName: rx }],
+        })
+          .select("_id")
+          .lean();
+        const ids = companyDocs.map((c) => c._id);
+        if (ids.length === 0) {
+          return res.json({
+            data: [],
+            pagination: { total: 0, page: parseInt(page), limit: parseInt(limit), totalPages: 0 },
+          });
+        }
+        filter.company = { $in: ids };
+      }
     }
-    if (estado) filter.estado = estado;
+
+    const numTrim = numeroOportunidad != null ? String(numeroOportunidad).trim().toLowerCase() : "";
+    if (numTrim) {
+      const allIds = await OportunidadMTM.find({}).select("_id").lean();
+      const matchingIds = allIds
+        .filter((opp) => opp._id.toString().toLowerCase().includes(numTrim))
+        .map((opp) => opp._id);
+      if (matchingIds.length === 0) {
+        return res.json({
+          data: [],
+          pagination: { total: 0, page: parseInt(page), limit: parseInt(limit), totalPages: 0 },
+        });
+      }
+      filter._id = { $in: matchingIds };
+    }
+
+    const cargoQ = String(nombreCargo || "").trim() || String(search || "").trim();
+    if (cargoQ) {
+      filter.nombreCargo = buildSearchRegex(cargoQ);
+    }
+
+    if (fechaCierreDesde || fechaCierreHasta) {
+      filter.fechaVencimiento = {};
+      if (fechaCierreDesde) {
+        const d = new Date(fechaCierreDesde);
+        d.setHours(0, 0, 0, 0);
+        filter.fechaVencimiento.$gte = d;
+      }
+      if (fechaCierreHasta) {
+        const d = new Date(fechaCierreHasta);
+        d.setHours(23, 59, 59, 999);
+        filter.fechaVencimiento.$lte = d;
+      }
+    }
+
+    const reqTrim = requisitos != null ? String(requisitos).trim() : "";
+    if (reqTrim) {
+      filter.requisitos = buildSearchRegex(reqTrim);
+    }
+
+    if (estado) filter.estado = String(estado).trim();
     if (periodo) filter.periodo = periodo;
     if (categoria) filter.categoria = categoria;
 

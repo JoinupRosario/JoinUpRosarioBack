@@ -128,9 +128,14 @@ export const changePassword = async (req, res) => {
     // Encriptar nueva contraseña
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     user.password = hashedPassword;
+    user.debeCambiarPassword = false;
     await user.save();
 
-    res.json({ message: "Contraseña actualizada correctamente" });
+    const userOut = await User.findById(req.user.id).select("-password").lean();
+    res.json({
+      message: "Contraseña actualizada correctamente",
+      user: userOut,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
