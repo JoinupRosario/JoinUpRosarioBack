@@ -7,13 +7,56 @@ import Postulant             from "../postulants/models/postulants.schema.js";
 import PostulantProfile      from "../postulants/models/profile/profile.schema.js";
 import PostulantAcademic     from "../postulants/models/postulant_academic.schema.js";
 import ProgramFaculty        from "../program/model/programFaculty.model.js";
+import ProgramsTypePractice  from "../program/model/programsTypePractices.model.js";
 import { ProfileEnrolledProgram, ProfileGraduateProgram } from "../postulants/models/profile/index.js";
 import { descargarYFiltrarPostulantesMultiples } from "./carguePostulantes.sftp.js";
 import { consultaInfAcademica, consultaAsignatura } from "../../services/uxxiIntegration.service.js";
 import { evaluarTodasLasReglas }        from "./reglasEvaluador.service.js";
+import mongoose from "mongoose";
+import Periodo from "../periodos/periodo.model.js";
 
 // ── Helper: pequeño sleep para no saturar OSB ─────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * IDs de ProgramFaculty cubiertos por condiciones curriculares ACTIVE del periodo.
+ * Incluye reglas con programas explícitos y reglas "toda la facultad" (sin lista de programas).
+ */
+async function collectProgramFacultyIdsForPeriodo(periodoId) {
+  const reglas = await CondicionCurricular.find({
+    periodo: periodoId,
+    estado: "ACTIVE",
+  })
+    .select("programas facultad")
+    .lean();
+  const pfIds = new Set();
+  const facultyIds = [];
+  for (const r of reglas) {
+    const progs = r.programas || [];
+    if (progs.length > 0) {
+      progs.forEach((id) => pfIds.add(id.toString()));
+    } else if (r.facultad) {
+      facultyIds.push(r.facultad);
+    }
+  }
+  const facUnique = [...new Set(facultyIds.map((f) => f.toString()))];
+  if (facUnique.length > 0) {
+    const fObjectIds = facUnique
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+    if (fObjectIds.length > 0) {
+      const extra = await ProgramFaculty.find({
+        facultyId: { $in: fObjectIds },
+        activo: "SI",
+        status: "ACTIVE",
+      })
+        .select("_id")
+        .lean();
+      extra.forEach((p) => pfIds.add(p._id.toString()));
+    }
+  }
+  return [...pfIds];
+}
 
 /**
  * GET /estudiantes-habilitados/me-autorizado
@@ -353,6 +396,8 @@ export const confirmarCargueUxxi = async (req, res) => {
     programaFacultadId,
     codigoPrograma,
     tipoPracticaId,
+    /** Mapa programaFacultadId (string) → id ítem tipo de práctica (prioridad sobre tipoPractica global) */
+    tipoPracticaPorPrograma = {},
     sedeId,
   } = req.body;
 
@@ -382,6 +427,15 @@ export const confirmarCargueUxxi = async (req, res) => {
       const existente = await EstudianteHabilitado.findOne(filtro).select("_id estadoFinal").lean();
 
       const pfId = est.programaFacultadId || programaFacultadId || null;
+      const pfKey = pfId != null ? String(pfId) : "";
+      const tipoDesdeMapa =
+        pfKey && tipoPracticaPorPrograma && tipoPracticaPorPrograma[pfKey] != null
+          ? tipoPracticaPorPrograma[pfKey]
+          : null;
+      const tipoPracticaResuelto =
+        tipoDesdeMapa != null && String(tipoDesdeMapa).trim() !== ""
+          ? tipoDesdeMapa
+          : tipoPracticaId || null;
       const update = {
         postulant:        est.postulantId   || null,
         user:             est.userId        || null,
@@ -394,7 +448,7 @@ export const confirmarCargueUxxi = async (req, res) => {
         programaFacultad: pfId,
         periodo:          periodoId,
         codigoPeriodo:    codigoPeriodo     || "",
-        tipoPractica:     tipoPracticaId    || null,
+        tipoPractica:     tipoPracticaResuelto,
         sede:             sedeId            || null,
         estadoCurricular: est.estadoCurricular,
         reglasEvaluadas:  est.reglasEvaluadas || [],
@@ -698,5 +752,85 @@ export const getHistorialEstados = async (req, res) => {
     res.json({ data: logDocs });
   } catch (e) {
     res.status(500).json({ message: "Error al obtener historial", error: e.message });
+  }
+};
+
+/**
+ * GET /estudiantes-habilitados/periodos-con-reglas-activas
+ * Periodos académicos (práctica, activos) que tienen al menos una condición curricular ACTIVE.
+ */
+export const getPeriodosConReglasActivas = async (req, res) => {
+  try {
+    const periodoIds = await CondicionCurricular.distinct("periodo", { estado: "ACTIVE" });
+    if (!periodoIds?.length) {
+      return res.json({ periodos: [] });
+    }
+    const periodos = await Periodo.find({
+      _id: { $in: periodoIds },
+      estado: "Activo",
+      tipo: "practica",
+    })
+      .select("codigo tipo estado")
+      .sort({ codigo: -1 })
+      .lean();
+    res.json({ periodos });
+  } catch (e) {
+    res.status(500).json({ message: "Error al listar periodos", error: e.message });
+  }
+};
+
+/**
+ * GET /estudiantes-habilitados/programas-uxxi-por-periodo?periodoId=
+ * Programas (ProgramFaculty) asociados a reglas ACTIVE de ese periodo, listos para el modal UXXI.
+ */
+export const getProgramasUxxiPorPeriodo = async (req, res) => {
+  try {
+    const { periodoId } = req.query;
+    if (!periodoId) {
+      return res.status(400).json({ message: "periodoId requerido" });
+    }
+    const ids = await collectProgramFacultyIdsForPeriodo(periodoId);
+    if (ids.length === 0) {
+      return res.json({ programas: [] });
+    }
+    const oids = ids
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+    const programas = await ProgramFaculty.find({
+      _id: { $in: oids },
+      activo: "SI",
+      status: "ACTIVE",
+    })
+      .populate({ path: "programId", select: "name code level labelLevel" })
+      .lean();
+
+    const pfIds = programas.map((p) => p._id);
+    const ptRows = await ProgramsTypePractice.find({ programFaculty: { $in: pfIds } })
+      .populate({ path: "typePractice", select: "value _id sort isActive" })
+      .lean();
+
+    const tiposPorPf = new Map();
+    for (const row of ptRows) {
+      const tp = row.typePractice;
+      if (!tp || tp.isActive === false) continue;
+      const k = String(row.programFaculty);
+      if (!tiposPorPf.has(k)) tiposPorPf.set(k, []);
+      tiposPorPf.get(k).push({
+        _id: String(tp._id),
+        value: String(tp.value || "").trim() || "—",
+      });
+    }
+    for (const [, arr] of tiposPorPf) {
+      arr.sort((a, b) => (a.value || "").localeCompare(b.value || "", "es"));
+    }
+
+    const programasConTipos = programas.map((p) => ({
+      ...p,
+      tiposPractica: tiposPorPf.get(String(p._id)) || [],
+    }));
+
+    res.json({ programas: programasConTipos });
+  } catch (e) {
+    res.status(500).json({ message: "Error al cargar programas del periodo", error: e.message });
   }
 };

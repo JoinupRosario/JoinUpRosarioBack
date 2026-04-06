@@ -3,6 +3,8 @@ import {
   getMeAutorizado,
   getEstudiantesHabilitados,
   getHistorialEstados,
+  getPeriodosConReglasActivas,
+  getProgramasUxxiPorPeriodo,
   previewCargueUxxi,
   confirmarCargueUxxi,
   crearUsuariosBD,
@@ -34,6 +36,8 @@ router.get("/me-autorizado", requirePermissionOrStudent("AMPR", "BUSP"), getMeAu
 // AMPR = Acceso módulo prácticas; BUSP = Buscar estudiantes; CEST = Cargar estudiantes
 router.get("/", requirePermission("AMPR", "BUSP"), getEstudiantesHabilitados);
 router.get("/historial-estados", requirePermission("AMPR", "BUSP"), getHistorialEstados);
+router.get("/periodos-con-reglas-activas", requirePermission("CEST"), getPeriodosConReglasActivas);
+router.get("/programas-uxxi-por-periodo", requirePermission("CEST"), getProgramasUxxiPorPeriodo);
 router.patch(
   "/:id/estado-final",
   requirePermission("AMPR", "BUSP"),

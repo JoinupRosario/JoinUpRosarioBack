@@ -871,6 +871,19 @@ export const getMisAceptadasMTM = async (req, res) => {
     legalizaciones.forEach((l) => {
       estadoLegByPost[String(l.postulacionMTM)] = l.estado;
     });
+
+    /** Etiqueta legible para listados (estudiante); el código va en estadoLegalizacionCodigo. */
+    const labelEstadoLegalizacionMTM = (estado) => {
+      if (!estado) return "Pendiente de iniciar";
+      const map = {
+        borrador: "Borrador",
+        en_revision: "En revisión",
+        aprobada: "Aprobada",
+        rechazada: "Rechazada",
+        en_ajuste: "En ajuste",
+      };
+      return map[estado] ?? estado;
+    };
     const planAprobadoByPost = {};
     planes.forEach((pl) => {
       planAprobadoByPost[String(pl.postulacionMTM)] = pl.estado === "aprobado";
@@ -895,7 +908,9 @@ export const getMisAceptadasMTM = async (req, res) => {
         periodo: opp?.periodo?.codigo ?? null,
         coordinador: opp?.profesorResponsable ? [opp.profesorResponsable.nombres, opp.profesorResponsable.apellidos].filter(Boolean).join(" ") : (opp?.nombreProfesor ?? null),
         estado: "Aceptado",
-        estadoLegalizacion: estadoLegByPost[String(p._id)] === "en_revision" ? "En revisión" : estadoLegByPost[String(p._id)] === "aprobada" ? "Aprobada" : estadoLegByPost[String(p._id)] === "rechazada" ? "Rechazada" : "Pendiente",
+        /** Código del modelo LegalizacionMTM (borrador | en_revision | aprobada | rechazada | en_ajuste); null si aún no existe registro de legalización */
+        estadoLegalizacionCodigo: estadoLegByPost[String(p._id)] ?? null,
+        estadoLegalizacion: labelEstadoLegalizacionMTM(estadoLegByPost[String(p._id)]),
         planAprobado: planAprobadoByPost[String(p._id)] === true,
         finalizadoPorMonitor: null,
         aceptadoEstudianteAt: p.aceptadoEstudianteAt,
@@ -1691,7 +1706,12 @@ export const updateLegalizacionMTM = async (req, res) => {
     if (tipoCuenta !== undefined) leg.tipoCuenta = tipoCuenta || null;
     if (tipoCuentaValor !== undefined) leg.tipoCuentaValor = ["Ahorros", "Corriente"].includes(tipoCuentaValor) ? tipoCuentaValor : null;
     if (banco !== undefined) leg.banco = banco || null;
-    if (numeroCuenta !== undefined) leg.numeroCuenta = numeroCuenta ? String(numeroCuenta).trim() : null;
+    if (numeroCuenta !== undefined) {
+      const soloDigitos = numeroCuenta != null && String(numeroCuenta).trim() !== ""
+        ? String(numeroCuenta).replace(/\D/g, "")
+        : "";
+      leg.numeroCuenta = soloDigitos.length ? soloDigitos : null;
+    }
     await leg.save();
 
     const updated = await LegalizacionMTM.findById(leg._id).populate("eps tipoCuenta banco", "value description listId").lean();
@@ -2347,9 +2367,15 @@ export const enviarRevisionPlanTrabajoMTM = async (req, res) => {
     if (result.error) return res.status(result.error).json({ message: result.message });
     const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId });
     if (!plan) return res.status(404).json({ message: "Plan de trabajo no encontrado" });
-    if (plan.estado !== "borrador") return res.status(400).json({ message: "Solo puede enviar a revisión un plan en estado borrador" });
+    if (plan.estado !== "borrador" && plan.estado !== "rechazado") {
+      return res.status(400).json({ message: "Solo puede enviar a revisión un plan en estado borrador o rechazado" });
+    }
     plan.estado = "enviado_revision";
     plan.enviadoRevisionAt = new Date();
+    if (plan.rechazadoAt != null || plan.rechazoMotivo) {
+      plan.rechazadoAt = null;
+      plan.rechazoMotivo = null;
+    }
     await plan.save();
 
     const ctxEnvPlan = await loadMtmPostulacionContext(postulacionId);
