@@ -127,9 +127,13 @@ export const changePassword = async (req, res) => {
 
     // Encriptar nueva contraseña
     const hashedPassword = await bcrypt.hash(newPassword, 10);
-    user.password = hashedPassword;
-    user.debeCambiarPassword = false;
-    await user.save();
+    // No usar user.save(): valida todo el documento y falla si modulo quedó '' u otros datos legacy.
+    // Solo actualizar contraseña y flag (update validators aplican solo a estos campos).
+    await User.findByIdAndUpdate(
+      req.user.id,
+      { $set: { password: hashedPassword, debeCambiarPassword: false } },
+      { runValidators: true }
+    );
 
     const userOut = await User.findById(req.user.id).select("-password").lean();
     res.json({

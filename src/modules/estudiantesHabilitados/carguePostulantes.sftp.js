@@ -19,12 +19,39 @@ function setCache(buf, mtime) {
   _cachedMtime  = mtime;
 }
 
+// ── Caché separada para CARGUE_EGRESADOSUR ─────────────────────────────────
+let _cachedBufferEgresados = null;
+let _cachedMtimeEgresados = null;
+
+function getCachedEgresadosIfFresh(remoteMtime) {
+  if (_cachedBufferEgresados && _cachedMtimeEgresados != null && remoteMtime === _cachedMtimeEgresados) {
+    console.log(`[SFTP-Egresados] Archivo sin cambios (mtime ${remoteMtime}) — usando caché`);
+    return _cachedBufferEgresados;
+  }
+  return null;
+}
+
+function setCacheEgresados(buf, mtime) {
+  _cachedBufferEgresados = buf;
+  _cachedMtimeEgresados = mtime;
+}
+
 function getConfig() {
   return {
     host:     process.env.SFTP_HOST     || "35.208.21.19",
     user:     process.env.SFTP_USER     || "urosariosftp",
     password: process.env.SFTP_PASSWORD || "",
     path:     process.env.SFTP_POSTULANTES_PATH || "/upload/process/cargue_postulantes.xlsx",
+  };
+}
+
+/** Misma carpeta que cargue_postulantes: CARGUE_EGRESADOSUR.xlsx */
+function getEgresadosConfig() {
+  return {
+    host:     process.env.SFTP_HOST     || "35.208.21.19",
+    user:     process.env.SFTP_USER     || "urosariosftp",
+    password: process.env.SFTP_PASSWORD || "",
+    path:     process.env.SFTP_EGRESADOS_PATH || "/upload/process/CARGUE_EGRESADOSUR.xlsx",
   };
 }
 
@@ -252,4 +279,88 @@ export async function descargarYFiltrarPostulantesMultiples(codigosPrograma) {
 
   console.log(`[SFTP-Postulantes] Multiples — ${resultado.length} filas para códigos: ${[...codesSet].join(", ")}`);
   return resultado;
+}
+
+/**
+ * Normaliza claves de fila (DOCUMENTO, Cod_Programa, etc.) a campos fijos.
+ */
+function normalizeEgresadosRow(row) {
+  const m = {};
+  for (const [k, v] of Object.entries(row || {})) {
+    const nk = String(k).trim().toLowerCase().replace(/\s+/g, "");
+    m[nk] = v;
+  }
+  const documento = String(m.documento ?? "").trim();
+  const email = String(m.email ?? "").trim();
+  const codPrograma = String(m.cod_programa ?? m.codprograma ?? "").trim();
+  const fechaGradoRaw = m.fecha_grado ?? m.fechagrado ?? "";
+  const titulo = String(m.titulo ?? m.título ?? "").trim();
+  return { documento, email, codPrograma, fechaGradoRaw, titulo };
+}
+
+/**
+ * Parsea FECHA_GRADO: DD/MM/YYYY, o serial Excel, o ISO.
+ * @returns {Date|null}
+ */
+export function parseFechaGradoEgresados(v) {
+  if (v == null || v === "") return null;
+  if (v instanceof Date && !Number.isNaN(v.getTime())) return v;
+  if (typeof v === "number" && v > 20000 && v < 60000) {
+    const epoch = new Date(Date.UTC(1899, 11, 30));
+    const d = new Date(epoch.getTime() + Math.round(v) * 86400000);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const s = String(v).trim();
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) {
+    const d = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const d2 = new Date(s);
+  return Number.isNaN(d2.getTime()) ? null : d2;
+}
+
+/**
+ * Descarga CARGUE_EGRESADOSUR.xlsx (misma ruta base que cargue_postulantes).
+ * Columnas esperadas: DOCUMENTO, EMAIL, COD_PROGRAMA, FECHA_GRADO, TITULO.
+ * Misma convención que postulantes: primera fila vacía → range:1; si no, sin range.
+ */
+export async function descargarCargueEgresadosUr() {
+  const { path: remotePath } = getEgresadosConfig();
+  const remoteMtime = await getRemoteMtime(remotePath);
+  console.log(`[SFTP-Egresados] mtime: ${remoteMtime} (${new Date(remoteMtime * 1000).toISOString()})`);
+
+  let buffer = getCachedEgresadosIfFresh(remoteMtime);
+  if (!buffer) {
+    console.log("[SFTP-Egresados] Descargando archivo…");
+    buffer = await downloadBuffer(remotePath);
+    setCacheEgresados(buffer, remoteMtime);
+  }
+
+  const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
+  const sheetName = workbook.SheetNames[0];
+  const sheet = workbook.Sheets[sheetName];
+
+  let rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false, range: 1 });
+  if (rows.length > 0) {
+    const first = normalizeEgresadosRow(rows[0]);
+    if (!first.documento && !first.codPrograma) {
+      rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+    }
+  }
+
+  const parsed = rows.map((row) => {
+    const n = normalizeEgresadosRow(row);
+    const fechaGrado = parseFechaGradoEgresados(n.fechaGradoRaw);
+    return {
+      ...n,
+      fechaGrado,
+    };
+  }).filter((r) => r.documento || r.codPrograma);
+
+  console.log(`[SFTP-Egresados] Filas útiles: ${parsed.length}`);
+  if (parsed.length > 0) {
+    console.log(`[SFTP-Egresados] Columnas ejemplo: ${Object.keys(rows[0] || {}).join(" | ")}`);
+  }
+  return parsed;
 }

@@ -28,7 +28,7 @@ import State from "../../shared/location/models/state.schema.js";
 import City from "../../shared/location/models/city.schema.js";
 import { MAX_PROFILES_PER_POSTULANT, S3_PREFIX_PERFIL_DOC_SOPORTE } from "./postulantProfile.controller.js";
 import { consultaInfEstudiante, consultaInfAcademica } from "../../../services/uxxiIntegration.service.js";
-import { descargarYFiltrarPostulantes } from "../../estudiantesHabilitados/carguePostulantes.sftp.js";
+import { descargarYFiltrarPostulantes, descargarCargueEgresadosUr } from "../../estudiantesHabilitados/carguePostulantes.sftp.js";
 import Program from "../../program/model/program.model.js";
 import Item from "../../shared/reference-data/models/item.schema.js";
 import Attachment from "../../shared/attachment/attachment.schema.js";
@@ -1554,7 +1554,7 @@ export const getPostulantProfileData = async (req, res) => {
         : [];
 
     let profileCompleteness = null;
-    // Completitud: 8 datos personales visibles + código estudiante + áreas + competencias + idiomas
+    // Completitud: 8 datos personales + código estudiante + idiomas + habilidades digitales (áreas/competencias opcionales)
     try {
       const postulantFull = await Postulant.findById(postulantDocId)
         .select("typeOfIdentification gender phone address countryBirthId countryResidenceId stateResidenceId cityResidenceId")
@@ -1653,7 +1653,7 @@ export const generateHojaVidaPdf = async (req, res) => {
     if (!perfilCompleto) {
       const message = missingLabels?.length > 0
         ? `Faltan los siguientes campos por completar: ${missingLabels.join(", ")}`
-        : "El perfil no está completo. Complete los datos personales, áreas de interés, competencias e idiomas.";
+        : "El perfil no está completo. Complete los datos personales, código de estudiante, idiomas y habilidades digitales.";
       return res.status(400).json({ message, missing: missingLabels || [] });
     }
     // Datos solo del perfil seleccionado (cada perfil es independiente)
@@ -1678,7 +1678,6 @@ export const generateHojaVidaPdf = async (req, res) => {
       skills,
       languages,
       awards,
-      references,
       otherStudies,
       interestAreas,
       profileCvs,
@@ -1718,7 +1717,6 @@ export const generateHojaVidaPdf = async (req, res) => {
         .populate("awardType", "value name")
         .sort({ awardDate: -1, dateCreation: -1 })
         .lean(),
-      ProfileReference.find(expRefFilter).lean(),
       ProfileOtherStudy.find({ profileId }).lean(),
       ProfileInterestArea.find(versionFilter).populate("area", "value name").lean(),
       ProfileCv.find({ profileId }).populate("attachmentId", "name filepath contentType").lean(),
@@ -1743,7 +1741,6 @@ export const generateHojaVidaPdf = async (req, res) => {
       skills,
       languages,
       awards,
-      references,
       otherStudies,
       interestAreas,
       profileCvs,
@@ -2245,7 +2242,7 @@ export const updatePostulant = async (req, res) => {
     if (req.body.full_profile !== undefined) {
       postulant.filled = req.body.full_profile === true || req.body.full_profile === "true";
     }
-    // fillingPercentage se actualiza al cargar profile-data (12 ítems visibles + HV)
+    // fillingPercentage se actualiza al cargar profile-data (11 ítems visibles + HV)
     await postulant.save();
 
     if (req.body.acept_terms !== undefined) {
@@ -2598,6 +2595,309 @@ function buildCodDian(deptCode, cityCode) {
 }
 
 /**
+ * Preview / aplicación del archivo SFTP CARGUE_EGRESADOSUR (egresados).
+ * Empareja DOCUMENTO → studentCode, COD_PROGRAMA → ProgramFaculty.code, pasa programa a finalizado.
+ * Si tras graduar no queda ningún programa en curso, se inactiva el usuario.
+ * Nota: se acepta el plan aunque en catálogo esté inactivo (activo NO), siempre que exista el código.
+ */
+async function buildEgresadosPlan() {
+  const filas = await descargarCargueEgresadosUr();
+  const programFaculties = await ProgramFaculty.find({
+    code: { $exists: true, $nin: [null, ""] },
+  })
+    .select("_id code programId activo")
+    .lean();
+  const pfByCode = new Map();
+  for (const pf of programFaculties) {
+    const k = String(pf.code || "").trim().toUpperCase();
+    if (!k) continue;
+    const prev = pfByCode.get(k);
+    if (!prev) {
+      pfByCode.set(k, pf);
+      continue;
+    }
+    const score = (p) => (p.activo === "SI" ? 1 : 0);
+    if (score(pf) > score(prev)) pfByCode.set(k, pf);
+  }
+
+  if (filas.length === 0) {
+    return {
+      totalFilas: 0,
+      filas: [],
+      planAplicar: [],
+      errores: [],
+      resumen: { aplicar: 0, errores: 0, inactivaciones: 0 },
+    };
+  }
+
+  const docs = [...new Set(filas.map((f) => String(f.documento).trim()).filter(Boolean))];
+  const profiles = await PostulantProfile.find({ studentCode: { $in: docs } }).lean();
+  const profileByDoc = new Map(
+    profiles.map((p) => [String(p.studentCode).trim().toLowerCase(), p])
+  );
+
+  const postulantIds = profiles.map((p) => p.postulantId).filter(Boolean);
+  const postulants = await Postulant.find({ _id: { $in: postulantIds } })
+    .select("_id postulantId")
+    .lean();
+  const postulantById = new Map(postulants.map((po) => [po._id.toString(), po]));
+
+  const remainingByProfile = new Map();
+  for (const pr of profiles) {
+    const c = await ProfileEnrolledProgram.countDocuments({ profileId: pr._id });
+    remainingByProfile.set(pr._id.toString(), c);
+  }
+
+  const planAplicar = [];
+  const errores = [];
+  const filasPreview = [];
+  const seen = new Set();
+
+  for (const fila of filas) {
+    const doc = String(fila.documento || "").trim();
+    const cod = String(fila.codPrograma || "").trim().toUpperCase();
+    const titulo = String(fila.titulo || "").trim();
+    const fechaGrado = fila.fechaGrado;
+
+    const key = `${doc.toLowerCase()}|${cod}`;
+    if (seen.has(key)) {
+      errores.push({ documento: doc, codPrograma: cod, motivo: "fila_duplicada_en_archivo" });
+      continue;
+    }
+    seen.add(key);
+
+    if (!doc) {
+      errores.push({ documento: doc, codPrograma: cod, motivo: "documento_vacio" });
+      continue;
+    }
+    if (!cod) {
+      errores.push({ documento: doc, codPrograma: cod, motivo: "cod_programa_vacio" });
+      continue;
+    }
+    if (!fechaGrado || !(fechaGrado instanceof Date) || Number.isNaN(fechaGrado.getTime())) {
+      errores.push({ documento: doc, codPrograma: cod, motivo: "fecha_grado_invalida" });
+      continue;
+    }
+    if (!titulo) {
+      errores.push({ documento: doc, codPrograma: cod, motivo: "titulo_vacio" });
+      continue;
+    }
+
+    const profile = profileByDoc.get(doc.toLowerCase());
+    if (!profile) {
+      errores.push({ documento: doc, codPrograma: cod, motivo: "estudiante_no_encontrado" });
+      filasPreview.push({
+        documento: doc,
+        codPrograma: cod,
+        titulo,
+        fechaGrado: fechaGrado.toISOString().slice(0, 10),
+        estado: "error",
+        detalle: "estudiante_no_encontrado",
+      });
+      continue;
+    }
+
+    const pf = pfByCode.get(cod);
+    if (!pf || !pf.programId) {
+      errores.push({ documento: doc, codPrograma: cod, motivo: "codigo_programa_no_catalogado" });
+      filasPreview.push({
+        documento: doc,
+        codPrograma: cod,
+        titulo,
+        fechaGrado: fechaGrado.toISOString().slice(0, 10),
+        estado: "error",
+        detalle: "codigo_programa_no_catalogado",
+      });
+      continue;
+    }
+
+    let enrolled = await ProfileEnrolledProgram.findOne({
+      profileId: profile._id,
+      programFacultyId: pf._id,
+    }).lean();
+    if (!enrolled) {
+      enrolled = await ProfileEnrolledProgram.findOne({
+        profileId: profile._id,
+        programId: pf.programId,
+      }).lean();
+    }
+
+    const existingGrad =
+      (await ProfileGraduateProgram.findOne({
+        profileId: profile._id,
+        programFacultyId: pf._id,
+      }).lean()) ||
+      (await ProfileGraduateProgram.findOne({
+        profileId: profile._id,
+        programId: pf.programId,
+      }).lean());
+
+    const po = postulantById.get(profile.postulantId?.toString?.());
+    const userId = po?.postulantId;
+
+    if (!enrolled && existingGrad) {
+      planAplicar.push({
+        accion: "actualizar_graduado",
+        documento: doc,
+        profileId: profile._id,
+        graduateId: existingGrad._id,
+        titulo,
+        fechaGrado,
+        inactivarUsuario: false,
+        userId,
+      });
+      filasPreview.push({
+        documento: doc,
+        codPrograma: cod,
+        titulo,
+        fechaGrado: fechaGrado.toISOString().slice(0, 10),
+        estado: "ok",
+        detalle: "actualizar_titulo_fecha_grado",
+        inactivaraUsuario: false,
+      });
+      continue;
+    }
+
+    if (!enrolled) {
+      errores.push({ documento: doc, codPrograma: cod, motivo: "sin_programa_en_curso" });
+      filasPreview.push({
+        documento: doc,
+        codPrograma: cod,
+        titulo,
+        fechaGrado: fechaGrado.toISOString().slice(0, 10),
+        estado: "error",
+        detalle: "sin_programa_en_curso",
+      });
+      continue;
+    }
+
+    const rid = profile._id.toString();
+    const rem = remainingByProfile.get(rid) ?? 0;
+    const inactivarUsuario = rem === 1;
+    remainingByProfile.set(rid, Math.max(0, rem - 1));
+
+    planAplicar.push({
+      accion: "graduar",
+      documento: doc,
+      profileId: profile._id,
+      enrolledId: enrolled._id,
+      programId: pf.programId,
+      programFacultyId: pf._id,
+      titulo,
+      fechaGrado,
+      inactivarUsuario,
+      userId,
+    });
+
+    filasPreview.push({
+      documento: doc,
+      codPrograma: cod,
+      titulo,
+      fechaGrado: fechaGrado.toISOString().slice(0, 10),
+      estado: "ok",
+      detalle: "graduar",
+      inactivaraUsuario: inactivarUsuario,
+    });
+  }
+
+  const inactivaciones = planAplicar.filter((p) => p.inactivarUsuario && p.accion === "graduar").length;
+
+  return {
+    totalFilas: filas.length,
+    filas: filasPreview,
+    planAplicar,
+    errores,
+    resumen: {
+      aplicar: planAplicar.length,
+      errores: errores.length,
+      inactivaciones,
+    },
+  };
+}
+
+async function aplicarEgresadosUxxi(userLabel) {
+  let plan;
+  try {
+    plan = await buildEgresadosPlan();
+  } catch (e) {
+    console.error("[egresadosUxxi] No se pudo leer CARGUE_EGRESADOSUR:", e.message);
+    return {
+      graduados: 0,
+      actualizadosGraduado: 0,
+      inactivadosPorEgreso: 0,
+      errores: [{ documento: "-", error: e.message }],
+      resumen: { aplicar: 0, errores: 0, inactivaciones: 0 },
+      totalFilasEgresados: 0,
+      omitido: true,
+    };
+  }
+  let graduados = 0;
+  let actualizadosGraduado = 0;
+  let inactivados = 0;
+  const errores = [];
+
+  for (const p of plan.planAplicar) {
+    try {
+      if (p.accion === "actualizar_graduado") {
+        await ProfileGraduateProgram.updateOne(
+          { _id: p.graduateId },
+          { $set: { title: p.titulo, endDate: p.fechaGrado } }
+        );
+        actualizadosGraduado += 1;
+      } else if (p.accion === "graduar") {
+        await ProfileProgramExtraInfo.deleteMany({ enrolledProgramId: p.enrolledId });
+        await ProfileEnrolledProgram.deleteOne({ _id: p.enrolledId });
+        try {
+          await ProfileGraduateProgram.create({
+            profileId: p.profileId,
+            programId: p.programId,
+            programFacultyId: p.programFacultyId,
+            title: p.titulo,
+            endDate: p.fechaGrado,
+          });
+        } catch (e) {
+          if (e.code === 11000) {
+            await ProfileGraduateProgram.updateOne(
+              { profileId: p.profileId, programId: p.programId },
+              {
+                $set: {
+                  title: p.titulo,
+                  endDate: p.fechaGrado,
+                  programFacultyId: p.programFacultyId,
+                },
+              }
+            );
+          } else {
+            throw e;
+          }
+        }
+        graduados += 1;
+
+        if (p.inactivarUsuario && p.userId) {
+          const r = await User.updateOne(
+            { _id: p.userId, estado: { $ne: false } },
+            { $set: { estado: false } }
+          );
+          if (r.modifiedCount) inactivados += 1;
+        }
+      }
+    } catch (err) {
+      console.error("[egresadosUxxi]", p.documento, err.message);
+      errores.push({ documento: p.documento, error: err.message });
+    }
+  }
+
+  return {
+    graduados,
+    actualizadosGraduado,
+    inactivadosPorEgreso: inactivados,
+    errores,
+    resumen: plan.resumen,
+    totalFilasEgresados: plan.totalFilas,
+  };
+}
+
+/**
  * POST /postulants/preview-sincronizar-uxxi
  * Solo lee el archivo y la BD, devuelve el resumen sin modificar nada.
  */
@@ -2605,6 +2905,24 @@ export const previewSincronizarUxxi = async (req, res) => {
   console.log("[previewSincronizarUxxi] Calculando diff...");
   try {
     const diff = await calcularDiffUxxi();
+    let egresados = {
+      totalFilas: 0,
+      filas: [],
+      resumen: { aplicar: 0, errores: 0, inactivaciones: 0 },
+      errores: [],
+    };
+    try {
+      egresados = await buildEgresadosPlan();
+    } catch (egErr) {
+      console.warn("[previewSincronizarUxxi] CARGUE_EGRESADOSUR no disponible:", egErr.message);
+      egresados = {
+        totalFilas: 0,
+        filas: [],
+        resumen: { aplicar: 0, errores: 0, inactivaciones: 0 },
+        errores: [],
+        advertencia: egErr.message || "No se pudo leer el archivo de egresados",
+      };
+    }
     res.json({
       totalArchivo:           diff.totalArchivo,
       totalBD:                diff.totalBD,
@@ -2616,6 +2934,12 @@ export const previewSincronizarUxxi = async (req, res) => {
       cantidadPorCrear:       diff.porCrear.length,
       cantidadPorCompletar:   diff.porCompletar.length,
       cantidadPorInactivar:   diff.porInactivar.length,
+      egresados: {
+        totalFilas: egresados.totalFilas,
+        filas: egresados.filas,
+        resumen: egresados.resumen,
+        errores: egresados.errores,
+      },
     });
   } catch (err) {
     console.error("[previewSincronizarUxxi] ERROR:", err.message);
@@ -2970,15 +3294,36 @@ export const sincronizarPostulantesUxxi = async (req, res) => {
       log(`[FASE 3] Completados: ${completados}`);
     }
 
-    log(`── FIN: ${creados} creados, ${completados} completados, ${inactivados} inactivados, ${errores.length} errores ─────`);
+    log(`── FIN FASE 1–3: ${creados} creados, ${completados} completados, ${inactivados} inactivados, ${errores.length} errores ─────`);
+
+    log("── FASE 4 — EGRESADOS (CARGUE_EGRESADOSUR) ─────────────────────");
+    let egresadosResult = {
+      graduados: 0,
+      actualizadosGraduado: 0,
+      inactivadosPorEgreso: 0,
+      errores: [],
+      totalFilasEgresados: 0,
+    };
+    try {
+      egresadosResult = await aplicarEgresadosUxxi(userCreatorEmail);
+      log(
+        `[FASE 4] graduados=${egresadosResult.graduados} actualizados=${egresadosResult.actualizadosGraduado} inactivados=${egresadosResult.inactivadosPorEgreso}`
+      );
+    } catch (egErr) {
+      console.error("[sincronizarUxxi] FASE 4 egresados:", egErr.message);
+      egresadosResult.errorFase = egErr.message;
+    }
 
     res.json({
-      message:     `Sincronización completada: ${creados} creados, ${completados} completados, ${inactivados} inactivados, ${errores.length} errores.`,
+      message:
+        `Sincronización completada: ${creados} creados, ${completados} completados, ${inactivados} inactivados (archivo postulantes); ` +
+        `${egresadosResult.graduados ?? 0} programas pasados a finalizado por egresados, ${egresadosResult.inactivadosPorEgreso ?? 0} usuarios inactivados por egreso único.`,
       creados,
       completados,
       inactivados,
       errores,
       totalArchivo: filasExcel.length,
+      egresados: egresadosResult,
     });
 
   } catch (err) {

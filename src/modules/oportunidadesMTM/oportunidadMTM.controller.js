@@ -916,13 +916,31 @@ export const cerrarOportunidadMTM = async (req, res) => {
   try {
     const userId = req.user?.id;
     const { id } = req.params;
-    const { postulantesSeleccionados } = req.body || {};
+    const { postulantesSeleccionados, motivoNoContrato, contrató } = req.body || {};
     const selectedIds = Array.isArray(postulantesSeleccionados) ? postulantesSeleccionados.map(String).filter(Boolean) : [];
+    const contratoBool =
+      contrató === true ||
+      contrató === "true" ||
+      contrató === 1 ||
+      contrató === "1" ||
+      selectedIds.length > 0;
 
     const op = await OportunidadMTM.findById(id);
     if (!op) return res.status(404).json({ message: "Oportunidad MTM no encontrada" });
     if (op.estado !== "Activa") {
       return res.status(400).json({ message: "Solo se puede cerrar una oportunidad en estado Activa." });
+    }
+
+    if (contratoBool && selectedIds.length === 0) {
+      return res.status(400).json({ message: "Debe seleccionar al menos un postulante cuando indica que hubo contratación MTM." });
+    }
+    if (!contratoBool) {
+      const motivo = (motivoNoContrato || "").toString().trim();
+      if (!motivo) {
+        return res.status(400).json({
+          message: "Debe indicar el motivo cuando no se contrata monitoría/tutoría/mentoría.",
+        });
+      }
     }
 
     const postulaciones = await PostulacionMTM.find({ oportunidadMTM: id }).lean();
@@ -945,6 +963,7 @@ export const cerrarOportunidadMTM = async (req, res) => {
     // Trazabilidad en la oportunidad (igual que en prácticas)
     op.fechaCierre = now;
     op.cerradoPor = userId || null;
+    op.motivoCierreNoContrato = contratoBool ? null : String(motivoNoContrato || "").trim() || null;
     op.cierrePostulantesSeleccionados = selectedIds
       .map((sid) => (mongoose.Types.ObjectId.isValid(sid) ? new mongoose.Types.ObjectId(sid) : null))
       .filter(Boolean);
@@ -952,9 +971,10 @@ export const cerrarOportunidadMTM = async (req, res) => {
       estadoAnterior: op.estado,
       estadoNuevo: "Inactiva",
       cambiadoPor: userId,
-      motivo: selectedIds.length > 0
-        ? "Cierre de oportunidad con postulante(s) seleccionado(s)"
-        : "Cierre de oportunidad",
+      motivo:
+        selectedIds.length > 0
+          ? "Cierre de oportunidad con postulante(s) seleccionado(s)"
+          : String(motivoNoContrato || "Cierre de oportunidad sin contratación MTM.").trim(),
     });
     op.estado = "Inactiva";
     op.actualizadoPor = userId || null;
@@ -1362,6 +1382,81 @@ export const updateApplicationStateMTM = async (req, res) => {
     });
   } catch (err) {
     console.error("[MTM] updateApplicationStateMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ─── POST /oportunidades-mtm/:id/applications/:postulacionId/seleccionar ─────
+// Selección sin cerrar la oportunidad: mismo efecto en postulación/notificaciones que al cerrar con contratación, pero la oportunidad sigue Activa.
+export const seleccionarPostulanteMTM = async (req, res) => {
+  try {
+    const { id: oportunidadId, postulacionId } = req.params;
+
+    const op = await OportunidadMTM.findById(oportunidadId).select("estado vacantes").lean();
+    if (!op) return res.status(404).json({ message: "Oportunidad MTM no encontrada" });
+    if (op.estado !== "Activa") {
+      return res.status(400).json({ message: "Solo puede seleccionar postulantes cuando la oportunidad está Activa." });
+    }
+
+    const vacantes = Math.max(1, Number(op.vacantes) || 1);
+    const countSeleccionados = await PostulacionMTM.countDocuments({
+      oportunidadMTM: oportunidadId,
+      estado: "seleccionado_empresa",
+    });
+
+    const po = await PostulacionMTM.findOne({
+      _id: postulacionId,
+      oportunidadMTM: oportunidadId,
+    });
+    if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
+
+    if (po.estado === "rechazado") {
+      return res.status(400).json({ message: "No puede seleccionar un postulante rechazado." });
+    }
+    if (po.estado === "aceptado_estudiante") {
+      return res.status(400).json({ message: "Este postulante ya aceptó la monitoría." });
+    }
+    if (po.estado === "seleccionado_empresa") {
+      return res.json({
+        message: "El postulante ya estaba seleccionado.",
+        estado: po.estado,
+        estadoLabel: "Seleccionado",
+      });
+    }
+
+    if (countSeleccionados >= vacantes) {
+      return res.status(400).json({
+        message: `No hay vacantes disponibles (máximo ${vacantes} seleccionado(s)).`,
+      });
+    }
+
+    const now = new Date();
+    await PostulacionMTM.updateOne(
+      { _id: postulacionId },
+      {
+        $set: {
+          estado: "seleccionado_empresa",
+          estadoConfirmacion: "confirmado",
+          seleccionadoAt: now,
+        },
+      }
+    );
+
+    const ctx = await loadMtmPostulacionContext(postulacionId);
+    if (ctx) {
+      await dispatchMonitoriaNotificacion("aprobacion_postulante_por_oportunidad", ctx.datos, {
+        estudiante: ctx.estudianteEmail,
+        postulante: ctx.estudianteEmail,
+      });
+    }
+
+    res.json({
+      message: "Postulante seleccionado correctamente.",
+      estado: "seleccionado_empresa",
+      estadoLabel: "Seleccionado",
+    });
+  } catch (err) {
+    console.error("[MTM] seleccionarPostulanteMTM:", err);
     res.status(500).json({ message: err.message });
   }
 };

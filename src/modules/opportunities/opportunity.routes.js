@@ -25,6 +25,7 @@ import {
   rejectProgram,
   rejectOpportunity,
   closeOpportunity,
+  seleccionarPostulantePractica,
   getStatusHistory,
   duplicateOpportunity,
   buscarPerfilParaAutogestionada,
@@ -128,6 +129,7 @@ router.patch("/:id/applications/:postulacionId/state", authorizeRoles("company",
 router.patch("/:id/applications/:postulacionId/descargo-hv", authorizeRoles("company", "admin", "superadmin", "leader"), markApplicationDescargoHv);
 router.patch("/:id/applications/:postulacionId", authorizeRoles("company", "admin", "superadmin", "leader"), reviewApplication);
 router.post("/:id/applications/select-multiple", authorizeRoles("company", "admin", "superadmin", "leader"), selectMultipleApplications);
+router.post("/:id/applications/:postulacionId/seleccionar", authorizeRoles("company", "admin", "superadmin", "leader"), seleccionarPostulantePractica);
 
 // Aprobación por programa académico
 router.post("/:id/approve-program", authorizeRoles("admin", "superadmin", "leader"), approveProgram);

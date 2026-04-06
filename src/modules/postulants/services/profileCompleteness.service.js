@@ -1,8 +1,8 @@
 /**
  * Servicio para calcular y persistir la completitud del perfil (perfilCompleto).
  * Solo cuenta campos que el estudiante puede ver/editar en el perfil:
- * datos personales (sin correo alternativo en UI, sin fecha/depto/ciudad nacimiento) +
- * código estudiante + áreas + competencias + idiomas (12 ítems).
+ * datos personales (8) + código estudiante + idiomas + habilidades digitales (11 ítems).
+ * Áreas de interés y competencias (skills) no son obligatorias para la HV.
  * Créditos/promedio/programa en curso no cuentan para este % ni para HV.
  */
 import Postulant from "../models/postulants.schema.js";
@@ -41,9 +41,8 @@ const DATOS_PERSONALES_LABELS = Object.fromEntries(
 
 const PERFIL_LABELS = [
   { key: "studentCode", label: "Código de estudiante" },
-  { key: "interestAreas", label: "Áreas de interés" },
-  { key: "skills", label: "Competencias" },
   { key: "languages", label: "Idiomas" },
+  { key: "skillsTechnicalSoftware", label: "Habilidades digitales" },
 ];
 
 function isFilledValue(v) {
@@ -57,16 +56,17 @@ function isFilledValue(v) {
 
 /**
  * Fallback cuando no hay perfil cargado (listados): solo la parte de datos personales
- * respecto al total de 12 ítems (máx. 67% si datos están completos).
+ * respecto al total de 11 ítems (máx. ~73% si datos están completos).
  */
 export function calculateListFallbackCompleteness(postulant) {
   const filled = COMPLETENESS_DATOS_KEYS.filter((key) => isFilledValue(postulant?.[key])).length;
-  const totalItems = COMPLETENESS_DATOS_KEYS.length + 4;
+  const totalItems = COMPLETENESS_DATOS_KEYS.length + 3;
   return totalItems ? Math.min(100, Math.round((filled / totalItems) * 100)) : 0;
 }
 
 /**
- * Completitud para generar HV: datos personales + perfil (áreas, competencias, idiomas).
+ * Completitud para generar HV: datos personales + código estudiante + idiomas + habilidades digitales.
+ * Áreas de interés y competencias no son obligatorias.
  * Créditos y promedio no intervienen.
  * Devuelve 0-100.
  */
@@ -74,14 +74,14 @@ export function calculateFullCompleteness(postulant, postulantProfile, profileDa
   const itemsDatos = COMPLETENESS_DATOS_KEYS.map((key) => ({ ok: isFilledValue(postulant?.[key]) }));
   const hasStudentCode =
     postulantProfile?.studentCode != null && String(postulantProfile.studentCode).trim() !== "";
-  const hasInterest = (profileData?.interestAreas?.length ?? 0) > 0;
-  const hasSkills = (profileData?.skills?.length ?? 0) > 0;
   const hasLangs = (profileData?.languages?.length ?? 0) > 0;
+  const hasDigitalSkills =
+    postulantProfile?.skillsTechnicalSoftware != null &&
+    String(postulantProfile.skillsTechnicalSoftware).trim() !== "";
   const itemsPerfil = [
     { ok: hasStudentCode },
-    { ok: hasInterest },
-    { ok: hasSkills },
     { ok: hasLangs },
+    { ok: hasDigitalSkills },
   ];
   const allItems = [...itemsDatos, ...itemsPerfil];
   const completed = allItems.filter((i) => i.ok).length;
@@ -99,19 +99,19 @@ export function getMissingCompletenessLabels(postulant, postulantProfile, profil
   });
   const hasStudentCode =
     postulantProfile?.studentCode != null && String(postulantProfile.studentCode).trim() !== "";
-  const hasInterest = (profileData?.interestAreas?.length ?? 0) > 0;
-  const hasSkills = (profileData?.skills?.length ?? 0) > 0;
   const hasLangs = (profileData?.languages?.length ?? 0) > 0;
+  const hasDigitalSkills =
+    postulantProfile?.skillsTechnicalSoftware != null &&
+    String(postulantProfile.skillsTechnicalSoftware).trim() !== "";
   if (!hasStudentCode) missing.push(PERFIL_LABELS[0].label);
-  if (!hasInterest) missing.push(PERFIL_LABELS[1].label);
-  if (!hasSkills) missing.push(PERFIL_LABELS[2].label);
-  if (!hasLangs) missing.push(PERFIL_LABELS[3].label);
+  if (!hasLangs) missing.push(PERFIL_LABELS[1].label);
+  if (!hasDigitalSkills) missing.push(PERFIL_LABELS[2].label);
   return missing;
 }
 
 /**
  * Recalcula perfilCompleto para un perfil y lo persiste en PostulantProfile y fillingPercentage en Postulant.
- * Si versionId viene, se usan áreas/competencias/idiomas de esa versión; si no, del perfil base.
+ * Si versionId viene, se usan idiomas de esa versión; habilidades digitales son del documento PostulantProfile (base).
  * Devuelve { perfilCompleto, fullPct }.
  */
 export async function recalcAndSaveProfileCompleteness(postulantDocId, userId, profileId, versionId = null) {

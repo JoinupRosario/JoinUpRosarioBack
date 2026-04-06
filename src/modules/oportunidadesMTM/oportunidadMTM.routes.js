@@ -14,6 +14,7 @@ import {
   getMisPostulacionesMTM,
   getMisAceptadasMTM,
   cerrarOportunidadMTM,
+  seleccionarPostulanteMTM,
   getApplicationsMTM,
   getApplicationDetailMTM,
   updateApplicationStateMTM,
@@ -153,6 +154,7 @@ router.get("/:id/applications/detail/:postulacionId", authorizeRoles("admin", "s
 router.patch("/:id/applications/:postulacionId/estudiante-responder", authorizeRoles("student"), estudianteResponderPostulacionMTM);
 router.patch("/:id/applications/:postulacionId/state", authorizeRoles("admin", "superadmin", "leader"), updateApplicationStateMTM);
 router.patch("/:id/applications/:postulacionId/descargo-hv", authorizeRoles("admin", "superadmin", "leader"), markApplicationDescargoHvMTM);
+router.post("/:id/applications/:postulacionId/seleccionar", authorizeRoles("admin", "superadmin", "leader"), seleccionarPostulanteMTM);
 router.get("/:id", getOportunidadMTMById);
 
 router.post("/", authorizeRoles("admin", "superadmin"), createOportunidadMTM);

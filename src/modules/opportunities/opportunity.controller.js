@@ -1610,6 +1610,180 @@ export const closeOpportunity = async (req, res) => {
   }
 };
 
+const CODE_PRACTICE_START_DAYS_AFTER_EXPIRY = "PRACTICE_START_DAYS_AFTER_EXPIRY";
+
+async function getPracticeStartDaysAfterExpiryForSeleccion() {
+  try {
+    const p = await Parameter.findOne({ code: CODE_PRACTICE_START_DAYS_AFTER_EXPIRY, "metadata.active": true }).lean();
+    const v = p?.value;
+    const n = typeof v === "number" ? v : parseInt(String(v ?? ""), 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  } catch (_) {}
+  return 0;
+}
+
+function addDaysToYMDStr(isoDateStr, daysToAdd) {
+  if (!isoDateStr) return "";
+  const d = new Date(isoDateStr);
+  d.setDate(d.getDate() + (daysToAdd || 0));
+  return d.toISOString().slice(0, 10);
+}
+
+/** POST /opportunities/:id/applications/:postulacionId/seleccionar — Práctica: seleccionar sin cerrar (mismos datos tutor que al cerrar con contratación). */
+export const seleccionarPostulantePractica = async (req, res) => {
+  try {
+    const { id: opportunityId, postulacionId } = req.params;
+    const body = req.body || {};
+    const requiredTutorFields = [
+      "nombreTutor",
+      "apellidoTutor",
+      "emailTutor",
+      "cargoTutor",
+      "tipoIdentTutor",
+      "identificacionTutor",
+      "arlEmpresa",
+      "fechaInicioPractica",
+    ];
+    for (const field of requiredTutorFields) {
+      const value = body[field];
+      if (value == null || String(value).trim() === "") {
+        return res.status(400).json({ message: `El campo ${field} es obligatorio.` });
+      }
+    }
+
+    const op = await Opportunity.findById(opportunityId).lean();
+    if (!op) return res.status(404).json({ message: "Oportunidad no encontrada" });
+    if (op.estado !== "Activa") {
+      return res.status(400).json({ message: "Solo puede seleccionar cuando la oportunidad está Activa." });
+    }
+    if (String(op.tipo || "").toLowerCase() !== "practica") {
+      return res.status(400).json({ message: "Solo aplica a oportunidades de práctica." });
+    }
+
+    const vacantes = Math.max(1, Number(op.vacantes) || 1);
+    const countSeleccionados = await PostulacionOportunidad.countDocuments({
+      opportunity: opportunityId,
+      estado: "seleccionado_empresa",
+    });
+
+    const po = await PostulacionOportunidad.findOne({
+      _id: postulacionId,
+      opportunity: opportunityId,
+    });
+    if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
+    if (po.estado === "rechazado") {
+      return res.status(400).json({ message: "No puede seleccionar un postulante rechazado." });
+    }
+    if (po.estado === "aceptado_estudiante") {
+      return res.status(400).json({ message: "Este postulante ya aceptó la práctica." });
+    }
+    if (po.estado === "seleccionado_empresa") {
+      return res.json({
+        message: "El postulante ya estaba seleccionado.",
+        estado: "seleccionado_empresa",
+        estadoLabel: "Seleccionado",
+      });
+    }
+
+    if (countSeleccionados >= vacantes) {
+      return res.status(400).json({
+        message: `No hay vacantes disponibles (máximo ${vacantes} seleccionado(s)).`,
+      });
+    }
+
+    const daysAfter = await getPracticeStartDaysAfterExpiryForSeleccion();
+    const vencimientoYMD = op.fechaVencimiento
+      ? new Date(op.fechaVencimiento).toISOString().slice(0, 10)
+      : "";
+    const fechaInicio = new Date(body.fechaInicioPractica);
+    if (Number.isNaN(fechaInicio.getTime())) {
+      return res.status(400).json({ message: "fechaInicioPractica no es una fecha válida." });
+    }
+    const minYmd = addDaysToYMDStr(vencimientoYMD, daysAfter);
+    if (vencimientoYMD && minYmd) {
+      const fiYmd = fechaInicio.toISOString().slice(0, 10);
+      if (fiYmd < minYmd) {
+        return res.status(400).json({
+          message: `La fecha de inicio de la práctica debe ser al menos ${daysAfter} día(s) después de la fecha de vencimiento de la oportunidad (mín. ${minYmd}).`,
+        });
+      }
+    }
+
+    const tutorDoc = {
+      postulacionId: new mongoose.Types.ObjectId(postulacionId),
+      nombreTutor: String(body.nombreTutor).trim(),
+      apellidoTutor: String(body.apellidoTutor).trim(),
+      emailTutor: String(body.emailTutor).trim(),
+      cargoTutor: String(body.cargoTutor).trim(),
+      tipoIdentTutor: String(body.tipoIdentTutor).trim(),
+      arlEmpresa: body.arlEmpresa,
+      identificacionTutor: String(body.identificacionTutor).trim(),
+      fechaInicioPractica: fechaInicio,
+    };
+
+    const rawPrev = op.cierrePostulantesSeleccionados || [];
+    const prevIdStrs = rawPrev.map((x) => {
+      if (x == null) return "";
+      if (typeof x === "object" && x._id) return String(x._id);
+      return String(x);
+    }).filter(Boolean);
+    const mergedIdSet = new Set([...prevIdStrs, String(postulacionId)]);
+    const mergedIds = [...mergedIdSet].map((id) => new mongoose.Types.ObjectId(id));
+
+    const prevDatos = Array.isArray(op.cierreDatosTutor) ? op.cierreDatosTutor : [];
+    const mergedDatos = prevDatos.filter((d) => {
+      const pid = d.postulacionId;
+      const s = pid && typeof pid === "object" && pid._id ? String(pid._id) : String(pid || "");
+      return s !== String(postulacionId);
+    });
+    mergedDatos.push(tutorDoc);
+
+    await Opportunity.findByIdAndUpdate(
+      opportunityId,
+      {
+        $set: {
+          cierrePostulantesSeleccionados: mergedIds,
+          cierreDatosTutor: mergedDatos,
+        },
+      },
+      { runValidators: false }
+    );
+
+    const now = new Date();
+    await PostulacionOportunidad.updateOne(
+      { _id: postulacionId },
+      { $set: { estado: "seleccionado_empresa", seleccionadoAt: now } }
+    );
+
+    const ctxC = await loadPracticaPostulacionContext(postulacionId);
+    if (ctxC) {
+      await dispatchPracticaNotification(
+        "notificacion_resultados_postulacion_estudiantes",
+        {
+          ...ctxC.datos,
+          OBSERVACION:
+            "Ha sido seleccionado(a) en la oportunidad. Revise los siguientes pasos en la plataforma.",
+        },
+        studentOnlyRecipientContext(ctxC.postulantEmail),
+        {
+          opportunityId: String(opportunityId),
+          postulacionId: String(postulacionId),
+          source: "seleccionarPostulantePractica",
+        }
+      );
+    }
+
+    res.json({
+      message: "Postulante seleccionado correctamente",
+      estado: "seleccionado_empresa",
+      estadoLabel: "Seleccionado",
+    });
+  } catch (err) {
+    console.error("[Practica] seleccionarPostulantePractica:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
 // Rechazar oportunidad con motivo
 export const rejectOpportunity = async (req, res) => {
   try {

@@ -295,14 +295,6 @@ function sectionLogros(doc, profileData, postulant) {
   });
 }
 
-function sectionReferencias(doc, profileData, postulant) {
-  const list = profileData?.references || [];
-  doc.fontSize(BODY_FONT_SIZE).font("Helvetica");
-  list.forEach((r) => {
-    doc.text(`• ${safeStr(r.firstname)} ${safeStr(r.lastname)} - ${safeStr(r.occupation)} - ${safeStr(r.phone)}`, { continued: false });
-  });
-}
-
 const SECTION_RENDERERS = {
   datos_basicos: sectionDatosBasicos,
   cedula: sectionCedula,
@@ -315,7 +307,6 @@ const SECTION_RENDERERS = {
   experiencia_laboral: sectionExperienciaLaboral,
   otras_experiencias: sectionOtrasExperiencias,
   logros: sectionLogros,
-  referencias: sectionReferencias,
 };
 
 /** Títulos de sección para el PDF (como en el formato oficial). */
@@ -330,7 +321,6 @@ const SECTION_TITLE_OVERRIDE = {
   experiencia_laboral: "EXPERIENCIA LABORAL",
   otras_experiencias: "INVESTIGACIÓN, VOLUNTARIADO Y PROYECCIÓN SOCIAL",
   logros: "LOGROS Y RECONOCIMIENTOS",
-  referencias: "REFERENCIAS",
 };
 
 /** Retorna true si la sección tiene datos suficientes para renderizarse. */
@@ -364,8 +354,6 @@ function hasSectionData(key, profileData) {
       return (profileData?.workExperiences || []).filter((w) => (w.experienceType || "JOB_EXP") !== "JOB_EXP").length > 0;
     case "logros":
       return (profileData?.awards || []).length > 0;
-    case "referencias":
-      return (profileData?.references || []).length > 0;
     default: return true;
   }
 }
@@ -449,7 +437,10 @@ export async function buildHojaVidaPdf(postulant, profileData, parametrizacion) 
     doc.moveDown(1.2);
 
     const contactIcons = loadContactIcons();
-    const formatSecciones = (parametrizacion?.formatSecciones || []).filter((s) => s.visible).sort((a, b) => (a.order || 0) - (b.order || 0));
+    // Las referencias ya no forman parte de la hoja de vida (no se consultan ni muestran).
+    const formatSecciones = (parametrizacion?.formatSecciones || [])
+      .filter((s) => s.visible && s.key !== "referencias")
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
 
     for (const seccion of formatSecciones) {
       const render = SECTION_RENDERERS[seccion.key];
