@@ -36,7 +36,8 @@
     "migrate:user-sucursal": "node src/seeders/migrateUserSucursalFromMySQL.js",
     "migrate:plantillas-practica-mysql": "node src/seeders/migratePlantillasPracticaFromMySQL.js",
     "seed:plantillas-hu-practica": "node src/seeders/seedPlantillasRequerimientosHU.js",
-    "dispatch:bulk-replay": "node src/scripts/bulkDispatchNotificationsFromDb.js"
+    "dispatch:bulk-replay": "node src/scripts/bulkDispatchNotificationsFromDb.js",
+    "permisos:read": "node src/scripts/readPermisosColeccion.js"
   },
   "keywords": [],
   "author": "",

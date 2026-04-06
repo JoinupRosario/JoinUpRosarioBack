@@ -7,6 +7,7 @@ import {
   eliminarUserAdministrativo,
   agregarRolUserAdministrativo,
   removerRolUserAdministrativo,
+  reemplazarRolesUserAdministrativo,
   cambiarEstadoRolUserAdministrativo,
   cambiarEstadoUserAdministrativo,
   asociarSedeUserAdministrativo,
@@ -29,7 +30,8 @@ router.delete('/:id', requirePermission('CEUS', 'CEUS2'), eliminarUserAdministra
 
 router.patch('/:id/estado', requirePermission('CEUS', 'CEUS2'), cambiarEstadoUserAdministrativo);
 
-// Gestión de roles en usuarios administrativos
+// Gestión de roles en usuarios administrativos (PUT reemplaza la lista completa en una sola petición)
+router.put('/:id/roles', requirePermission('ARUS'), reemplazarRolesUserAdministrativo);
 router.post('/:id/roles', requirePermission('ARUS'), agregarRolUserAdministrativo);
 router.delete('/:id/roles', requirePermission('ARUS'), removerRolUserAdministrativo);
 router.patch('/:id/roles/estado', requirePermission('ARUS'), cambiarEstadoRolUserAdministrativo);

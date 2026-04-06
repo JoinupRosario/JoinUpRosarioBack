@@ -2,6 +2,10 @@ import express from "express";
 import multer from "multer";
 import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
 import {
+  requireStaffPermission,
+  requireStudentOrStaffPermission,
+} from "../../middlewares/authPermission.js";
+import {
   getOportunidadesMTM,
   getOportunidadMTMById,
   createOportunidadMTM,
@@ -93,9 +97,17 @@ router.post("/asistencia-publica/:token/registrar", postRegistrarAsistenciaMTM);
 router.use(verifyToken);
 
 // RQ04_HU010: Link y reporte desde módulo legalización
-router.get("/legalizaciones-admin/:postulacionId/link-asistencia", authorizeRoles("admin", "superadmin", "leader"), getOrCreateLinkAsistenciaMTM);
-router.get("/legalizaciones-admin/:postulacionId/reporte-asistencia", authorizeRoles("admin", "superadmin", "leader"), getReporteAsistenciaMTMAdminByPostulacion);
-router.get("/legalizaciones-admin/reporte-asistencia", authorizeRoles("admin", "superadmin", "leader"), getReporteAsistenciaMTM);
+router.get(
+  "/legalizaciones-admin/:postulacionId/link-asistencia",
+  requireStaffPermission("DRAM", "AMMO", "ADLM"),
+  getOrCreateLinkAsistenciaMTM
+);
+router.get(
+  "/legalizaciones-admin/:postulacionId/reporte-asistencia",
+  requireStaffPermission("DRAM", "AMMO", "ADLM"),
+  getReporteAsistenciaMTMAdminByPostulacion
+);
+router.get("/legalizaciones-admin/reporte-asistencia", requireStaffPermission("DRAM", "AMMO", "LLMO"), getReporteAsistenciaMTM);
 
 // RQ04_HU001: rutas para estudiante (deben ir antes de /:id)
 router.get("/para-estudiante", authorizeRoles("student"), getOportunidadesMTMParaEstudiante);
@@ -114,54 +126,154 @@ router.get("/legalizaciones/:postulacionId/link-asistencia", authorizeRoles("stu
 router.get("/legalizaciones/:postulacionId/reporte-asistencia", authorizeRoles("student"), getReporteAsistenciaMTMStudent);
 
 // RQ04_HU006: Legalización MTM — coordinación (admin)
-router.get("/legalizaciones-admin", authorizeRoles("admin", "superadmin", "leader"), getLegalizacionesMTMAdmin);
-router.get("/legalizaciones-admin/estadisticas", authorizeRoles("admin", "superadmin", "leader"), getEstadisticasLegalizacionMTM);
-router.get("/legalizaciones-admin/:postulacionId", authorizeRoles("admin", "superadmin", "leader"), getLegalizacionMTMAdmin);
-router.get("/legalizaciones-admin/:postulacionId/documentos/:definitionId/url", authorizeRoles("admin", "superadmin", "leader"), getDocumentoLegalizacionUrlAdmin);
-router.get("/legalizaciones-admin/:postulacionId/documentos/:definitionId/descarga", authorizeRoles("admin", "superadmin", "leader"), getDocumentoLegalizacionDownloadAdmin);
-router.patch("/legalizaciones-admin/:postulacionId/documentos/:definitionId", authorizeRoles("admin", "superadmin", "leader"), patchDocumentoLegalizacionMTM);
-router.post("/legalizaciones-admin/:postulacionId/aprobar", authorizeRoles("admin", "superadmin", "leader"), postAprobarLegalizacionMTM);
-router.post("/legalizaciones-admin/:postulacionId/rechazar", authorizeRoles("admin", "superadmin", "leader"), postRechazarLegalizacionMTM);
+router.get(
+  "/legalizaciones-admin",
+  requireStaffPermission("LLMO", "CLMO", "AMMO", "ADLM"),
+  getLegalizacionesMTMAdmin
+);
+router.get(
+  "/legalizaciones-admin/estadisticas",
+  requireStaffPermission("LLMO", "CLMO", "AMMO", "ADLM"),
+  getEstadisticasLegalizacionMTM
+);
+router.get(
+  "/legalizaciones-admin/:postulacionId",
+  requireStaffPermission("CLMO", "ACLM", "APLM", "ADLM", "AMMO"),
+  getLegalizacionMTMAdmin
+);
+router.get(
+  "/legalizaciones-admin/:postulacionId/documentos/:definitionId/url",
+  requireStaffPermission("VADM", "APDM", "ACLM", "ADLM"),
+  getDocumentoLegalizacionUrlAdmin
+);
+router.get(
+  "/legalizaciones-admin/:postulacionId/documentos/:definitionId/descarga",
+  requireStaffPermission("VADM", "APDM", "ACLM", "ADLM"),
+  getDocumentoLegalizacionDownloadAdmin
+);
+router.patch(
+  "/legalizaciones-admin/:postulacionId/documentos/:definitionId",
+  requireStaffPermission("ACAM", "APDM", "ACLM", "ADLM"),
+  patchDocumentoLegalizacionMTM
+);
+router.post(
+  "/legalizaciones-admin/:postulacionId/aprobar",
+  requireStaffPermission("APLM", "APDM", "ACLM"),
+  postAprobarLegalizacionMTM
+);
+router.post(
+  "/legalizaciones-admin/:postulacionId/rechazar",
+  requireStaffPermission("APLM", "ANLM", "ACLM"),
+  postRechazarLegalizacionMTM
+);
 
 // RQ04_HU006: Plan de trabajo MTM (estudiante: crear/editar/enviar; profesor/admin: aprobar/rechazar)
 router.get("/plan-trabajo/datos-crear/:postulacionId", authorizeRoles("student"), getPlanTrabajoMTMDatosCrear);
-router.get("/plan-trabajo/:postulacionId", authorizeRoles("student", "admin", "superadmin", "leader"), getPlanTrabajoMTM);
+router.get(
+  "/plan-trabajo/:postulacionId",
+  requireStudentOrStaffPermission("VMPM", "CREM", "ACPM", "AMMO"),
+  getPlanTrabajoMTM
+);
 router.post("/plan-trabajo/:postulacionId", authorizeRoles("student"), createPlanTrabajoMTM);
 router.put("/plan-trabajo/:postulacionId", authorizeRoles("student"), updatePlanTrabajoMTM);
 router.post("/plan-trabajo/:postulacionId/enviar-revision", authorizeRoles("student"), enviarRevisionPlanTrabajoMTM);
-router.post("/plan-trabajo/:postulacionId/aprobar", authorizeRoles("admin", "superadmin", "leader"), aprobarPlanTrabajoMTM);
-router.post("/plan-trabajo/:postulacionId/rechazar", authorizeRoles("admin", "superadmin", "leader"), rechazarPlanTrabajoMTM);
+router.post("/plan-trabajo/:postulacionId/aprobar", requireStaffPermission("APPM", "ACPM"), aprobarPlanTrabajoMTM);
+router.post("/plan-trabajo/:postulacionId/rechazar", requireStaffPermission("RPPM", "ACPM"), rechazarPlanTrabajoMTM);
 
 // RQ04_HU008: Seguimientos MTM (estudiante: registro; admin: aprobar/rechazar, total horas)
-router.get("/seguimientos/:postulacionId", authorizeRoles("student", "admin", "superadmin", "leader"), getSeguimientosMTM);
-router.get("/seguimientos/:postulacionId/total-horas", authorizeRoles("admin", "superadmin", "leader"), getTotalHorasSeguimientosMTM);
-router.post("/seguimientos/:postulacionId", authorizeRoles("student", "admin", "superadmin", "leader"), createSeguimientoMTM);
-router.put("/seguimientos/:postulacionId/:seguimientoId", authorizeRoles("student", "admin", "superadmin", "leader"), updateSeguimientoMTM);
-router.delete("/seguimientos/:postulacionId/:seguimientoId", authorizeRoles("student", "admin", "superadmin", "leader"), deleteSeguimientoMTM);
-router.patch("/seguimientos/:postulacionId/:seguimientoId/aprobar", authorizeRoles("admin", "superadmin", "leader"), aprobarSeguimientoMTM);
-router.patch("/seguimientos/:postulacionId/:seguimientoId/rechazar", authorizeRoles("admin", "superadmin", "leader"), rechazarSeguimientoMTM);
-router.post("/seguimientos/:postulacionId/accion-masiva", authorizeRoles("admin", "superadmin", "leader"), accionMasivaSeguimientosMTM);
+router.get(
+  "/seguimientos/:postulacionId",
+  requireStudentOrStaffPermission("CSLM", "CRSM", "ACSM", "AMMO"),
+  getSeguimientosMTM
+);
+router.get(
+  "/seguimientos/:postulacionId/total-horas",
+  requireStaffPermission("CRSM", "APAM", "CSLM", "AMMO"),
+  getTotalHorasSeguimientosMTM
+);
+router.post(
+  "/seguimientos/:postulacionId",
+  requireStudentOrStaffPermission("CRSM", "ACSM", "DSML", "AMMO"),
+  createSeguimientoMTM
+);
+router.put(
+  "/seguimientos/:postulacionId/:seguimientoId",
+  requireStudentOrStaffPermission("ACSM", "CRSM", "AMMO"),
+  updateSeguimientoMTM
+);
+router.delete(
+  "/seguimientos/:postulacionId/:seguimientoId",
+  requireStudentOrStaffPermission("ACSM", "CRSM", "AMMO"),
+  deleteSeguimientoMTM
+);
+router.patch(
+  "/seguimientos/:postulacionId/:seguimientoId/aprobar",
+  requireStaffPermission("APAM", "APCM"),
+  aprobarSeguimientoMTM
+);
+router.patch(
+  "/seguimientos/:postulacionId/:seguimientoId/rechazar",
+  requireStaffPermission("REASM", "APCM"),
+  rechazarSeguimientoMTM
+);
+router.post(
+  "/seguimientos/:postulacionId/accion-masiva",
+  requireStaffPermission("APAM", "APCM", "REASM"),
+  accionMasivaSeguimientosMTM
+);
 router.post("/seguimientos/:postulacionId/:seguimientoId/documento", authorizeRoles("student"), uploadLegalizacion.single("file"), uploadDocumentoSeguimientoMTM);
 router.get("/seguimientos/:postulacionId/:seguimientoId/documento/url", authorizeRoles("student"), getDocumentoSeguimientoUrl);
-router.get("/seguimientos/:postulacionId/:seguimientoId/documento/url-admin", authorizeRoles("admin", "superadmin", "leader"), getDocumentoSeguimientoUrlAdmin);
-router.get("/seguimientos/:postulacionId/:seguimientoId/documento/descarga", authorizeRoles("admin", "superadmin", "leader"), getDocumentoSeguimientoDownloadAdmin);
+router.get(
+  "/seguimientos/:postulacionId/:seguimientoId/documento/url-admin",
+  requireStaffPermission("ACSM", "APAM", "AMMO"),
+  getDocumentoSeguimientoUrlAdmin
+);
+router.get(
+  "/seguimientos/:postulacionId/:seguimientoId/documento/descarga",
+  requireStaffPermission("ACSM", "APAM", "AMMO"),
+  getDocumentoSeguimientoDownloadAdmin
+);
 
-router.get("/", getOportunidadesMTM);
-router.get("/reportes/estadisticas", authorizeRoles("admin", "superadmin", "leader"), getReportesEstadisticasMTM);
-router.get("/:id/history", authorizeRoles("admin", "superadmin", "leader"), getStatusHistoryMTM);
-router.get("/:id/applications", authorizeRoles("admin", "superadmin", "leader"), getApplicationsMTM);
-router.get("/:id/applications/detail/:postulacionId", authorizeRoles("admin", "superadmin", "leader"), getApplicationDetailMTM);
+router.get("/", requireStaffPermission("COMT2", "COMN", "AMOP", "AMMO"), getOportunidadesMTM);
+router.get("/reportes/estadisticas", requireStaffPermission("AMMO", "AMOP", "LLMO"), getReportesEstadisticasMTM);
+router.get(
+  "/:id/history",
+  requireStaffPermission("COMT2", "LAOP", "VAOP", "AMOP"),
+  getStatusHistoryMTM
+);
+router.get(
+  "/:id/applications",
+  requireStaffPermission("LAOP", "VAOP", "COMT2", "AMOP"),
+  getApplicationsMTM
+);
+router.get(
+  "/:id/applications/detail/:postulacionId",
+  requireStaffPermission("VAOP", "LAOP", "AMOP"),
+  getApplicationDetailMTM
+);
 router.patch("/:id/applications/:postulacionId/estudiante-responder", authorizeRoles("student"), estudianteResponderPostulacionMTM);
-router.patch("/:id/applications/:postulacionId/state", authorizeRoles("admin", "superadmin", "leader"), updateApplicationStateMTM);
-router.patch("/:id/applications/:postulacionId/descargo-hv", authorizeRoles("admin", "superadmin", "leader"), markApplicationDescargoHvMTM);
-router.post("/:id/applications/:postulacionId/seleccionar", authorizeRoles("admin", "superadmin", "leader"), seleccionarPostulanteMTM);
-router.get("/:id", getOportunidadMTMById);
+router.patch(
+  "/:id/applications/:postulacionId/state",
+  requireStaffPermission("AAOP", "MARE", "ABRA"),
+  updateApplicationStateMTM
+);
+router.patch(
+  "/:id/applications/:postulacionId/descargo-hv",
+  requireStaffPermission("MADE", "AAOP"),
+  markApplicationDescargoHvMTM
+);
+router.post(
+  "/:id/applications/:postulacionId/seleccionar",
+  requireStaffPermission("AAOP", "MARE"),
+  seleccionarPostulanteMTM
+);
+router.get("/:id", requireStudentOrStaffPermission("COMT2", "COMN", "AMOP", "AMMO"), getOportunidadMTMById);
 
-router.post("/", authorizeRoles("admin", "superadmin"), createOportunidadMTM);
-router.put("/:id", authorizeRoles("admin", "superadmin"), updateOportunidadMTM);
-router.patch("/:id/status", authorizeRoles("admin", "superadmin"), changeStatusMTM);
-router.post("/:id/duplicate", authorizeRoles("admin", "superadmin"), duplicateOportunidadMTM);
-router.post("/:id/cerrar", authorizeRoles("admin", "superadmin"), cerrarOportunidadMTM);
-router.delete("/:id", authorizeRoles("admin", "superadmin"), deleteOportunidadMTM);
+router.post("/", requireStaffPermission("COMT"), createOportunidadMTM);
+router.put("/:id", requireStaffPermission("AOMT", "AOMA"), updateOportunidadMTM);
+router.patch("/:id/status", requireStaffPermission("CEOM"), changeStatusMTM);
+router.post("/:id/duplicate", requireStaffPermission("DOPO"), duplicateOportunidadMTM);
+router.post("/:id/cerrar", requireStaffPermission("CEOM", "AOMT"), cerrarOportunidadMTM);
+router.delete("/:id", requireStaffPermission("AOMT", "AOMA"), deleteOportunidadMTM);
 
 export default router;

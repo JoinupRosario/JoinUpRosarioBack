@@ -33,6 +33,11 @@ import {
   crearPracticaAutogestionada,
 } from "./opportunity.controller.js";
 import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
+import {
+  requireCompanyOrStaffPermission,
+  requireCompanyStudentOrStaffPermission,
+  requireStaffPermission,
+} from "../../middlewares/authPermission.js";
 
 const router = express.Router();
 
@@ -92,59 +97,128 @@ const uploadMultipleDocuments = (req, res, next) => {
 router.use(verifyToken);
 
 // Rutas para oportunidades
-router.get("/", getOpportunities);
+router.get(
+  "/",
+  requireCompanyOrStaffPermission("CPAC", "AMOP", "CPRA", "AMPR"),
+  getOpportunities
+);
 // RQ04_HU004 práctica autogestionada (líder): antes de /:id
 router.get(
   "/autogestionada/buscar-perfil",
-  authorizeRoles("admin", "superadmin", "leader"),
+  requireStaffPermission("CPRA", "APRA", "AMOP"),
   buscarPerfilParaAutogestionada
 );
-router.get("/autogestionada/empresas", authorizeRoles("admin", "superadmin", "leader"), getEmpresasParaAutogestionada);
+router.get(
+  "/autogestionada/empresas",
+  requireStaffPermission("CPRA", "APRA", "AMOP"),
+  getEmpresasParaAutogestionada
+);
 router.post(
   "/practica-autogestionada",
-  authorizeRoles("admin", "superadmin", "leader"),
+  requireStaffPermission("CPRA", "APRA"),
   crearPracticaAutogestionada
 );
 // Ofertas de práctica para estudiante autorizado (periodo + programa). Debe ir antes de /:id
 router.get("/para-estudiante-practicas", getOfertasParaEstudiantePracticas);
 // RQ04_HU002: Mis postulaciones del estudiante (postulante). Debe ir antes de /:id
 router.get("/mis-postulaciones", authorizeRoles("student"), getMisPostulaciones);
-router.get("/:id", getOpportunityById);
-router.post("/", authorizeRoles("company", "admin", "superadmin"), uploadMultipleDocuments, createOpportunity);
-router.put("/:id", authorizeRoles("company", "admin", "superadmin"), updateOpportunity);
-router.delete("/:id", authorizeRoles("company", "admin", "superadmin"), deleteOpportunity);
+router.get(
+  "/:id",
+  requireCompanyStudentOrStaffPermission("CPAC", "AMOP", "CPRA", "APRA"),
+  getOpportunityById
+);
+router.post(
+  "/",
+  requireCompanyOrStaffPermission("CPRA"),
+  uploadMultipleDocuments,
+  createOpportunity
+);
+router.put(
+  "/:id",
+  requireCompanyOrStaffPermission("APRA", "AOPA", "APOP"),
+  updateOpportunity
+);
+router.delete(
+  "/:id",
+  requireCompanyOrStaffPermission("APRA", "AOPA"),
+  deleteOpportunity
+);
 
 // Cambiar estado de la oportunidad
-router.patch("/:id/status", authorizeRoles("admin", "superadmin", "leader"), changeStatus);
+router.patch("/:id/status", requireStaffPermission("CEPR"), changeStatus);
 
 // Postulaciones
 router.post("/:id/apply", authorizeRoles("student"), applyToOpportunity);
 // RQ04_HU002: Aplicar a oportunidad con hoja de vida (postulante). Body: { profileId }
 router.post("/:id/aplicar", authorizeRoles("student"), aplicarOportunidad);
-router.get("/:id/applications", authorizeRoles("company", "admin", "superadmin", "leader"), getApplications);
-router.get("/:id/applications/detail/:postulacionId", authorizeRoles("company", "admin", "superadmin", "leader"), getApplicationDetail);
+router.get(
+  "/:id/applications",
+  requireCompanyOrStaffPermission("LAOP", "VAOP", "CPAC", "AMOP"),
+  getApplications
+);
+router.get(
+  "/:id/applications/detail/:postulacionId",
+  requireCompanyOrStaffPermission("VAOP", "LAOP", "AMOP"),
+  getApplicationDetail
+);
 router.patch("/:id/applications/:postulacionId/estudiante-responder", authorizeRoles("student"), estudianteResponderPostulacion);
-router.patch("/:id/applications/:postulacionId/coord-aceptar", authorizeRoles("admin", "superadmin", "leader"), coordinacionAceptarEnNombreEstudiante);
-router.patch("/:id/applications/:postulacionId/state", authorizeRoles("company", "admin", "superadmin", "leader"), updateApplicationState);
-router.patch("/:id/applications/:postulacionId/descargo-hv", authorizeRoles("company", "admin", "superadmin", "leader"), markApplicationDescargoHv);
-router.patch("/:id/applications/:postulacionId", authorizeRoles("company", "admin", "superadmin", "leader"), reviewApplication);
-router.post("/:id/applications/select-multiple", authorizeRoles("company", "admin", "superadmin", "leader"), selectMultipleApplications);
-router.post("/:id/applications/:postulacionId/seleccionar", authorizeRoles("company", "admin", "superadmin", "leader"), seleccionarPostulantePractica);
+router.patch(
+  "/:id/applications/:postulacionId/coord-aceptar",
+  requireStaffPermission("AAOP", "APPA", "CEPR"),
+  coordinacionAceptarEnNombreEstudiante
+);
+router.patch(
+  "/:id/applications/:postulacionId/state",
+  requireCompanyOrStaffPermission("AAOP", "MARE", "ABRA"),
+  updateApplicationState
+);
+router.patch(
+  "/:id/applications/:postulacionId/descargo-hv",
+  requireCompanyOrStaffPermission("MADE", "AAOP"),
+  markApplicationDescargoHv
+);
+router.patch(
+  "/:id/applications/:postulacionId",
+  requireCompanyOrStaffPermission("MARE", "ABRA", "VAOP"),
+  reviewApplication
+);
+router.post(
+  "/:id/applications/select-multiple",
+  requireCompanyOrStaffPermission("AAOP", "MARE", "LAOP"),
+  selectMultipleApplications
+);
+router.post(
+  "/:id/applications/:postulacionId/seleccionar",
+  requireCompanyOrStaffPermission("AAOP", "MARE"),
+  seleccionarPostulantePractica
+);
 
 // Aprobación por programa académico
-router.post("/:id/approve-program", authorizeRoles("admin", "superadmin", "leader"), approveProgram);
-router.post("/:id/reject-program", authorizeRoles("admin", "superadmin", "leader"), rejectProgram);
+router.post("/:id/approve-program", requireStaffPermission("APPA", "CPPA"), approveProgram);
+router.post("/:id/reject-program", requireStaffPermission("APPA", "CEPR", "CCEP"), rejectProgram);
 
 // Rechazar oportunidad con motivo
-router.post("/:id/reject", authorizeRoles("admin", "superadmin", "leader"), rejectOpportunity);
+router.post("/:id/reject", requireStaffPermission("CEPR", "APRA"), rejectOpportunity);
 
 // Cerrar oportunidad (solo Activa; body: contrató, motivoNoContrato?, postulantesSeleccionados?, datosTutor?)
-router.post("/:id/close", authorizeRoles("company", "admin", "superadmin", "leader"), closeOpportunity);
+router.post(
+  "/:id/close",
+  requireCompanyOrStaffPermission("CEPR", "APRA", "AOPA"),
+  closeOpportunity
+);
 
 // Historial de estados
-router.get("/:id/history", authorizeRoles("admin", "superadmin", "leader"), getStatusHistory);
+router.get(
+  "/:id/history",
+  requireStaffPermission("CCEP", "CPAC", "CEPR", "AMOP"),
+  getStatusHistory
+);
 
 // Duplicar oportunidad
-router.post("/:id/duplicate", authorizeRoles("company", "admin", "superadmin"), duplicateOpportunity);
+router.post(
+  "/:id/duplicate",
+  requireCompanyOrStaffPermission("DOPO", "APRA"),
+  duplicateOpportunity
+);
 
 export default router;

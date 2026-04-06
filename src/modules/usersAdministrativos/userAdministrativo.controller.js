@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import UserAdministrativo from './userAdministrativo.model.js';
 import User from '../users/user.model.js';
 import Rol from '../roles/roles.model.js';
@@ -522,6 +523,90 @@ export const removerRolUserAdministrativo = async (req, res) => {
 
   } catch (error) {
     console.error('Error al remover rol:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Reemplaza por completo los roles del usuario administrativo en una sola operación.
+ * Evita el patrón "borrar todos y volver a agregar" que, al editar el propio usuario,
+ * vaciaba roles en BD antes del POST y hacía fallar requirePermission(ARUS) con 403.
+ */
+export const reemplazarRolesUserAdministrativo = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rolIds } = req.body || {};
+
+    if (!Array.isArray(rolIds)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Se requiere un array rolIds'
+      });
+    }
+
+    const userAdminRef = await UserAdministrativo.findById(id).select('nombres apellidos user').lean();
+    if (!userAdminRef) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario administrativo no encontrado'
+      });
+    }
+
+    const uniqueIds = [...new Set(rolIds.map((rid) => String(rid)).filter(Boolean))];
+    for (const rid of uniqueIds) {
+      if (!mongoose.Types.ObjectId.isValid(rid)) {
+        return res.status(400).json({
+          success: false,
+          message: `ID de rol inválido: ${rid}`
+        });
+      }
+    }
+
+    if (uniqueIds.length > 0) {
+      const count = await Rol.countDocuments({ _id: { $in: uniqueIds } });
+      if (count !== uniqueIds.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'Uno o más roles no existen'
+        });
+      }
+    }
+
+    const rolesPayload = uniqueIds.map((rolId) => ({ rol: rolId, estado: true }));
+    const userUpdaterEmail = await getCurrentUserEmail(req);
+    const updateDoc = { roles: rolesPayload };
+    if (userUpdaterEmail) updateDoc.userUpdater = userUpdaterEmail;
+
+    await UserAdministrativo.updateOne({ _id: id }, { $set: updateDoc });
+
+    const userActualizado = await UserAdministrativo.findById(id)
+      .populate('user', 'name email estado modulo directorioActivo')
+      .populate('roles.rol', 'nombre estado')
+      .populate('sucursal', 'nombre codigo')
+      .populate('tipoIdentificacion', 'value description');
+
+    await logHelper.crear(
+      req,
+      'UPDATE',
+      'usersAdministrativos',
+      `Roles reemplazados para: ${userAdminRef.nombres} ${userAdminRef.apellidos} (${uniqueIds.length} rol(es))`,
+      id,
+      null,
+      { rolIds: uniqueIds },
+      { accion: 'reemplazar_roles' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Roles actualizados correctamente',
+      data: userActualizado
+    });
+  } catch (error) {
+    console.error('Error al reemplazar roles:', error);
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor',
