@@ -1,4 +1,8 @@
 import mongoose from "mongoose";
+import {
+  POSTULACION_ESTADOS,
+  DEFAULT_POSTULACION_ESTADO,
+} from "../../constants/domainEstados.js";
 
 /**
  * RQ04_HU002: Postulación de un postulante (estudiante) a una oportunidad de práctica/pasantía.
@@ -33,15 +37,8 @@ const postulacionOportunidadSchema = new mongoose.Schema(
     /** Estado principal del flujo: aplicado → empresa_consulto_perfil | empresa_descargo_hv | seleccionado_empresa | aceptado_estudiante | rechazado */
     estado: {
       type: String,
-      enum: [
-        "aplicado",
-        "empresa_consulto_perfil",
-        "empresa_descargo_hv",
-        "seleccionado_empresa",
-        "aceptado_estudiante",
-        "rechazado",
-      ],
-      default: "aplicado",
+      enum: POSTULACION_ESTADOS,
+      default: DEFAULT_POSTULACION_ESTADO,
       index: true,
     },
     fechaAplicacion: {

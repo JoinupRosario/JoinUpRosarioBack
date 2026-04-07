@@ -1,9 +1,13 @@
 import mongoose from "mongoose";
+import {
+  OPORTUNIDAD_MTM_ESTADOS,
+  DEFAULT_OPORTUNIDAD_MTM_ESTADO,
+} from "../../constants/domainEstados.js";
 
 const historialEstadoSchema = new mongoose.Schema(
   {
-    estadoAnterior: { type: String },
-    estadoNuevo: { type: String, required: true },
+    estadoAnterior: { type: String, enum: OPORTUNIDAD_MTM_ESTADOS },
+    estadoNuevo: { type: String, enum: OPORTUNIDAD_MTM_ESTADOS, required: true },
     cambiadoPor: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     fechaCambio: { type: Date, default: Date.now },
     motivo: { type: String, default: null }
@@ -141,8 +145,8 @@ const oportunidadMTMSchema = new mongoose.Schema(
     // Estado con flujo: Borrador → Activa → Inactiva
     estado: {
       type: String,
-      enum: ["Borrador", "Activa", "Inactiva"],
-      default: "Borrador"
+      enum: OPORTUNIDAD_MTM_ESTADOS,
+      default: DEFAULT_OPORTUNIDAD_MTM_ESTADO,
     },
 
     // Historial de cambios de estado

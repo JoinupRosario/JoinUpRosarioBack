@@ -1,4 +1,8 @@
 import mongoose from "mongoose";
+import {
+  PLAN_TRABAJO_MTM_ESTADOS,
+  DEFAULT_PLAN_TRABAJO_MTM_ESTADO,
+} from "../../constants/domainEstados.js";
 
 /**
  * RQ04_HU006: Plan de trabajo MTM. Uno por postulación con legalización aprobada.
@@ -25,8 +29,8 @@ const planDeTrabajoMTMSchema = new mongoose.Schema(
     },
     estado: {
       type: String,
-      enum: ["borrador", "enviado_revision", "aprobado", "rechazado"],
-      default: "borrador",
+      enum: PLAN_TRABAJO_MTM_ESTADOS,
+      default: DEFAULT_PLAN_TRABAJO_MTM_ESTADO,
       index: true,
     },
     // Datos pre-cargados de la MTM (para PDF y vista)

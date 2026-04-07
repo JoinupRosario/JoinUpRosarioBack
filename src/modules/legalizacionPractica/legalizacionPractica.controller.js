@@ -583,6 +583,7 @@ export const getLegalizacionPracticaEstudiante = async (req, res) => {
         segundaEvaluacion: "—",
       },
       historial: leg.historial || [],
+      historialPlanTrabajoPractica: leg.historialPlanTrabajoPractica || [],
     });
   } catch (err) {
     console.error("[LegalizacionPractica] getLegalizacionPracticaEstudiante:", err);
@@ -1035,6 +1036,7 @@ export const getLegalizacionPracticaAdmin = async (req, res) => {
         segundaEvaluacion: "—",
       },
       historial: legLean.historial || [],
+      historialPlanTrabajoPractica: legLean.historialPlanTrabajoPractica || [],
     });
   } catch (err) {
     console.error("[LegalizacionPractica] getLegalizacionPracticaAdmin:", err);

@@ -1,4 +1,8 @@
 import mongoose from "mongoose";
+import {
+  LEGALIZACION_ESTADOS,
+  DEFAULT_LEGALIZACION_ESTADO,
+} from "../../constants/domainEstados.js";
 
 /**
  * Legalización de práctica / pasantía (RQ04_HU004).
@@ -6,12 +10,33 @@ import mongoose from "mongoose";
  */
 const historialEntrySchema = new mongoose.Schema(
   {
-    estadoAnterior: { type: String, default: null },
-    estadoNuevo: { type: String, required: true },
+    estadoAnterior: {
+      type: String,
+      default: null,
+      validate: {
+        validator: (v) => v == null || v === "" || LEGALIZACION_ESTADOS.includes(v),
+        message: "estadoAnterior debe ser un estado de legalización válido o vacío",
+      },
+    },
+    estadoNuevo: { type: String, required: true, enum: LEGALIZACION_ESTADOS },
     usuario: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     fecha: { type: Date, default: Date.now },
     detalle: { type: String, default: null },
     ip: { type: String, default: null },
+  },
+  { _id: false }
+);
+
+/** Historial de cambios del plan de trabajo en práctica (MySQL: change_status_practice_plan / change_status_monitoring_plan → practice_plan). */
+const historialPlanTrabajoPracticaEntrySchema = new mongoose.Schema(
+  {
+    fuenteTablaMysql: { type: String, default: null },
+    fecha: { type: Date, default: Date.now },
+    tipoCambio: { type: String, default: null },
+    datosAntes: { type: String, default: null },
+    datosDespues: { type: String, default: null },
+    observacion: { type: String, default: null },
+    usuario: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   },
   { _id: false }
 );
@@ -27,8 +52,8 @@ const legalizacionPracticaSchema = new mongoose.Schema(
     },
     estado: {
       type: String,
-      enum: ["borrador", "en_revision", "aprobada", "rechazada", "en_ajuste"],
-      default: "borrador",
+      enum: LEGALIZACION_ESTADOS,
+      default: DEFAULT_LEGALIZACION_ESTADO,
       index: true,
     },
     /**
@@ -45,6 +70,7 @@ const legalizacionPracticaSchema = new mongoose.Schema(
     rechazadoAt: { type: Date, default: null },
     rechazoMotivo: { type: String, default: null },
     historial: { type: [historialEntrySchema], default: [] },
+    historialPlanTrabajoPractica: { type: [historialPlanTrabajoPracticaEntrySchema], default: [] },
   },
   { timestamps: true }
 );

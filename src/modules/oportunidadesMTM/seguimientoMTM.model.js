@@ -1,4 +1,8 @@
 import mongoose from "mongoose";
+import {
+  SEGUIMIENTO_MTM_ESTADOS,
+  DEFAULT_SEGUIMIENTO_MTM_ESTADO,
+} from "../../constants/domainEstados.js";
 
 /**
  * RQ04_HU008: Registro de seguimientos Plan de Trabajo.
@@ -39,8 +43,8 @@ const seguimientoMTMSchema = new mongoose.Schema(
     /** Estado: pendiente_revision | aprobado | rechazado. Todas quedan Pendiente de Revisión al crear. */
     estado: {
       type: String,
-      enum: ["pendiente_revision", "aprobado", "rechazado"],
-      default: "pendiente_revision",
+      enum: SEGUIMIENTO_MTM_ESTADOS,
+      default: DEFAULT_SEGUIMIENTO_MTM_ESTADO,
       index: true,
     },
     rechazoMotivo: { type: String, trim: true, default: null },

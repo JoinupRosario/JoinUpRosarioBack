@@ -1,4 +1,8 @@
 import mongoose from "mongoose";
+import {
+  OPPORTUNITY_PRACTICE_ESTADOS,
+  DEFAULT_OPPORTUNITY_PRACTICE_ESTADO,
+} from "../../constants/domainEstados.js";
 
 const opportunitySchema = new mongoose.Schema(
   {
@@ -187,16 +191,8 @@ const opportunitySchema = new mongoose.Schema(
     // Estado de la oportunidad
     estado: {
       type: String,
-      enum: [
-        "Creada",
-        "En Revisión",
-        "Revisada",
-        "Activa",
-        "Rechazada",
-        "Cerrada",
-        "Vencida"
-      ],
-      default: "Creada"
+      enum: OPPORTUNITY_PRACTICE_ESTADOS,
+      default: DEFAULT_OPPORTUNITY_PRACTICE_ESTADO,
     },
 
     // Fechas de cambio de estado
@@ -269,28 +265,12 @@ const opportunitySchema = new mongoose.Schema(
     historialEstados: [{
       estadoAnterior: {
         type: String,
-        enum: [
-          "Creada",
-          "En Revisión",
-          "Revisada",
-          "Activa",
-          "Rechazada",
-          "Cerrada",
-          "Vencida"
-        ]
+        enum: OPPORTUNITY_PRACTICE_ESTADOS,
       },
       estadoNuevo: {
         type: String,
-        enum: [
-          "Creada",
-          "En Revisión",
-          "Revisada",
-          "Activa",
-          "Rechazada",
-          "Cerrada",
-          "Vencida"
-        ],
-        required: true
+        enum: OPPORTUNITY_PRACTICE_ESTADOS,
+        required: true,
       },
       cambiadoPor: {
         type: mongoose.Schema.Types.ObjectId,
@@ -310,6 +290,22 @@ const opportunitySchema = new mongoose.Schema(
         default: null
       }
     }],
+
+    /**
+     * Historial legado de aprobación por programa (MySQL: change_status_approval_program_academic_practice).
+     * Permite mostrar la misma trazabilidad que la plataforma anterior junto a formacionAcademica.
+     */
+    historialAprobacionProgramas: [
+      {
+        programIdMysql: { type: Number, required: true },
+        programa: { type: mongoose.Schema.Types.ObjectId, ref: "Program", default: null },
+        estadoMysql: { type: String, required: true },
+        comentario: { type: String, default: null },
+        fecha: { type: Date, required: true },
+        usuarioLegacy: { type: String, default: null },
+        cambiadoPor: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+      },
+    ],
 
     // Postulaciones (relación con estudiantes)
     postulaciones: [{

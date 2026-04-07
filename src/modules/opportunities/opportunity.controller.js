@@ -681,6 +681,38 @@ function opportunityMatchesAdminProgram(opportunity, programTerms) {
   });
 }
 
+/** Coincidencia por texto en documentos Company (find y $lookup post-$unwind). */
+function companyTextOrClause(rx) {
+  return [
+    { name: { $regex: rx, $options: "i" } },
+    { commercialName: { $regex: rx, $options: "i" } },
+    { legalName: { $regex: rx, $options: "i" } },
+    { nit: { $regex: rx, $options: "i" } },
+    { description: { $regex: rx, $options: "i" } },
+    { website: { $regex: rx, $options: "i" } },
+    { domain: { $regex: rx, $options: "i" } },
+    { sector: { $regex: rx, $options: "i" } },
+    { email: { $regex: rx, $options: "i" } },
+    { domains: { $regex: rx, $options: "i" } },
+  ];
+}
+
+function companyLinkedDocMatchAfterUnwind(rx) {
+  return {
+    $or: [
+      { "co.name": { $regex: rx, $options: "i" } },
+      { "co.commercialName": { $regex: rx, $options: "i" } },
+      { "co.legalName": { $regex: rx, $options: "i" } },
+      { "co.nit": { $regex: rx, $options: "i" } },
+      { "co.description": { $regex: rx, $options: "i" } },
+      { "co.website": { $regex: rx, $options: "i" } },
+      { "co.domain": { $regex: rx, $options: "i" } },
+      { "co.sector": { $regex: rx, $options: "i" } },
+      { "co.email": { $regex: rx, $options: "i" } },
+    ],
+  };
+}
+
 // Obtener todas las oportunidades
 export const getOpportunities = async (req, res) => {
   try {
@@ -712,17 +744,27 @@ export const getOpportunities = async (req, res) => {
       return res.json({ opportunities: [], totalPages: 0, currentPage: parseInt(page), total: 0 });
     }
 
-    // Tipo
-    if (tipo) filter.tipo = String(tipo).trim();
-    if (tipoOportunidad) filter.tipo = String(tipoOportunidad).trim();
+    // Filtros básicos
+    if (estado) filter.estado = estado;
+    if (tipo) filter.tipo = tipo;
+    if (tipoOportunidad) filter.tipo = tipoOportunidad;
 
-    // Empresa: ObjectId directo o búsqueda por razón social / nombre comercial (normalizada)
-    const empresaTrim = empresa != null ? String(empresa).trim() : "";
-    if (company && mongoose.Types.ObjectId.isValid(String(company))) {
-      filter.company = new mongoose.Types.ObjectId(String(company));
-    } else if (empresaTrim) {
-      if (mongoose.Types.ObjectId.isValid(empresaTrim) && empresaTrim.length === 24) {
-        filter.company = new mongoose.Types.ObjectId(empresaTrim);
+    const companyFilterRaw = (empresa || company)?.toString?.()?.trim?.() || "";
+    let companyFilterPending = null;
+    if (companyFilterRaw) {
+      companyFilterPending = /^[a-fA-F0-9]{24}$/.test(companyFilterRaw)
+        ? { kind: "oid", value: companyFilterRaw }
+        : { kind: "text", rx: escapeRegex(companyFilterRaw) };
+    }
+
+    // Filtro por número de oportunidad (últimos 6 caracteres del ID)
+    if (numeroOportunidad) {
+      const opportunities = await Opportunity.find({}).select('_id');
+      const matchingIds = opportunities
+        .filter(opp => opp._id.toString().slice(-6).toLowerCase() === numeroOportunidad.toLowerCase())
+        .map(opp => opp._id);
+      if (matchingIds.length > 0) {
+        filter._id = { $in: matchingIds };
       } else {
         const rx = buildSearchRegex(empresaTrim);
         const companyDocs = await Company.find({
@@ -819,11 +861,53 @@ export const getOpportunities = async (req, res) => {
       filter.requiereConfidencialidad = true;
     }
 
-    // Búsqueda libre (compatibilidad API): varios campos con normalización
-    const searchTrim = search != null ? String(search).trim() : "";
-    if (searchTrim) {
-      const rx = buildSearchRegex(searchTrim);
-      filter.$or = [{ nombreCargo: rx }, { funciones: rx }, { requisitos: rx }];
+    // Búsqueda por texto general (incluye nombre de empresa vinculada; la UI promete "empresa")
+    if (search) {
+      const searchRx = escapeRegex(String(search).trim());
+      const companyIdsForSearch = await Company.distinct("_id", {
+        $or: companyTextOrClause(searchRx),
+      });
+      const searchOr = [
+        { nombreCargo: { $regex: searchRx, $options: "i" } },
+        { funciones: { $regex: searchRx, $options: "i" } },
+        { requisitos: { $regex: searchRx, $options: "i" } },
+      ];
+      if (companyIdsForSearch.length) {
+        searchOr.push({ company: { $in: companyIdsForSearch } });
+      }
+      filter.$or = searchOr;
+    }
+
+    // Filtro por empresa (texto libre o ObjectId): se aplica al final para poder usar $lookup si hace falta
+    if (companyFilterPending) {
+      if (companyFilterPending.kind === "oid") {
+        filter.company = new mongoose.Types.ObjectId(companyFilterPending.value);
+      } else {
+        const rx = companyFilterPending.rx;
+        const companyIdsFromCatalog = await Company.distinct("_id", { $or: companyTextOrClause(rx) });
+        if (companyIdsFromCatalog.length) {
+          filter.company = { $in: companyIdsFromCatalog };
+        } else {
+          const collName = Company.collection.name;
+          const rows = await Opportunity.aggregate([
+            { $match: filter },
+            { $lookup: { from: collName, localField: "company", foreignField: "_id", as: "co" } },
+            { $unwind: { path: "$co", preserveNullAndEmptyArrays: false } },
+            { $match: companyLinkedDocMatchAfterUnwind(rx) },
+            { $project: { _id: 1 } },
+          ]);
+          const opportunityIds = rows.map((r) => r._id);
+          if (!opportunityIds.length) {
+            return res.json({
+              opportunities: [],
+              totalPages: 0,
+              currentPage: parseInt(page, 10),
+              total: 0,
+            });
+          }
+          filter._id = { $in: opportunityIds };
+        }
+      }
     }
 
     // Ordenamiento
@@ -1059,6 +1143,8 @@ export const getOpportunityById = async (req, res) => {
       .populate("rechazadoPor", "name email")
       .populate("aprobacionesPorPrograma.aprobadoPor", "name email")
       .populate("historialEstados.cambiadoPor", "name email")
+      .populate("historialAprobacionProgramas.programa", "name level code mysqlId")
+      .populate("historialAprobacionProgramas.cambiadoPor", "name email")
       .populate({
         path: "cierrePostulantesSeleccionados",
         populate: { path: "postulant", select: "postulantId", populate: { path: "postulantId", select: "name email" } },
@@ -1335,6 +1421,7 @@ export const updateOpportunity = async (req, res) => {
     // No permitir cambiar el estado ni el historial desde el body
     if (updateData.estado) delete updateData.estado;
     if (updateData.historialEstados) delete updateData.historialEstados;
+    if (updateData.historialAprobacionProgramas) delete updateData.historialAprobacionProgramas;
 
     await normalizeOpportunityRefs(updateData);
 

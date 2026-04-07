@@ -1,4 +1,8 @@
 import mongoose from "mongoose";
+import {
+  POSTULACION_ESTADOS,
+  DEFAULT_POSTULACION_ESTADO,
+} from "../../constants/domainEstados.js";
 
 /**
  * RQ04_HU001: Postulación de un estudiante (postulante) a una oportunidad MTM.
@@ -32,15 +36,8 @@ const postulacionMTMSchema = new mongoose.Schema(
     /** Estado: aplicado → empresa_consulto_perfil | empresa_descargo_hv | seleccionado_empresa | aceptado_estudiante | rechazado */
     estado: {
       type: String,
-      enum: [
-        "aplicado",
-        "empresa_consulto_perfil",
-        "empresa_descargo_hv",
-        "seleccionado_empresa",
-        "aceptado_estudiante",
-        "rechazado",
-      ],
-      default: "aplicado",
+      enum: POSTULACION_ESTADOS,
+      default: DEFAULT_POSTULACION_ESTADO,
       index: true,
     },
     /** Cuando se cierra la oportunidad: confirmado si fue seleccionado, rechazado si no */
