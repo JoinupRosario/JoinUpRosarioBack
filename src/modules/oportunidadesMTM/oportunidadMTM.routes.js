@@ -7,6 +7,7 @@ import {
 } from "../../middlewares/authPermission.js";
 import {
   getOportunidadesMTM,
+  getDistinctEstadosMTM,
   getOportunidadMTMById,
   createOportunidadMTM,
   updateOportunidadMTM,
@@ -95,6 +96,12 @@ router.get("/asistencia-publica/:token/form", getAsistenciaFormByToken);
 router.post("/asistencia-publica/:token/registrar", postRegistrarAsistenciaMTM);
 
 router.use(verifyToken);
+
+router.get(
+  "/meta/distinct-estados",
+  requireStaffPermission("COMT2", "COMN", "AMOP", "AMMO"),
+  getDistinctEstadosMTM
+);
 
 // RQ04_HU010: Link y reporte desde módulo legalización
 router.get(

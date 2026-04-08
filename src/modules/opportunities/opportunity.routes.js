@@ -4,6 +4,7 @@ import path from "path";
 import { v4 as uuidv4 } from "uuid";
 import {
   getOpportunities,
+  getDistinctEstadosPractica,
   getOpportunityById,
   getOfertasParaEstudiantePracticas,
   aplicarOportunidad,
@@ -101,6 +102,11 @@ router.get(
   "/",
   requireCompanyOrStaffPermission("CPAC", "AMOP", "CPRA", "AMPR"),
   getOpportunities
+);
+router.get(
+  "/meta/distinct-estados",
+  requireCompanyOrStaffPermission("CPAC", "AMOP", "CPRA", "AMPR"),
+  getDistinctEstadosPractica
 );
 // RQ04_HU004 práctica autogestionada (líder): antes de /:id
 router.get(

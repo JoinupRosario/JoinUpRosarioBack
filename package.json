@@ -44,7 +44,10 @@
     "migrate:plantillas-practica-mysql": "node src/seeders/migratePlantillasPracticaFromMySQL.js",
     "seed:plantillas-hu-practica": "node src/seeders/seedPlantillasRequerimientosHU.js",
     "dispatch:bulk-replay": "node src/scripts/bulkDispatchNotificationsFromDb.js",
-    "permisos:read": "node src/scripts/readPermisosColeccion.js"
+    "permisos:read": "node src/scripts/readPermisosColeccion.js",
+    "audit:company-attachments-s3": "node src/scripts/auditCompanyAttachmentS3.js",
+    "audit:company-attachments-s3:first": "node src/scripts/auditCompanyAttachmentS3.js --first-found",
+    "audit:company-attachments-s3:first-company-path": "node src/scripts/auditCompanyAttachmentS3.js --first-found --filepath-prefix=company"
   },
   "keywords": [],
   "author": "",

@@ -18,7 +18,7 @@ import os from "os";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import Attachment from "../../shared/attachment/attachment.schema.js";
-import { s3Config, deleteFromS3, uploadToS3 } from "../../../config/s3.config.js";
+import { s3Config, deleteFromS3, uploadToS3, isRemoteAttachmentS3Key } from "../../../config/s3.config.js";
 import { recalcAndSaveProfileCompleteness } from "../services/profileCompleteness.service.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1484,7 +1484,7 @@ export const deleteProfileCv = async (req, res) => {
     const attachmentId = deleted.attachmentId;
     if (attachmentId) {
       const attachment = await Attachment.findById(attachmentId).lean();
-      if (attachment?.filepath && s3Config.isConfigured && attachment.filepath.startsWith(`${S3_PREFIX_HOJAS_VIDA}/`)) {
+      if (attachment?.filepath && s3Config.isConfigured && isRemoteAttachmentS3Key(attachment.filepath)) {
         try {
           await deleteFromS3(attachment.filepath);
         } catch (err) {
@@ -1519,7 +1519,7 @@ export const deleteProfileSupport = async (req, res) => {
       const attachment = await Attachment.findById(attachmentId).lean();
       if (attachment?.filepath) {
         const fp = attachment.filepath;
-        if (s3Config.isConfigured && fp.startsWith(`${S3_PREFIX_PERFIL_DOC_SOPORTE}/`)) {
+        if (s3Config.isConfigured && isRemoteAttachmentS3Key(fp)) {
           try {
             await deleteFromS3(fp);
           } catch (err) {

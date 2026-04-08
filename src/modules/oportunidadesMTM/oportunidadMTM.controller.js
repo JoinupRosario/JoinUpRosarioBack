@@ -25,6 +25,25 @@ import {
   loadMtmPostulacionContext,
   loadMtmPostulacionContextFromLegalizacion,
 } from "../notificacion/application/mtmNotifications.helper.js";
+import { getAdminProgramScope, mtmOportunidadMatchesAdminProgram } from "../../utils/adminProgramScope.util.js";
+
+/** Intersecta `filter._id` con ids permitidos (muta filter). false = intersección vacía. */
+function intersectFilterIds(filter, allowedIds) {
+  if (!allowedIds?.length) return false;
+  const allowedSet = new Set(allowedIds.map((id) => String(id)));
+  if (filter._id) {
+    if (filter._id.$in) {
+      const narrowed = filter._id.$in.filter((id) => allowedSet.has(String(id)));
+      if (narrowed.length === 0) return false;
+      filter._id = { $in: narrowed };
+      return true;
+    }
+    if (!allowedSet.has(String(filter._id))) return false;
+    return true;
+  }
+  filter._id = { $in: allowedIds };
+  return true;
+}
 
 /** Suma N días hábiles (lun–vie) a una fecha. */
 function addBusinessDays(date, days) {
@@ -70,6 +89,23 @@ const POPULATE_FIELDS = [
   { path: "cierrePostulantesSeleccionados", populate: { path: "postulant", populate: { path: "postulantId", select: "name" } } },
 ];
 
+/** GET /oportunidades-mtm/meta/distinct-estados — valores de `estado` presentes en BD. */
+export const getDistinctEstadosMTM = async (req, res) => {
+  try {
+    const raw = await OportunidadMTM.distinct("estado");
+    const estados = [
+      ...new Set(
+        raw
+          .filter((e) => e != null && String(e).trim() !== "")
+          .map((e) => String(e).trim())
+      ),
+    ].sort((a, b) => a.localeCompare(b, "es"));
+    return res.json({ estados });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
 // ─── Listar oportunidades MTM ─────────────────────────────────────────────────
 export const getOportunidadesMTM = async (req, res) => {
   try {
@@ -86,10 +122,24 @@ export const getOportunidadesMTM = async (req, res) => {
       fechaCierreDesde,
       fechaCierreHasta,
       requisitos,
+      conPostulaciones,
     } = req.query;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const filter = {};
+
+    const adminScope = await getAdminProgramScope(req);
+    if (adminScope && adminScope.programTerms.length === 0) {
+      return res.json({
+        data: [],
+        pagination: {
+          total: 0,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: 0,
+        },
+      });
+    }
 
     const empresaTrim = empresa != null ? String(empresa).trim() : "";
     if (empresaTrim) {
@@ -155,6 +205,45 @@ export const getOportunidadesMTM = async (req, res) => {
     if (estado) filter.estado = String(estado).trim();
     if (periodo) filter.periodo = periodo;
     if (categoria) filter.categoria = categoria;
+
+    if (adminScope?.programIds?.length) {
+      const oids = adminScope.programIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+      if (oids.length) {
+        filter.$and = [...(filter.$and || []), { programas: { $in: oids } }];
+      }
+    }
+
+    const wantsConPost =
+      conPostulaciones === true ||
+      conPostulaciones === "true" ||
+      String(conPostulaciones || "").toLowerCase() === "true";
+    if (wantsConPost) {
+      const withPost = (await PostulacionMTM.distinct("oportunidadMTM")).filter(Boolean);
+      if (withPost.length === 0) {
+        return res.json({
+          data: [],
+          pagination: {
+            total: 0,
+            page: parseInt(page),
+            limit: parseInt(limit),
+            totalPages: 0,
+          },
+        });
+      }
+      if (!intersectFilterIds(filter, withPost)) {
+        return res.json({
+          data: [],
+          pagination: {
+            total: 0,
+            page: parseInt(page),
+            limit: parseInt(limit),
+            totalPages: 0,
+          },
+        });
+      }
+    }
 
     const [total, data] = await Promise.all([
       OportunidadMTM.countDocuments(filter),
@@ -335,8 +424,15 @@ export const getEstadisticasLegalizacionMTM = async (req, res) => {
 // ─── Obtener una oportunidad MTM por ID ───────────────────────────────────────
 export const getOportunidadMTMById = async (req, res) => {
   try {
+    const adminScope = await getAdminProgramScope(req);
     const op = await OportunidadMTM.findById(req.params.id).populate(POPULATE_FIELDS).lean();
     if (!op) return res.status(404).json({ message: "Oportunidad MTM no encontrada" });
+    if (adminScope && adminScope.programTerms.length === 0) {
+      return res.status(403).json({ message: "No autorizado para ver esta oportunidad." });
+    }
+    if (adminScope && !mtmOportunidadMatchesAdminProgram(op, adminScope.programIds)) {
+      return res.status(403).json({ message: "No autorizado para ver esta oportunidad." });
+    }
     res.json(op);
   } catch (err) {
     console.error("[MTM] getOportunidadMTMById:", err);

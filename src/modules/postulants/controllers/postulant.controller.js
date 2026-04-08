@@ -26,7 +26,7 @@ import ProgramFaculty from "../../program/model/programFaculty.model.js";
 import Country from "../../shared/location/models/country.schema.js";
 import State from "../../shared/location/models/state.schema.js";
 import City from "../../shared/location/models/city.schema.js";
-import { MAX_PROFILES_PER_POSTULANT, S3_PREFIX_PERFIL_DOC_SOPORTE } from "./postulantProfile.controller.js";
+import { MAX_PROFILES_PER_POSTULANT } from "./postulantProfile.controller.js";
 import { consultaInfEstudiante, consultaInfAcademica } from "../../../services/uxxiIntegration.service.js";
 import { descargarYFiltrarPostulantes, descargarCargueEgresadosUr } from "../../estudiantesHabilitados/carguePostulantes.sftp.js";
 import Program from "../../program/model/program.model.js";
@@ -37,7 +37,7 @@ import Periodo from "../../periodos/periodo.model.js";
 import EstudianteHabilitado from "../../estudiantesHabilitados/estudianteHabilitado.model.js";
 import { buildHojaVidaPdf } from "../../../services/hojaVidaPdf.service.js";
 import { buildCartaPresentacionPdf } from "../../../services/cartaPresentacionPdf.service.js";
-import { s3Config, uploadToS3, getObjectFromS3 } from "../../../config/s3.config.js";
+import { s3Config, uploadToS3, getObjectFromS3, isRemoteAttachmentS3Key } from "../../../config/s3.config.js";
 import mongoose from "mongoose";
 import {
   calculateFullCompleteness,
@@ -2080,9 +2080,8 @@ export const downloadAttachment = async (req, res) => {
     }
 
     const filepath = attachment.filepath;
-    const isS3Key =
-      filepath.startsWith(`${S3_PREFIX_HOJAS_VIDA}/`) || filepath.startsWith(`${S3_PREFIX_PERFIL_DOC_SOPORTE}/`);
-    if (isS3Key) {
+    /** S3: HV, docs soporte, migración company/postulant (resolveBucketForRead en getObjectFromS3). */
+    if (isRemoteAttachmentS3Key(filepath)) {
       if (!s3Config.isConfigured) {
         return res.status(503).json({
           message: "El archivo está en S3 pero el servidor no tiene AWS S3 configurado. Configure las variables de AWS en el servidor.",

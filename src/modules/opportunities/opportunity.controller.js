@@ -14,8 +14,6 @@ import City from "../shared/location/models/city.schema.js";
 import Item from "../shared/reference-data/models/item.schema.js";
 import Parameter from "../parameters/parameter.model.js";
 import LegalizacionPractica from "../legalizacionPractica/legalizacionPractica.model.js";
-import UserAdministrativo from "../usersAdministrativos/userAdministrativo.model.js";
-import Program from "../program/model/program.model.js";
 import { dispatchNotificationByEvent } from "../notificacion/application/dispatchNotificationByEvent.service.js";
 import { parseEnvEmailList } from "../notificacion/application/resolveRecipientEmails.js";
 import {
@@ -27,6 +25,7 @@ import {
   findOtrasPostulacionesActivas,
   practicaOpportunityDashboardLink,
 } from "../notificacion/application/practicaOpportunityNotifications.helper.js";
+import { getAdminProgramScope } from "../../utils/adminProgramScope.util.js";
 
 const CODE_MAX_JORNADA_ORDINARIA = "PRACTICE_MAX_JORNADA_ORDINARIA_SEMANAL";
 const CODE_MIN_APOYO_ECONOMICO_COP = "PRACTICE_MIN_APOYO_ECONOMICO_COP";
@@ -228,29 +227,6 @@ function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-async function getAdminProgramScope(req) {
-  const userModulo = String(req.user?.modulo || "").trim().toLowerCase();
-  if (userModulo !== "administrativo") return null;
-
-  const adminUser = await UserAdministrativo.findOne({ user: req.user?.id, estado: true })
-    .select("programas")
-    .lean();
-  const programIds = (adminUser?.programas || [])
-    .filter((p) => p?.estado !== false && p?.program)
-    .map((p) => String(p.program));
-  if (programIds.length === 0) return { programIds: [], programTerms: [] };
-
-  const programs = await Program.find({ _id: { $in: programIds } }).select("name code").lean();
-  const programTerms = [
-    ...new Set(
-      programs
-        .flatMap((p) => [String(p?.name || "").trim(), String(p?.code || "").trim()])
-        .filter(Boolean)
-    ),
-  ];
-  return { programIds, programTerms };
-}
-
 function opportunityMatchesAdminProgram(opportunity, programTerms) {
   if (!programTerms?.length) return false;
   const oppPrograms = (opportunity?.formacionAcademica || [])
@@ -295,6 +271,39 @@ function companyLinkedDocMatchAfterUnwind(rx) {
   };
 }
 
+/** Intersecta `filter._id` con la lista de ids permitidos (muta filter). false = intersección vacía. */
+function intersectFilterIds(filter, allowedIds) {
+  if (!allowedIds?.length) return false;
+  const allowedSet = new Set(allowedIds.map((id) => String(id)));
+  if (filter._id) {
+    if (filter._id.$in) {
+      const narrowed = filter._id.$in.filter((id) => allowedSet.has(String(id)));
+      if (narrowed.length === 0) return false;
+      filter._id = { $in: narrowed };
+      return true;
+    }
+    if (!allowedSet.has(String(filter._id))) return false;
+    return true;
+  }
+  filter._id = { $in: allowedIds };
+  return true;
+}
+
+/** Postulaciones en colección PostulacionOportunidad o embebidas en la oportunidad. */
+async function applyConPostulacionesFilterPracticas(filter) {
+  const [fromPO, fromEmbedded] = await Promise.all([
+    PostulacionOportunidad.distinct("opportunity"),
+    Opportunity.distinct("_id", { "postulaciones.0": { $exists: true } }),
+  ]);
+  const merged = new Map();
+  for (const id of [...fromPO, ...fromEmbedded]) {
+    if (id != null) merged.set(String(id), id);
+  }
+  const allowed = [...merged.values()];
+  if (allowed.length === 0) return false;
+  return intersectFilterIds(filter, allowed);
+}
+
 // Obtener todas las oportunidades
 export const getOpportunities = async (req, res) => {
   try {
@@ -316,15 +325,13 @@ export const getOpportunities = async (req, res) => {
       estadosRevision,
       requisitos,
       empresaConfidenciales,
+      conPostulaciones,
       sortField = 'fechaCreacion',
       sortDirection = 'desc'
     } = req.query;
 
     const filter = {};
     const adminScope = await getAdminProgramScope(req);
-    if (adminScope && adminScope.programTerms.length === 0) {
-      return res.json({ opportunities: [], totalPages: 0, currentPage: parseInt(page), total: 0 });
-    }
 
     // Filtros básicos
     if (estado) filter.estado = estado;
@@ -454,6 +461,22 @@ export const getOpportunities = async (req, res) => {
       }
     }
 
+    const wantsConPost =
+      conPostulaciones === true ||
+      conPostulaciones === "true" ||
+      String(conPostulaciones || "").toLowerCase() === "true";
+    if (wantsConPost) {
+      const ok = await applyConPostulacionesFilterPracticas(filter);
+      if (!ok) {
+        return res.json({
+          opportunities: [],
+          totalPages: 0,
+          currentPage: parseInt(page),
+          total: 0,
+        });
+      }
+    }
+
     // Ordenamiento
     const sortOptions = {};
     const sortFieldMap = {
@@ -498,6 +521,23 @@ export const getOpportunities = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+/** GET /opportunities/meta/distinct-estados — valores de `estado` presentes en BD (solo tipo práctica). */
+export const getDistinctEstadosPractica = async (req, res) => {
+  try {
+    const raw = await Opportunity.distinct("estado", { tipo: "practica" });
+    const estados = [
+      ...new Set(
+        raw
+          .filter((e) => e != null && String(e).trim() !== "")
+          .map((e) => String(e).trim())
+      ),
+    ].sort((a, b) => a.localeCompare(b, "es"));
+    return res.json({ estados });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
   }
 };
 

@@ -2,14 +2,25 @@ import path from "path";
 import crypto from "crypto";
 import mongoose from "mongoose";
 import Company from "./company.model.js";
+import Attachment from "../shared/attachment/attachment.schema.js";
 import Document from "../documents/document.model.js";
 import User from "../users/user.model.js";
 import bcrypt from "bcryptjs";
 import { logHelper } from "../logs/log.service.js";
-import { s3Config, uploadToS3, getSignedDownloadUrl, deleteFromS3 } from "../../config/s3.config.js";
+import {
+  s3Config,
+  uploadToS3,
+  getSignedDownloadUrl,
+  deleteFromS3,
+  normalizeS3Key,
+} from "../../config/s3.config.js";
 import { dispatchNotificationByEvent } from "../notificacion/application/dispatchNotificationByEvent.service.js";
 import { parseEnvEmailList } from "../notificacion/application/resolveRecipientEmails.js";
 import { buildDatosPlantillaEntidad } from "./companyNotificationTemplate.helper.js";
+import {
+  buildCompanySearchFilter,
+  buildAccentInsensitiveMongoRegexPattern,
+} from "./companySearch.helper.js";
 
 const COMPANY_DOC_URL_FIELDS = [
   "chamberOfCommerceCertificate",
@@ -19,6 +30,88 @@ const COMPANY_DOC_URL_FIELDS = [
 ];
 
 const COMPANIES_S3_PREFIX = (process.env.COMPANIES_S3_PREFIX || "companies-practicas").replace(/\/$/, "");
+
+/**
+ * Referencia migrada a adjunto: puede venir como string "817", número 817 u otro tipo BSON.
+ * @returns {number|null}
+ */
+function parseAttachmentMysqlIdRef(raw) {
+  if (raw == null) return null;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    const n = Math.trunc(raw);
+    return n >= 0 ? n : null;
+  }
+  const s = String(raw).trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) return Number(s);
+  return null;
+}
+
+/**
+ * Empresas migradas desde MySQL guardaron logo/cámara/RUT/acreditación como string del mysqlId de `attachment`,
+ * no como clave S3. Resuelve a la clave real en bucket (p. ej. company/.../document/...).
+ * @returns {Promise<{ kind: 'empty' } | { kind: 'url', value: string } | { kind: 's3Key', key: string, attachmentName?: string } | { kind: 'legacyMissing', mysqlId: number }>}
+ */
+async function resolveCompanyDocumentStorageKey(raw) {
+  const trimmed = String(raw ?? "").trim();
+  if (!trimmed) return { kind: "empty" };
+  if (/^https?:\/\//i.test(trimmed)) return { kind: "url", value: trimmed };
+  const mysqlId = parseAttachmentMysqlIdRef(raw);
+  if (mysqlId != null) {
+    let att = await Attachment.findOne({ mysqlId }).select("filepath name").lean();
+    if (!att) {
+      att = await Attachment.findOne({ mysqlId: String(mysqlId) }).select("filepath name").lean();
+    }
+    if (att?.filepath && String(att.filepath).trim()) {
+      const name = att.name != null ? String(att.name).trim() : "";
+      return {
+        kind: "s3Key",
+        key: normalizeS3Key(att.filepath),
+        attachmentName: name || undefined,
+      };
+    }
+    return { kind: "legacyMissing", mysqlId };
+  }
+  return { kind: "s3Key", key: normalizeS3Key(trimmed) };
+}
+
+/** Para UI: nombres legibles de adjuntos migrados (valor = mysqlId como número o string). */
+async function attachDocumentAttachmentNames(company) {
+  const plain = company.toObject ? company.toObject() : { ...company };
+  /** @type {Map<number, string[]>} */
+  const fieldsByMysqlId = new Map();
+  for (const f of COMPANY_DOC_URL_FIELDS) {
+    const v = plain[f];
+    const mysqlId = parseAttachmentMysqlIdRef(v);
+    if (mysqlId == null) continue;
+    if (!fieldsByMysqlId.has(mysqlId)) fieldsByMysqlId.set(mysqlId, []);
+    fieldsByMysqlId.get(mysqlId).push(f);
+  }
+  const ids = [...fieldsByMysqlId.keys()];
+  if (ids.length === 0) return {};
+
+  const atts = await Attachment.find({
+    $or: [{ mysqlId: { $in: ids } }, { mysqlId: { $in: ids.map(String) } }],
+  })
+    .select("name mysqlId")
+    .lean();
+
+  /** @type {Map<number, { name?: string; mysqlId?: unknown }>} */
+  const byNumericId = new Map();
+  for (const a of atts) {
+    const k = Number(a.mysqlId);
+    if (!Number.isNaN(k) && !byNumericId.has(k)) byNumericId.set(k, a);
+  }
+
+  const names = {};
+  for (const [id, fields] of fieldsByMysqlId) {
+    const att = byNumericId.get(id);
+    const n = att?.name != null ? String(att.name).trim() : "";
+    if (!n) continue;
+    for (const f of fields) names[f] = n;
+  }
+  return names;
+}
 
 async function dispatchCompanyCreationNotifications({ company, userEmail, password, metadata = {} }) {
   try {
@@ -238,22 +331,29 @@ export const getCompanies = async (req, res) => {
     } = req.query;
     
     const filter = {};
-    
-    // Filtros exactos
+
+    // Filtros (insensibles a mayúsculas/tildes en texto)
     if (status) filter.status = status;
-    if (sector) filter.sector = { $regex: sector, $options: "i" };
-    if (city) filter.city = { $regex: city, $options: "i" };
-    if (country) filter.country = { $regex: country, $options: "i" };
+    if (sector) {
+      const p = buildAccentInsensitiveMongoRegexPattern(sector);
+      if (p) filter.sector = { $regex: `^${p}$`, $options: "i" };
+    }
+    if (city) {
+      const p = buildAccentInsensitiveMongoRegexPattern(city);
+      if (p) filter.city = { $regex: `^${p}$`, $options: "i" };
+    }
+    if (country) {
+      const p = buildAccentInsensitiveMongoRegexPattern(country);
+      if (p) filter.country = { $regex: `^${p}$`, $options: "i" };
+    }
     if (size) filter.size = size;
-    
-    // Búsqueda por nombre de empresa únicamente
+
+    // Búsqueda: nombres (sin depender de tildes), NIT, idNumber, correos
     if (search) {
-      const searchRegex = { $regex: search, $options: "i" };
-      filter.$or = [
-        { name: searchRegex },
-        { legalName: searchRegex },
-        { commercialName: searchRegex },
-      ];
+      const searchFilter = buildCompanySearchFilter(search);
+      if (searchFilter) {
+        Object.assign(filter, searchFilter);
+      }
     }
 
     const pageNum = parseInt(page);
@@ -295,7 +395,12 @@ export const getCompanyById = async (req, res) => {
       return res.status(404).json({ message: "Empresa no encontrada" });
     }
 
-    res.json(company);
+    const obj = company.toObject();
+    const documentAttachmentNames = await attachDocumentAttachmentNames(obj);
+    if (Object.keys(documentAttachmentNames).length > 0) {
+      obj.documentAttachmentNames = documentAttachmentNames;
+    }
+    res.json(obj);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -322,9 +427,18 @@ export const getCompanyDocumentSignedUrl = async (req, res) => {
         message: "No hay archivo registrado.",
       });
     }
-    const trimmed = String(key).trim();
-    if (/^https?:\/\//i.test(trimmed)) {
-      return res.json({ success: true, url: trimmed });
+    const resolved = await resolveCompanyDocumentStorageKey(key);
+    if (resolved.kind === "empty") {
+      return res.status(404).json({ success: false, message: "No hay archivo registrado." });
+    }
+    if (resolved.kind === "legacyMissing") {
+      return res.status(404).json({
+        success: false,
+        message: `No se encontró el adjunto migrado (mysqlId attachment ${resolved.mysqlId}).`,
+      });
+    }
+    if (resolved.kind === "url") {
+      return res.json({ success: true, url: resolved.value });
     }
     if (!s3Config.isConfigured) {
       return res.status(503).json({
@@ -332,13 +446,21 @@ export const getCompanyDocumentSignedUrl = async (req, res) => {
         message: "Almacenamiento S3 no configurado; no se puede generar el enlace.",
       });
     }
-    const url = await getSignedDownloadUrl(trimmed, 3600);
-    return res.json({ success: true, url });
+    const url = await getSignedDownloadUrl(resolved.key, 3600);
+    const payload = { success: true, url };
+    if (resolved.kind === "s3Key" && resolved.attachmentName) {
+      payload.fileName = resolved.attachmentName;
+    }
+    return res.json(payload);
   } catch (err) {
     console.error("[getCompanyDocumentSignedUrl]", err);
+    const msg = err.message || "Error al generar enlace de descarga";
+    if (/NoSuchKey|no existe en el almacenamiento/i.test(msg)) {
+      return res.status(404).json({ success: false, message: msg });
+    }
     return res.status(500).json({
       success: false,
-      message: err.message || "Error al generar enlace de descarga",
+      message: msg,
     });
   }
 };
@@ -361,10 +483,26 @@ export const deleteCompanyDocument = async (req, res) => {
     if (raw == null || (typeof raw === "string" && !String(raw).trim())) {
       return res.json({ success: true, message: "No había archivo registrado." });
     }
-    const trimmed = String(raw).trim();
-    if (!/^https?:\/\//i.test(trimmed) && s3Config.isConfigured) {
+    const resolved = await resolveCompanyDocumentStorageKey(raw);
+    if (resolved.kind === "empty") {
+      return res.json({ success: true, message: "No había archivo registrado." });
+    }
+    if (resolved.kind === "url") {
+      company[field] = "";
+      await company.save();
+      return res.json({ success: true, message: "Referencia al documento eliminada." });
+    }
+    if (resolved.kind === "legacyMissing") {
+      company[field] = "";
+      await company.save();
+      return res.json({
+        success: true,
+        message: "Referencia eliminada (no había fila de attachment para ese mysqlId).",
+      });
+    }
+    if (resolved.kind === "s3Key" && s3Config.isConfigured) {
       try {
-        await deleteFromS3(trimmed);
+        await deleteFromS3(resolved.key);
       } catch (e) {
         console.error("[deleteCompanyDocument] S3:", e?.message || e);
       }
