@@ -42,7 +42,7 @@
  * - legacy_mysql_opportunity_domain (opt-in `MIGRATION_MYSQL_DOMAIN_ARCHIVE=1`; subconjunto mínimo alineado al pipeline)
  * - opportunity_status_change_logs (OpportunityStatusChangeLog): filas de change_status_opportunity + snapshot si aplica
  *
- * Estados canónicos en Mongo: única fuente `src/constants/domainEstados.js` (mismos arrays que `enum` en modelos).
+ * Estados Mongo: enums en cada modelo. Mapeo MySQL por tabla: `mysqlChangeStatusMappers.js`.
  *
  * ── Tablas MySQL donde pueden existir VARIAS filas que en Mongo deben colapsar a UNA entidad
  *    (índice único en destino o misma clave natural). El script deduplica por lote + mapea
@@ -103,6 +103,12 @@
  * Reintentos Mongo (cortes DNS/red con Atlas), opcional:
  * - MIGRATION_MONGO_RETRIES (default 8)
  * - MIGRATION_MONGO_RETRY_BASE_MS (default 2500)
+ *
+ * Rendimiento:
+ * - MIGRATION_INTER_BATCH_SLEEP_MS=0 por defecto (sin pausa entre lotes). Usar p. ej. 50–100 solo si
+ *   Atlas o MySQL marcan throttling / timeouts.
+ * - MIGRATION_MYSQL_PAGE_SIZE (default 5000): filas por página en consultas paginadas (queryPaged).
+ * - MIGRATION_BATCH_SIZE / MIGRATION_MONGO_WRITE_BATCH: tamaño de sublotes internos y escrituras bulk.
  */
 
 import crypto from "crypto";
@@ -138,14 +144,17 @@ import DocumentPracticeDefinition from "../modules/documentPracticeDefinition/do
 import DocumentMonitoringDefinition from "../modules/documentMonitoringDefinition/documentMonitoringDefinition.model.js";
 
 import {
-  clampPracticeOpportunityEstado,
-  clampOportunidadMtmEstado,
-  clampLegalizacionEstado,
-  clampPostulacionEstado,
-  clampPlanTrabajoMtmEstado,
-  clampDocEstadoDocumento,
-  clampSeguimientoMtmEstado,
-} from "../constants/domainEstados.js";
+  mapMysqlChangeStatusOpportunityToPracticeEstado,
+  mapMysqlOpportunityTableStatusToPracticeEstado,
+  mapMysqlChangeStatusOpportunityToMtmEstado,
+  mapMysqlOpportunityTableStatusToMtmEstado,
+  mapMysqlOpportunityApplicationToPostulacionEstado,
+  mapMysqlChangeStatusLegalizedToLegalizacionEstado,
+  mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado,
+  mapMysqlMonitoringPlanStatusToPlanTrabajoMtmEstado,
+  mapMysqlLegalizacionDocumentoEstado,
+  defaultEstadoSeguimientoMtmNuevo,
+} from "./mysqlChangeStatusMappers.js";
 
 dotenv.config();
 
@@ -233,8 +242,8 @@ const OPPORTUNITY_MYSQL_ARCHIVE_TABLES = Object.freeze([
 const BATCH_SIZE = Number(process.env.MIGRATION_BATCH_SIZE || 500);
 /** Tamaño de cada `insertMany` / `bulkWrite` hacia Mongo (puede ser mayor que BATCH_SIZE). */
 const MONGO_WRITE_BATCH = Number(process.env.MIGRATION_MONGO_WRITE_BATCH || 1000);
-const MYSQL_PAGE_SIZE = Number(process.env.MIGRATION_MYSQL_PAGE_SIZE || 2000);
-const INTER_BATCH_SLEEP_MS = Number(process.env.MIGRATION_INTER_BATCH_SLEEP_MS || 75);
+const MYSQL_PAGE_SIZE = Math.max(100, Math.floor(Number(process.env.MIGRATION_MYSQL_PAGE_SIZE || 5000)) || 5000);
+const INTER_BATCH_SLEEP_MS = Math.max(0, Math.floor(Number(process.env.MIGRATION_INTER_BATCH_SLEEP_MS || 0)));
 const MONGO_RETRIES = Number(process.env.MIGRATION_MONGO_RETRIES || 8);
 const MONGO_RETRY_BASE_MS = Number(process.env.MIGRATION_MONGO_RETRY_BASE_MS || 2500);
 const RUN_ID = `${new Date().toISOString()}__${crypto.randomBytes(4).toString("hex")}`;
@@ -677,116 +686,6 @@ function buildMTMOpportunityKey({
   return [String(company || ""), strKey(nombreCargo), String(periodo || ""), dayKey(fechaVencimiento)].join("|");
 }
 
-/**
- * Estados canónicos práctica = enum `Opportunity.estado` / `historialEstados` (opportunity.model.js).
- * Una sola función para `opportunity.status` (MySQL) y `change_status_opportunity.status_*`.
- *
- * @param {string|null|undefined} raw
- * @param {{ nullable?: boolean }} opts - nullable: true → "" / NO_EXIST → null (historial); false → "Creada" por defecto
- */
-function normalizePracticeEstadoFromMysql(raw, opts = {}) {
-  const nullable = !!opts.nullable;
-  const trimmed = String(raw ?? "").trim();
-  const s = trimmed.toUpperCase().replace(/\s+/g, "_");
-  if (nullable && (!trimmed || s === "NO_EXIST")) return null;
-
-  let resolved = "Creada";
-  if (s === "CREATED" || s === "CREATE") resolved = "Creada";
-  else if (s === "REVIEW") resolved = "En Revisión";
-  else if (s === "REVISED") resolved = "Revisada";
-  else if (["ACTIVED", "ACTIVE", "ACTIVATED", "PUBLISHED", "APPROVED", "ACTIVADA"].includes(s)) resolved = "Activa";
-  else if (s === "CLOSED" || s === "CERRADA") resolved = "Cerrada";
-  else if (s === "REJECTED" || s === "REJECT") resolved = "Rechazada";
-  else if (s.includes("OVERDUE") || s.includes("EXPIRED") || s.includes("VENCID")) resolved = "Vencida";
-  else if (["ACTIVE", "ACTIVATED", "PUBLISHED", "APPROVED"].some((k) => s.includes(k))) resolved = "Activa";
-  else if (s.includes("VENCID") || s.includes("OVERDUE")) resolved = "Vencida";
-  else if (["CLOSED", "FINISHED", "CANCEL", "EXPIRED"].some((k) => s.includes(k))) resolved = "Cerrada";
-  else if (s.includes("REJECT")) resolved = "Rechazada";
-  else if (
-    s.includes("PENDING_REVIEW") ||
-    s.includes("IN_REVIEW") ||
-    s.includes("UNDER_REVIEW") ||
-    s.includes("EN_REVISION") ||
-    s.includes("TO_REVIEW")
-  ) {
-    resolved = "En Revisión";
-  }
-
-  return clampPracticeOpportunityEstado(resolved);
-}
-
-function mapPracticeOpportunityStatus(raw) {
-  return normalizePracticeEstadoFromMysql(raw, { nullable: false });
-}
-
-/**
- * Estados canónicos MTM = enum `OportunidadMTM.estado` / historial.
- */
-function normalizeMtmEstadoFromMysql(raw, opts = {}) {
-  const nullable = !!opts.nullable;
-  const trimmed = String(raw ?? "").trim();
-  const s = trimmed.toUpperCase().replace(/\s+/g, "_");
-  if (nullable && (!trimmed || s === "NO_EXIST")) return null;
-
-  let resolved = "Borrador";
-  if (["CREATED", "REVIEW", "REVISED"].includes(s)) resolved = "Borrador";
-  else if (["ACTIVED", "ACTIVE", "ACTIVATED", "PUBLISHED", "APPROVED"].includes(s)) resolved = "Activa";
-  else if (["CLOSED", "REJECTED", "CANCEL", "INACTIVE", "EXPIRED"].includes(s)) resolved = "Inactiva";
-  else if (["ACTIVE", "ACTIVATED", "PUBLISHED", "APPROVED"].some((k) => s.includes(k))) resolved = "Activa";
-  else if (["CLOSED", "FINISHED", "CANCEL", "EXPIRED", "INACTIVE"].some((k) => s.includes(k))) resolved = "Inactiva";
-
-  return clampOportunidadMtmEstado(resolved);
-}
-
-function mapMTMOpportunityStatus(raw) {
-  return normalizeMtmEstadoFromMysql(raw, { nullable: false });
-}
-
-function mapApplicationStatus(row) {
-  let r = "aplicado";
-  if (bool(row.contracted)) r = "aceptado_estudiante";
-  else {
-    const s = (row.status || "").toUpperCase();
-    if (s.includes("REJECT")) r = "rechazado";
-    else if (s.includes("SELECT")) r = "seleccionado_empresa";
-    else if (bool(row.downloaded)) r = "empresa_descargo_hv";
-    else if (bool(row.viewed) || bool(row.revisedCompany)) r = "empresa_consulto_perfil";
-  }
-  return clampPostulacionEstado(r);
-}
-
-function mapLegalizacionPracticaStatus(raw) {
-  const s = (raw || "").toUpperCase();
-  let r = "borrador";
-  if (s.includes("APPROV")) r = "aprobada";
-  else if (s.includes("REJECT")) r = "rechazada";
-  else if (s.includes("CANCEL")) r = "rechazada";
-  else if (s.includes("ADJUST")) r = "en_ajuste";
-  else if (s.includes("REVIEW")) r = "en_revision";
-  return clampLegalizacionEstado(r);
-}
-
-function mapLegalizacionMTMStatus(raw) {
-  const s = (raw || "").toUpperCase();
-  let r = "borrador";
-  if (s.includes("APPROV")) r = "aprobada";
-  else if (s.includes("REJECT")) r = "rechazada";
-  else if (s.includes("CANCEL")) r = "rechazada";
-  else if (s.includes("ADJUST")) r = "en_ajuste";
-  else if (s.includes("REVIEW")) r = "en_revision";
-  return clampLegalizacionEstado(r);
-}
-
-/** `change_status_opportunity` → etiquetas alineadas con enum `Opportunity.historialEstados`. */
-function mapMysqlChangeStatusToPracticeState(raw) {
-  return normalizePracticeEstadoFromMysql(raw, { nullable: true });
-}
-
-/** Misma tabla → estados MTM (Borrador / Activa / Inactiva). */
-function mapMysqlChangeStatusToMTMState(raw) {
-  return normalizeMtmEstadoFromMysql(raw, { nullable: true });
-}
-
 function buildComentariosFromChangeStatusRow(row) {
   const parts = [];
   const c = str(getRowCol(row, "comment"));
@@ -830,8 +729,12 @@ function resolveUserIdFromMysqlUserId(maps, userMysqlId, defaultUserId) {
 function buildHistorialPracticeFromChangeRows(rows, maps, defaultUserId) {
   const out = [];
   for (const row of rows) {
-    const estadoAnterior = mapMysqlChangeStatusToPracticeState(getRowCol(row, "status_before"));
-    const estadoNuevo = mapMysqlChangeStatusToPracticeState(getRowCol(row, "status_after"));
+    const estadoAnterior = mapMysqlChangeStatusOpportunityToPracticeEstado(getRowCol(row, "status_before"), {
+      nullable: true,
+    });
+    const estadoNuevo = mapMysqlChangeStatusOpportunityToPracticeEstado(getRowCol(row, "status_after"), {
+      nullable: true,
+    });
     if (!estadoNuevo) continue;
     const comentarios = buildComentariosFromChangeStatusRow(row);
     const cambiadoPor = resolveUserIdFromCreatorEmail(maps, getRowCol(row, "user_creator"), defaultUserId);
@@ -851,8 +754,10 @@ function buildHistorialPracticeFromChangeRows(rows, maps, defaultUserId) {
 function buildHistorialMtmFromChangeRows(rows, maps, defaultUserId) {
   const out = [];
   for (const row of rows) {
-    const estadoAnterior = mapMysqlChangeStatusToMTMState(getRowCol(row, "status_before"));
-    const estadoNuevo = mapMysqlChangeStatusToMTMState(getRowCol(row, "status_after"));
+    const estadoAnterior = mapMysqlChangeStatusOpportunityToMtmEstado(getRowCol(row, "status_before"), {
+      nullable: true,
+    });
+    const estadoNuevo = mapMysqlChangeStatusOpportunityToMtmEstado(getRowCol(row, "status_after"), { nullable: true });
     if (!estadoNuevo) continue;
     const extra = buildComentariosFromChangeStatusRow(row);
     const r = str(getRowCol(row, "reason"));
@@ -880,30 +785,19 @@ function buildChangeStatusLogDocFromMysqlChangeRow(row, maps, defaultUserId) {
 
   let estadoAnterior =
     dominio === "practica"
-      ? mapMysqlChangeStatusToPracticeState(getRowCol(row, "status_before"))
-      : mapMysqlChangeStatusToMTMState(getRowCol(row, "status_before"));
+      ? mapMysqlChangeStatusOpportunityToPracticeEstado(getRowCol(row, "status_before"), { nullable: true })
+      : mapMysqlChangeStatusOpportunityToMtmEstado(getRowCol(row, "status_before"), { nullable: true });
   let estadoNuevo =
     dominio === "practica"
-      ? mapMysqlChangeStatusToPracticeState(getRowCol(row, "status_after"))
-      : mapMysqlChangeStatusToMTMState(getRowCol(row, "status_after"));
+      ? mapMysqlChangeStatusOpportunityToPracticeEstado(getRowCol(row, "status_after"), { nullable: true })
+      : mapMysqlChangeStatusOpportunityToMtmEstado(getRowCol(row, "status_after"), { nullable: true });
   if (!estadoNuevo) {
     estadoNuevo =
       dominio === "practica"
-        ? mapPracticeOpportunityStatus(getRowCol(row, "status_after"))
-        : mapMTMOpportunityStatus(getRowCol(row, "status_after"));
+        ? mapMysqlOpportunityTableStatusToPracticeEstado(getRowCol(row, "status_after"))
+        : mapMysqlOpportunityTableStatusToMtmEstado(getRowCol(row, "status_after"));
   }
-  if (estadoAnterior != null && estadoAnterior !== "") {
-    estadoAnterior =
-      dominio === "practica"
-        ? clampPracticeOpportunityEstado(estadoAnterior)
-        : clampOportunidadMtmEstado(estadoAnterior);
-  } else {
-    estadoAnterior = null;
-  }
-  estadoNuevo =
-    dominio === "practica"
-      ? clampPracticeOpportunityEstado(estadoNuevo)
-      : clampOportunidadMtmEstado(estadoNuevo);
+  if (estadoAnterior === "" || estadoAnterior === undefined) estadoAnterior = null;
 
   const mysqlRowId = num(getRowCol(row, "id"));
   if (mysqlRowId == null) return null;
@@ -953,8 +847,8 @@ function buildSnapshotStatusLogDoc(row, maps, defaultUserId, dominio) {
   const snapshotKey = dominio === "practica" ? `snapshot_practica_${oid}` : `snapshot_mtm_${oid}`;
   const estadoNuevo =
     dominio === "practica"
-      ? mapPracticeOpportunityStatus(row.status)
-      : mapMTMOpportunityStatus(row.status);
+      ? mapMysqlOpportunityTableStatusToPracticeEstado(row.status)
+      : mapMysqlOpportunityTableStatusToMtmEstado(row.status);
   return {
     mysqlRowId: null,
     snapshotKey,
@@ -1047,8 +941,8 @@ function buildHistorialLegalizacionPracticaFromMysql(rows, maps, defaultUserId) 
     const rawBefore = getRowCol(row, "status_legalized_before");
     const rawAfter = getRowCol(row, "status_legalized_after");
     const antes =
-      rawBefore == null || String(rawBefore).trim() === "" ? null : mapLegalizacionPracticaStatus(rawBefore);
-    const despues = mapLegalizacionPracticaStatus(rawAfter);
+      rawBefore == null || String(rawBefore).trim() === "" ? null : mapMysqlChangeStatusLegalizedToLegalizacionEstado(rawBefore);
+    const despues = mapMysqlChangeStatusLegalizedToLegalizacionEstado(rawAfter);
     const obs = [
       str(getRowCol(row, "change_status_observation")),
       str(getRowCol(row, "change_status_observation_document")),
@@ -1074,8 +968,8 @@ function buildHistorialLegalizacionMtmFromMysql(rows, maps, defaultUserId) {
     const rawBefore = getRowCol(row, "status_legalized_before");
     const rawAfter = getRowCol(row, "status_legalized_after");
     const antes =
-      rawBefore == null || String(rawBefore).trim() === "" ? null : mapLegalizacionMTMStatus(rawBefore);
-    const despues = mapLegalizacionMTMStatus(rawAfter);
+      rawBefore == null || String(rawBefore).trim() === "" ? null : mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado(rawBefore);
+    const despues = mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado(rawAfter);
     const obs = [
       str(getRowCol(row, "change_status_observation")),
       str(getRowCol(row, "change_status_observation_document")),
@@ -1422,7 +1316,7 @@ async function migrateLegacyDetailedMirrorHistoriales(maps, stats) {
           fecha: date(getRowCol(r, "approval_date")) || new Date(),
           estadoAntes: str(r.approval_document_status_before) || null,
           estadoDespues: str(r.approval_document_status_after) || null,
-          estadoDespuesCanon: mapDocStatus(r.approval_document_status_after),
+          estadoDespuesCanon: mapMysqlLegalizacionDocumentoEstado(r.approval_document_status_after),
           observacion: str(r.approval_observation) || null,
           usuario: resolveUserIdFromMysqlUserId(maps, getRowCol(r, "user_id"), defaultUserId),
           ip: str(r.user_ip) || null,
@@ -1487,7 +1381,7 @@ async function backfillHistorialEstadosOportunidadesSinChangeLog(maps, stats, de
       const row = byMongo.get(String(doc._id));
       if (!row) continue;
       const entry = {
-        estadoNuevo: mapPracticeOpportunityStatus(row.status),
+        estadoNuevo: mapMysqlOpportunityTableStatusToPracticeEstado(row.status),
         cambiadoPor: resolveUserIdFromCreatorEmail(maps, row.user_creator, defaultUserId),
         fechaCambio: date(row.date_creation) || new Date(),
         motivo: null,
@@ -1544,7 +1438,7 @@ async function backfillHistorialEstadosOportunidadesSinChangeLog(maps, stats, de
       const row = byMongo.get(String(doc._id));
       if (!row) continue;
       const entry = {
-        estadoNuevo: mapMTMOpportunityStatus(row.status),
+        estadoNuevo: mapMysqlOpportunityTableStatusToMtmEstado(row.status),
         cambiadoPor: resolveUserIdFromCreatorEmail(maps, row.user_creator, defaultUserId),
         fechaCambio: date(row.date_creation) || new Date(),
         motivo: null,
@@ -1701,14 +1595,6 @@ async function migrateOpportunityStatusHistoryFromMySQL(maps, stats) {
   migrationLog(
     `Historial estados OK: práctica ${stats.practiceStatusHistoryUpdated} (change_log), MTM ${stats.mtmStatusHistoryUpdated} (change_log), backfill práctica ${stats.practiceStatusHistoryBackfilled}, backfill MTM ${stats.mtmStatusHistoryBackfilled}, logs MySQL ${stats.opportunityStatusChangeLogsFromMysql}, snapshots ${stats.opportunityStatusChangeLogsSnapshots}, sin mapping ${stats.statusHistorySkippedNoOpportunity}, errores ${stats.statusHistoryErrors}`
   );
-}
-
-function mapDocStatus(raw) {
-  const s = (raw || "").toUpperCase();
-  let r = "pendiente";
-  if (s.includes("APPROV")) r = "aprobado";
-  else if (s.includes("REJECT")) r = "rechazado";
-  return clampDocEstadoDocumento(r);
 }
 
 function token() {
@@ -2000,10 +1886,6 @@ async function migratePracticeOpportunities(maps, stats, rollbackCtx) {
         continue;
       }
 
-      const creator = Array.from(maps.usersByMysqlId.values()).find(
-        (u) => u.email?.toLowerCase() === String(row.user_creator || "").toLowerCase()
-      );
-
       const ows = num(row.ordinary_weekly_session);
       const dhRaw = row.dedication_hours;
       const dh =
@@ -2039,10 +1921,10 @@ async function migratePracticeOpportunities(maps, stats, rollbackCtx) {
           requiereConfidencialidad: bool(row.salary_range_is_confidentiality),
           apoyoEconomico: num(row.salary_range_min),
           promedioMinimoRequerido: row.cumulative_average != null ? String(row.cumulative_average) : null,
-          estado: mapPracticeOpportunityStatus(row.status),
+          estado: mapMysqlOpportunityTableStatusToPracticeEstado(row.status),
           fechaCreacion: date(row.date_creation) || new Date(),
           fechaActivacion: date(row.date_activate),
-          creadoPor: creator?._id || defaultCreator,
+          creadoPor: resolveUserIdFromCreatorEmail(maps, row.user_creator, defaultCreator),
         },
       });
     }
@@ -2099,7 +1981,7 @@ async function migratePracticeOpportunities(maps, stats, rollbackCtx) {
 
   for (const part of chunk(rows, BATCH_SIZE)) {
     await processRowBatch(part);
-    await sleep(INTER_BATCH_SLEEP_MS);
+    if (INTER_BATCH_SLEEP_MS > 0) await sleep(INTER_BATCH_SLEEP_MS);
   }
 }
 
@@ -2273,7 +2155,7 @@ async function migratePracticeApplications(maps, stats, rollbackCtx) {
           }
 
           queuedNaturalKeysThisSub.add(appNaturalKey);
-          const estado = mapApplicationStatus(row);
+          const estado = mapMysqlOpportunityApplicationToPostulacionEstado(row);
           toCreate.push({
             legacyId,
             row,
@@ -2359,7 +2241,7 @@ async function migratePracticeApplications(maps, stats, rollbackCtx) {
           stats.practiceApplicationsSkipped++;
         }
 
-        await sleep(INTER_BATCH_SLEEP_MS);
+        if (INTER_BATCH_SLEEP_MS > 0) await sleep(INTER_BATCH_SLEEP_MS);
       }
     }
   );
@@ -2472,12 +2354,12 @@ async function migratePracticeLegalizationsAndDocs(maps, stats, rollbackCtx) {
           key: att.filepath || "",
           originalName: att.name || "",
           size: null,
-          estadoDocumento: mapDocStatus(dl.document_status),
+          estadoDocumento: mapMysqlLegalizacionDocumentoEstado(dl.document_status),
           motivoRechazo: null,
         };
       }
 
-      const estado = mapLegalizacionPracticaStatus(l.status_apl);
+      const estado = mapMysqlChangeStatusLegalizedToLegalizacionEstado(l.status_apl);
       queuedPostulacionThisBatch.add(postKey);
       toCreate.push({ legacyId, postulacionMongo, l, estado, documentos });
     }
@@ -2549,7 +2431,7 @@ async function migratePracticeLegalizationsAndDocs(maps, stats, rollbackCtx) {
 
   for (const part of chunk(legalizaciones, BATCH_SIZE)) {
     await processLegalBatch(part);
-    await sleep(INTER_BATCH_SLEEP_MS);
+    if (INTER_BATCH_SLEEP_MS > 0) await sleep(INTER_BATCH_SLEEP_MS);
   }
 }
 
@@ -2608,10 +2490,6 @@ async function migrateMTMOpportunities(maps, stats, rollbackCtx) {
         continue;
       }
 
-      const creator = Array.from(maps.usersByMysqlId.values()).find(
-        (u) => u.email?.toLowerCase() === String(row.user_creator || "").toLowerCase()
-      );
-
       queuedNaturalKeysThisBatch.add(naturalKey);
       toCreate.push({
         legacyId,
@@ -2631,8 +2509,8 @@ async function migrateMTMOpportunities(maps, stats, rollbackCtx) {
           grupo: row.monitoring_group != null ? String(row.monitoring_group) : null,
           funciones: mtmTextoMax250(row.functions),
           requisitos: mtmTextoMax250(row.additional_requirements),
-          estado: mapMTMOpportunityStatus(row.status),
-          creadoPor: creator?._id || null,
+          estado: mapMysqlOpportunityTableStatusToMtmEstado(row.status),
+          creadoPor: resolveUserIdFromCreatorEmail(maps, row.user_creator, null),
         },
       });
     }
@@ -2688,7 +2566,7 @@ async function migrateMTMOpportunities(maps, stats, rollbackCtx) {
 
   for (const part of chunk(rows, BATCH_SIZE)) {
     await processMtmOppBatch(part);
-    await sleep(INTER_BATCH_SLEEP_MS);
+    if (INTER_BATCH_SLEEP_MS > 0) await sleep(INTER_BATCH_SLEEP_MS);
   }
 }
 
@@ -2802,7 +2680,7 @@ async function migrateMTMApplications(maps, stats, rollbackCtx) {
           }
 
           queuedNaturalKeysThisSub.add(appNaturalKey);
-          const estado = mapApplicationStatus(row);
+          const estado = mapMysqlOpportunityApplicationToPostulacionEstado(row);
           toCreate.push({
             legacyId,
             row,
@@ -2878,7 +2756,7 @@ async function migrateMTMApplications(maps, stats, rollbackCtx) {
           stats.mtmApplicationsSkipped++;
         }
 
-        await sleep(INTER_BATCH_SLEEP_MS);
+        if (INTER_BATCH_SLEEP_MS > 0) await sleep(INTER_BATCH_SLEEP_MS);
       }
     }
   );
@@ -2988,7 +2866,7 @@ async function migrateMTMLegalizationsAndDocs(maps, stats, rollbackCtx) {
           key: att.filepath || "",
           originalName: att.name || "",
           size: null,
-          estadoDocumento: mapDocStatus(d.document_status),
+          estadoDocumento: mapMysqlLegalizacionDocumentoEstado(d.document_status),
           motivoRechazo: null,
         };
       }
@@ -3003,7 +2881,7 @@ async function migrateMTMLegalizationsAndDocs(maps, stats, rollbackCtx) {
       if (!wc.length) continue;
       const mongoDocs = wc.map((x) => ({
         postulacionMTM: x.postulacionMTM,
-        estado: mapLegalizacionMTMStatus(x.l.status),
+        estado: mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado(x.l.status),
         eps: maps.itemsByMysqlId.get(num(x.l.eps))?._id || null,
         tipoCuenta: maps.itemsByMysqlId.get(num(x.l.account_type))?._id || null,
         banco: maps.itemsByMysqlId.get(num(x.l.fin_bank))?._id || null,
@@ -3013,7 +2891,7 @@ async function migrateMTMLegalizationsAndDocs(maps, stats, rollbackCtx) {
         historial: [
           {
             estadoAnterior: null,
-            estadoNuevo: mapLegalizacionMTMStatus(x.l.status),
+            estadoNuevo: mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado(x.l.status),
             usuario: null,
             fecha: date(x.l.date_creation) || new Date(),
             detalle: "Migrado desde monitoring_legalized",
@@ -3065,7 +2943,7 @@ async function migrateMTMLegalizationsAndDocs(maps, stats, rollbackCtx) {
 
   for (const part of chunk(legalizaciones, BATCH_SIZE)) {
     await processMtmLegalBatch(part);
-    await sleep(INTER_BATCH_SLEEP_MS);
+    if (INTER_BATCH_SLEEP_MS > 0) await sleep(INTER_BATCH_SLEEP_MS);
   }
 }
 
@@ -3109,12 +2987,7 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
   ]);
 
   function planEstadoFromRow(p) {
-    const status = String(p.status || "").toUpperCase();
-    let estado = "borrador";
-    if (status.includes("APPROV")) estado = "aprobado";
-    else if (status.includes("REJECT")) estado = "rechazado";
-    else if (status.includes("REVIEW")) estado = "enviado_revision";
-    return clampPlanTrabajoMtmEstado(estado);
+    return mapMysqlMonitoringPlanStatusToPlanTrabajoMtmEstado(p.status);
   }
 
   async function processPlanBatch(planBatch) {
@@ -3244,7 +3117,7 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
 
   for (const part of chunk(plans, BATCH_SIZE)) {
     await processPlanBatch(part);
-    await sleep(INTER_BATCH_SLEEP_MS);
+    if (INTER_BATCH_SLEEP_MS > 0) await sleep(INTER_BATCH_SLEEP_MS);
   }
 
   async function processScheduleBatch(schedBatch) {
@@ -3292,7 +3165,7 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
           fecha: date(s.date) || date(s.date_creation) || new Date(),
           comentarios: str(s.monitoring_activities) || "",
           descripcion: str(s.monitoring_strategies) || "",
-          estado: clampSeguimientoMtmEstado("pendiente_revision"),
+          estado: defaultEstadoSeguimientoMtmNuevo,
           creadoPor: null,
           actualizadoPor: null,
         },
@@ -3326,7 +3199,7 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
 
   for (const part of chunk(schedule, BATCH_SIZE)) {
     await processScheduleBatch(part);
-    await sleep(INTER_BATCH_SLEEP_MS);
+    if (INTER_BATCH_SLEEP_MS > 0) await sleep(INTER_BATCH_SLEEP_MS);
   }
 }
 
@@ -3422,6 +3295,10 @@ async function migrate() {
     migrationLog("Fase 2/11: reconcileExistingMappings...");
     await reconcileExistingMappings(maps);
     migrationLog("Fase 2/11: reconcileExistingMappings OK");
+
+    migrationLog("Mapa email → User (creadoPor / historiales)...");
+    await ensureUserEmailMap(maps);
+    migrationLog("Mapa email → User OK");
 
     if (!SKIP_PRACTICE_OPPORTUNITIES_PIPELINE) {
       migrationLog("Fase 3/11: migratePracticeOpportunities...");

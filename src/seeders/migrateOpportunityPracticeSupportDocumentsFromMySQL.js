@@ -25,7 +25,10 @@ import Attachment from "../modules/shared/attachment/attachment.schema.js";
 
 dotenv.config();
 
-const BATCH_SIZE = Number(process.env.MIGRATION_PRACTICE_SUPPORT_DOCS_BATCH || 500);
+const BATCH_SIZE = Math.max(
+  1,
+  Math.min(50_000, Math.floor(Number(process.env.MIGRATION_PRACTICE_SUPPORT_DOCS_BATCH || 500)) || 500)
+);
 const FORCE = process.env.MIGRATION_PRACTICE_SUPPORT_DOCUMENTS_FORCE === "1";
 const DB_NAME = process.env.MYSQL_DATABASE || "tenant-1";
 
@@ -103,6 +106,9 @@ async function migrate() {
   let missingAttachment = 0;
 
   while (true) {
+    // LIMIT/OFFSET como literales: con `execute(?, ?)` algunos servidores MySQL devuelven
+    // ER_WRONG_ARGUMENTS / "Incorrect arguments to mysqld_stmt_execute".
+    const safeOffset = Math.max(0, Math.floor(offset));
     const rows = await runQuery(
       `
       SELECT
@@ -119,9 +125,8 @@ async function migrate() {
         OR ap.required_document_3 IS NOT NULL
       )
       ORDER BY ap.academic_practice_id
-      LIMIT ? OFFSET ?
-      `,
-      [BATCH_SIZE, offset]
+      LIMIT ${BATCH_SIZE} OFFSET ${safeOffset}
+      `
     );
 
     if (!rows.length) break;

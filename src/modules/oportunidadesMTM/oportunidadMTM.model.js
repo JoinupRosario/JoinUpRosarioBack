@@ -1,8 +1,6 @@
 import mongoose from "mongoose";
-import {
-  OPORTUNIDAD_MTM_ESTADOS,
-  DEFAULT_OPORTUNIDAD_MTM_ESTADO,
-} from "../../constants/domainEstados.js";
+
+const OPORTUNIDAD_MTM_ESTADOS = ["Borrador", "Activa", "Inactiva"];
 
 const historialEstadoSchema = new mongoose.Schema(
   {
@@ -146,7 +144,7 @@ const oportunidadMTMSchema = new mongoose.Schema(
     estado: {
       type: String,
       enum: OPORTUNIDAD_MTM_ESTADOS,
-      default: DEFAULT_OPORTUNIDAD_MTM_ESTADO,
+      default: "Borrador",
     },
 
     // Historial de cambios de estado

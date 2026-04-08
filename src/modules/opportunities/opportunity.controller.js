@@ -5,6 +5,7 @@ import Student from "../students/student.model.js";
 import EstudianteHabilitado from "../estudiantesHabilitados/estudianteHabilitado.model.js";
 import Postulant from "../postulants/models/postulants.schema.js";
 import PostulantProfile from "../postulants/models/profile/profile.schema.js";
+import User from "../users/user.model.js";
 import PostulacionOportunidad from "./postulacionOportunidad.model.js";
 import { ProfileEnrolledProgram, ProfileGraduateProgram, ProfileSkill, ProfileCv } from "../postulants/models/profile/index.js";
 import Periodo from "../periodos/periodo.model.js";
@@ -26,23 +27,10 @@ import {
   findOtrasPostulacionesActivas,
   practicaOpportunityDashboardLink,
 } from "../notificacion/application/practicaOpportunityNotifications.helper.js";
-import { buildSearchRegex, escapeRegex } from "../../utils/searchUtils.js";
 
 const CODE_MAX_JORNADA_ORDINARIA = "PRACTICE_MAX_JORNADA_ORDINARIA_SEMANAL";
 const CODE_MIN_APOYO_ECONOMICO_COP = "PRACTICE_MIN_APOYO_ECONOMICO_COP";
-const CODE_PRACTICE_END_DAYS_AFTER_START = "PRACTICE_END_DAYS_AFTER_START";
 const DEFAULT_MIN_APOYO_COP = 1750905;
-
-/** Misma regla que creación de oportunidades de práctica (días mínimos entre inicio y fin). */
-async function getPracticeEndDaysAfterStart() {
-  try {
-    const p = await Parameter.findOne({ code: CODE_PRACTICE_END_DAYS_AFTER_START, "metadata.active": true }).lean();
-    const v = p?.value;
-    const n = typeof v === "number" ? v : parseInt(String(v ?? ""), 10);
-    if (Number.isFinite(n) && n >= 0 && n <= 365) return n;
-  } catch (_) {}
-  return 1;
-}
 
 async function getMinApoyoEconomicoCop() {
   try {
@@ -58,7 +46,7 @@ async function getMinApoyoEconomicoCop() {
  * RQ04_HU004: al aceptar la práctica se crea de inmediato el expediente de legalización (borrador),
  * para que listados/admin vean la gestión sin depender de que el estudiante abra el detalle.
  */
-async function ensureLegalizacionPracticaOnAcceptance(postulacionOportunidadId, userId = null, historialDetalle = null) {
+async function ensureLegalizacionPracticaOnAcceptance(postulacionOportunidadId, userId = null) {
   try {
     const pid = postulacionOportunidadId?.toString?.() ?? postulacionOportunidadId;
     if (!pid || !mongoose.Types.ObjectId.isValid(pid)) return;
@@ -73,7 +61,7 @@ async function ensureLegalizacionPracticaOnAcceptance(postulacionOportunidadId, 
           estadoNuevo: "borrador",
           usuario: userId || null,
           fecha: new Date(),
-          detalle: historialDetalle || "Legalización creada al aceptar la práctica.",
+          detalle: "Legalización creada al aceptar la práctica.",
           ip: null,
         },
       ],
@@ -236,415 +224,9 @@ async function normalizeOpportunityRefs(data) {
   }
 }
 
-/**
- * GET /opportunities/autogestionada/buscar-perfil?studentCode=
- * RQ04_HU004: datos del estudiante para creación de legalización autogestionada.
- */
-export const buscarPerfilParaAutogestionada = async (req, res) => {
-  try {
-    const studentCode = String(req.query.studentCode || "").trim();
-    if (!studentCode) {
-      return res.status(400).json({ message: "Indique número de identificación del estudiante" });
-    }
-    /** postulantId del perfil → Postulant; nombre/correo en Postulant.postulantId → User */
-    const profile = await PostulantProfile.findOne({ studentCode })
-      .populate({
-        path: "postulantId",
-        select: "postulantId alternateEmail",
-        populate: { path: "postulantId", select: "name email" },
-      })
-      .lean();
-    if (!profile) {
-      return res.status(404).json({ message: "No se encontró perfil con esa identificación" });
-    }
-    const postulantDoc = profile.postulantId;
-    const userDoc = postulantDoc?.postulantId;
-    const nombre = userDoc?.name || "";
-    const email = userDoc?.email || postulantDoc?.alternateEmail || "";
-
-    const enrolledRows = await ProfileEnrolledProgram.find({ profileId: profile._id })
-      .populate("programId", "name code level labelLevel")
-      .populate({ path: "programFacultyId", populate: { path: "facultyId", select: "name" } })
-      .sort({ _id: 1 })
-      .lean();
-
-    const programas = enrolledRows.map((row) => {
-      const prog = row.programId;
-      const level = String(prog?.level || prog?.labelLevel || "PREGRADO").trim() || "PREGRADO";
-      const programName = String(prog?.name || prog?.code || "").trim();
-      const facultad = row.programFacultyId?.facultyId?.name || "";
-      return {
-        enrolledProgramId: row._id,
-        level,
-        program: programName,
-        facultad,
-        label: facultad ? `${level} — ${programName} · ${facultad}` : `${level} — ${programName}`,
-      };
-    });
-
-    const first = programas[0];
-    return res.json({
-      postulantProfileId: profile._id,
-      nombre,
-      email,
-      /** @deprecated usar programas; se mantiene por compatibilidad */
-      programa: first?.program || "",
-      facultad: first?.facultad || "",
-      programas,
-    });
-  } catch (err) {
-    console.error("[opportunities] buscarPerfilParaAutogestionada:", err);
-    res.status(500).json({ message: err.message });
-  }
-};
-
-/**
- * GET /opportunities/autogestionada/empresas
- * Listado breve de entidades para el formulario de práctica autogestionada (líder / admin).
- */
-export const getEmpresasParaAutogestionada = async (req, res) => {
-  try {
-    const companies = await Company.find({})
-      .select("_id nit commercialName name legalName")
-      .sort({ commercialName: 1, name: 1 })
-      .limit(500)
-      .lean();
-    res.json({ data: companies });
-  } catch (err) {
-    console.error("[opportunities] getEmpresasParaAutogestionada:", err);
-    res.status(500).json({ message: err.message });
-  }
-};
-
-/**
- * POST /opportunities/practica-autogestionada
- * RQ04_HU004: el líder de práctica registra la oferta y deja al estudiante en estado aceptado con expediente de legalización.
- */
-export const crearPracticaAutogestionada = async (req, res) => {
-  try {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ message: "No autenticado" });
-
-    const body = req.body || {};
-    const {
-      postulantProfileId,
-      company: companyId,
-      tutor,
-      nombreCargo,
-      requisitos,
-      funciones,
-      periodo,
-      tipoVinculacion,
-      formacionAcademica,
-      dedicacion,
-      pais,
-      ciudad,
-      areaDesempeno,
-      fechaInicioPractica,
-      fechaFinPractica,
-      horario,
-      jornadaOrdinariaSemanal,
-      auxilioEconomico,
-      apoyoEconomico,
-      promedioMinimoRequerido,
-    } = body;
-
-    const reqStr = (v) => (typeof v === "string" ? v.trim() : v);
-    const missing = [];
-    if (!postulantProfileId || !mongoose.Types.ObjectId.isValid(String(postulantProfileId))) missing.push("postulantProfileId");
-    if (!companyId || !mongoose.Types.ObjectId.isValid(String(companyId))) missing.push("company");
-    if (!reqStr(nombreCargo)) missing.push("nombreCargo");
-    if (!reqStr(requisitos)) missing.push("requisitos");
-    if (!reqStr(funciones) || String(funciones).trim().length < 60) missing.push("funciones (mínimo 60 caracteres)");
-    if (periodo == null || periodo === "") missing.push("periodo");
-    if (tipoVinculacion == null || tipoVinculacion === "") missing.push("tipoVinculacion");
-    const tieneEnrolledId =
-      body.enrolledProgramId != null &&
-      body.enrolledProgramId !== "" &&
-      mongoose.Types.ObjectId.isValid(String(body.enrolledProgramId));
-    if (!tieneEnrolledId && (!Array.isArray(formacionAcademica) || !formacionAcademica.length)) {
-      missing.push("formacionAcademica o enrolledProgramId");
-    }
-    if (dedicacion == null || dedicacion === "") missing.push("dedicacion");
-    if (pais == null || pais === "") missing.push("pais");
-    if (ciudad == null || ciudad === "") missing.push("ciudad");
-    if (areaDesempeno == null || areaDesempeno === "") missing.push("areaDesempeno");
-    if (!fechaInicioPractica) missing.push("fechaInicioPractica");
-    if (!fechaFinPractica) missing.push("fechaFinPractica");
-    if (!reqStr(horario)) missing.push("horario");
-    if (jornadaOrdinariaSemanal == null || jornadaOrdinariaSemanal === "") missing.push("jornadaOrdinariaSemanal");
-
-    const t = tutor || {};
-    const tutorReq = ["nombreTutor", "apellidoTutor", "emailTutor", "cargoTutor", "tipoIdentTutor", "identificacionTutor"];
-    for (const k of tutorReq) {
-      if (!reqStr(t[k])) missing.push(`tutor.${k}`);
-    }
-
-    if (missing.length) {
-      return res.status(400).json({ message: `Campos obligatorios pendientes: ${missing.join(", ")}` });
-    }
-
-    if (mongoose.Types.ObjectId.isValid(String(ciudad)) && mongoose.Types.ObjectId.isValid(String(pais))) {
-      const cityDoc = await City.findById(ciudad).populate({ path: "state", select: "country" }).lean();
-      if (!cityDoc?.state?.country) {
-        return res.status(400).json({ message: "Ciudad no válida" });
-      }
-      if (String(cityDoc.state.country) !== String(pais)) {
-        return res.status(400).json({ message: "La ciudad no pertenece al país seleccionado" });
-      }
-    }
-
-    const inicioYMD = String(fechaInicioPractica).slice(0, 10);
-    const finYMD = String(fechaFinPractica).slice(0, 10);
-    const parseYMD = (s) => {
-      const [y, m, d] = s.split("-").map((x) => parseInt(x, 10));
-      if (!y || !m || !d) return null;
-      return new Date(y, m - 1, d);
-    };
-    const tInicio = parseYMD(inicioYMD);
-    const tFin = parseYMD(finYMD);
-    if (!tInicio || !tFin || Number.isNaN(tInicio.getTime()) || Number.isNaN(tFin.getTime())) {
-      return res.status(400).json({ message: "Fechas de práctica no válidas" });
-    }
-    const gapDays = await getPracticeEndDaysAfterStart();
-    const minFin = new Date(tInicio);
-    minFin.setDate(minFin.getDate() + gapDays);
-    if (tFin < minFin) {
-      return res.status(400).json({
-        message: `La fecha de fin debe ser al menos ${gapDays} día(s) después de la fecha de inicio (regla de negocio).`,
-      });
-    }
-
-    const profile = await PostulantProfile.findById(postulantProfileId).lean();
-    if (!profile) return res.status(404).json({ message: "Perfil no encontrado" });
-    const postulantDoc = await Postulant.findById(profile.postulantId).lean();
-    if (!postulantDoc) return res.status(400).json({ message: "Postulante no encontrado" });
-
-    let forFac = Array.isArray(formacionAcademica)
-      ? formacionAcademica.filter((f) => f && reqStr(f.level) && reqStr(f.program))
-      : [];
-    const eid = body.enrolledProgramId;
-    if (eid != null && eid !== "" && mongoose.Types.ObjectId.isValid(String(eid))) {
-      const enr = await ProfileEnrolledProgram.findOne({
-        _id: eid,
-        profileId: profile._id,
-      })
-        .populate("programId", "name code level labelLevel")
-        .lean();
-      if (!enr) {
-        return res.status(400).json({ message: "El programa académico seleccionado no corresponde al perfil del estudiante" });
-      }
-      const prog = enr.programId;
-      const level = String(prog?.level || prog?.labelLevel || "PREGRADO").trim() || "PREGRADO";
-      const programName = String(prog?.name || prog?.code || "").trim();
-      if (!programName) {
-        return res.status(400).json({ message: "Datos del programa académico incompletos" });
-      }
-      forFac = [{ level, program: programName }];
-    } else if (!forFac.length) {
-      return res.status(400).json({ message: "Indique nivel y programa académico, o seleccione el programa inscrito del estudiante" });
-    }
-
-    const yaTieneAceptada = await PostulacionOportunidad.exists({
-      postulant: postulantDoc._id,
-      estado: "aceptado_estudiante",
-    });
-    if (yaTieneAceptada) {
-      return res.status(400).json({
-        message:
-          "El estudiante ya tiene una práctica aceptada. Cierre o gestione esa legalización antes de registrar otra autogestionada.",
-      });
-    }
-
-    const companyDoc = await Company.findById(companyId).lean();
-    if (!companyDoc) return res.status(404).json({ message: "Empresa no encontrada" });
-    if (!String(companyDoc.nit || companyDoc.idNumber || "").trim()) {
-      return res.status(400).json({ message: "La entidad debe tener NIT o número de identificación registrado" });
-    }
-
-    const restData = {
-      tipo: "practica",
-      practicaAutogestionada: true,
-      nombreCargo: reqStr(nombreCargo),
-      requisitos: reqStr(requisitos),
-      funciones: reqStr(funciones),
-      formacionAcademica: forFac.map((f) => ({ level: reqStr(f.level), program: reqStr(f.program) })),
-      periodo,
-      tipoVinculacion,
-      dedicacion,
-      pais,
-      ciudad,
-      areaDesempeno,
-      fechaInicioPractica: new Date(fechaInicioPractica),
-      fechaFinPractica: new Date(fechaFinPractica),
-      horario: reqStr(horario),
-      jornadaOrdinariaSemanal: parseInt(String(jornadaOrdinariaSemanal), 10),
-      /** Una sola dedicación horaria semanal (misma regla que módulo Oportunidades de práctica). */
-      jornadaSemanalPractica: parseInt(String(jornadaOrdinariaSemanal), 10),
-      auxilioEconomico: Boolean(auxilioEconomico),
-      apoyoEconomico:
-        apoyoEconomico != null && apoyoEconomico !== "" ? parseInt(String(apoyoEconomico).replace(/\D/g, ""), 10) : null,
-      promedioMinimoRequerido: promedioMinimoRequerido != null ? String(promedioMinimoRequerido).trim() : null,
-      company: companyId,
-      vacantes: 1,
-    };
-
-    await normalizeOpportunityRefs(restData);
-
-    if (!restData.periodo) return res.status(400).json({ message: "Período académico no válido" });
-    if (!restData.tipoVinculacion) return res.status(400).json({ message: "Tipo de vinculación no válido" });
-    if (!restData.dedicacion) return res.status(400).json({ message: "Dedicación no válida" });
-    if (!restData.pais) return res.status(400).json({ message: "País no válido" });
-    if (!restData.ciudad) return res.status(400).json({ message: "Ciudad no válida" });
-    if (!restData.areaDesempeno) return res.status(400).json({ message: "Área de desempeño no válida" });
-
-    const maxH = await getMaxJornadaOrdinariaSemanal();
-    const n = validateJornadaPractica(restData);
-    if (n != null && n > maxH) {
-      return res.status(400).json({ message: `La jornada ordinaria semanal no puede superar ${maxH} horas.` });
-    }
-
-    if (restData.auxilioEconomico === true) {
-      const minAp = await getMinApoyoEconomicoCop();
-      const ap = parseInt(String(restData.apoyoEconomico ?? "").replace(/\D/g, ""), 10);
-      if (!Number.isFinite(ap) || ap < minAp) {
-        return res.status(400).json({
-          message: `Con auxilio económico activo, el apoyo debe ser al menos $${minAp.toLocaleString("es-CO")} COP.`,
-        });
-      }
-    }
-
-    const aprobacionesPorPrograma = restData.formacionAcademica.map((f) => ({
-      programa: { level: f.level, program: f.program },
-      estado: "aprobado",
-      aprobadoPor: userId,
-      fechaAprobacion: new Date(),
-    }));
-
-    const now = new Date();
-    let opportunityId = null;
-    let po = null;
-
-    try {
-      const opportunity = await Opportunity.create({
-        ...restData,
-        estado: "Activa",
-        creadoPor: userId,
-        fechaCreacion: now,
-        fechaActivacion: now,
-        aprobacionesPorPrograma,
-        historialEstados: [
-          {
-            estadoAnterior: null,
-            estadoNuevo: "Activa",
-            cambiadoPor: userId,
-            fechaCambio: now,
-            comentarios: "Alta autogestionada por líder de práctica (RQ04_HU004)",
-          },
-        ],
-      });
-      opportunityId = opportunity._id;
-
-      po = await PostulacionOportunidad.create({
-        postulant: postulantDoc._id,
-        opportunity: opportunityId,
-        postulantProfile: profile._id,
-        estado: "aceptado_estudiante",
-        aceptadoEstudianteAt: now,
-        comentarios: "Práctica autogestionada registrada por líder de práctica (legalización)",
-        revisadoPor: userId,
-      });
-
-      await Opportunity.findByIdAndUpdate(opportunityId, {
-        $set: {
-          cierreDatosTutor: [
-            {
-              postulacionId: po._id,
-              nombreTutor: reqStr(t.nombreTutor),
-              apellidoTutor: reqStr(t.apellidoTutor),
-              emailTutor: reqStr(t.emailTutor),
-              cargoTutor: reqStr(t.cargoTutor),
-              tipoIdentTutor: reqStr(t.tipoIdentTutor),
-              arlEmpresa: t.arlEmpresa != null ? String(t.arlEmpresa).trim() : "",
-              identificacionTutor: reqStr(t.identificacionTutor),
-              fechaInicioPractica: restData.fechaInicioPractica,
-            },
-          ],
-        },
-      });
-
-      const otrosDocs = await findOtrasPostulacionesActivas(postulantDoc._id, po._id);
-      const otrasPostulacionIds = otrosDocs.map((d) => d._id);
-      await PostulacionOportunidad.updateMany(
-        {
-          postulant: postulantDoc._id,
-          _id: { $ne: po._id },
-          estado: { $in: ["aplicado", "empresa_consulto_perfil", "empresa_descargo_hv", "seleccionado_empresa"] },
-        },
-        {
-          $set: {
-            estado: "rechazado",
-            rechazadoAt: now,
-            comentarios: "No continúa el proceso: se registró práctica autogestionada por coordinación/líder",
-            aceptadoEstudianteAt: null,
-          },
-        }
-      );
-
-      await ensureLegalizacionPracticaOnAcceptance(
-        po._id,
-        userId,
-        "Legalización creada (práctica autogestionada por líder de práctica)."
-      );
-
-      const ctx = await loadPracticaPostulacionContext(po._id);
-      if (ctx) {
-        await dispatchPracticaNotification(
-          "aceptacion_inscripcion_oportunidad_estudiantes",
-          {
-            ...ctx.datos,
-            COMENTARIO:
-              "Se registró una práctica autogestionada. Ingrese a Legalizaciones de prácticas para cargar la documentación requerida.",
-          },
-          studentOnlyRecipientContext(ctx.postulantEmail),
-          { postulacionId: String(po._id), opportunityId: String(opportunityId), source: "practica_autogestionada" }
-        );
-        for (const oid of otrasPostulacionIds) {
-          const ctxO = await loadPracticaPostulacionContext(oid);
-          if (!ctxO) continue;
-          await dispatchPracticaNotification(
-            "notificacion_entidad_estudiante_no_continua",
-            {
-              ...ctxO.datos,
-              OBSERVACION: "Se registró otra práctica autogestionada para el estudiante. Esta postulación quedó sin continuidad.",
-            },
-            entityAndCoordinatorsRecipientContext(ctxO.creadorEmail),
-            { postulacionId: String(oid), opportunityId: String(ctxO.po.opportunity), source: "practica_autogestionada" }
-          );
-        }
-      }
-
-      const populated = await PostulacionOportunidad.findById(po._id)
-        .populate({ path: "opportunity", select: "nombreCargo practicaAutogestionada estado periodo" })
-        .populate("postulantProfile", "studentCode")
-        .lean();
-
-      return res.status(201).json({
-        message: "Práctica autogestionada registrada. El estudiante puede cargar documentos de legalización.",
-        postulacion: populated,
-        postulacionId: po._id,
-        opportunityId,
-      });
-    } catch (err) {
-      if (po?._id) await PostulacionOportunidad.deleteOne({ _id: po._id }).catch(() => {});
-      if (opportunityId) await Opportunity.deleteOne({ _id: opportunityId }).catch(() => {});
-      throw err;
-    }
-  } catch (error) {
-    console.error("[opportunities] crearPracticaAutogestionada:", error);
-    res.status(500).json({ message: error.message || "Error al registrar práctica autogestionada" });
-  }
-};
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 async function getAdminProgramScope(req) {
   const userModulo = String(req.user?.modulo || "").trim().toLowerCase();
@@ -766,70 +348,37 @@ export const getOpportunities = async (req, res) => {
       if (matchingIds.length > 0) {
         filter._id = { $in: matchingIds };
       } else {
-        const rx = buildSearchRegex(empresaTrim);
-        const companyDocs = await Company.find({
-          $or: [{ name: rx }, { commercialName: rx }, { legalName: rx }],
-        })
-          .select("_id")
-          .lean();
-        const ids = companyDocs.map((c) => c._id);
-        if (ids.length === 0) {
-          return res.json({
-            opportunities: [],
-            totalPages: 0,
-            currentPage: parseInt(page),
-            total: 0,
-          });
-        }
-        filter.company = { $in: ids };
-      }
-    }
-
-    // Número / fragmento del ID (coincide con cualquier subcadena del ObjectId en hex)
-    const numTrim = numeroOportunidad != null ? String(numeroOportunidad).trim().toLowerCase() : "";
-    if (numTrim) {
-      const allIds = await Opportunity.find({}).select("_id").lean();
-      const matchingIds = allIds
-        .filter((opp) => opp._id.toString().toLowerCase().includes(numTrim))
-        .map((opp) => opp._id);
-      if (matchingIds.length === 0) {
+        // Si no hay coincidencias, retornar array vacío
         return res.json({
           opportunities: [],
           totalPages: 0,
           currentPage: parseInt(page),
-          total: 0,
+          total: 0
         });
       }
-      filter._id = { $in: matchingIds };
     }
 
-    // Nombre de cargo (insensible a acentos / mayúsculas)
-    const nombreCargoTrim = nombreCargo != null ? String(nombreCargo).trim() : "";
-    if (nombreCargoTrim) {
-      filter.nombreCargo = buildSearchRegex(nombreCargoTrim);
+    // Filtro por nombre de cargo
+    if (nombreCargo) {
+      filter.nombreCargo = { $regex: nombreCargo, $options: "i" };
     }
 
-    // Fechas de cierre (incluye todo el día "hasta")
+    // Filtro por fechas de cierre
     if (fechaCierreDesde || fechaCierreHasta) {
       filter.fechaVencimiento = {};
       if (fechaCierreDesde) {
-        const d = new Date(fechaCierreDesde);
-        d.setHours(0, 0, 0, 0);
-        filter.fechaVencimiento.$gte = d;
+        filter.fechaVencimiento.$gte = new Date(fechaCierreDesde);
       }
       if (fechaCierreHasta) {
-        const d = new Date(fechaCierreHasta);
-        d.setHours(23, 59, 59, 999);
-        filter.fechaVencimiento.$lte = d;
+        filter.fechaVencimiento.$lte = new Date(fechaCierreHasta);
       }
     } else if (fechaVencimiento) {
       filter.fechaVencimiento = { $lte: new Date(fechaVencimiento) };
     }
 
-    // Formación académica (programa)
-    const formacionTrim = formacionAcademica != null ? String(formacionAcademica).trim() : "";
-    if (formacionTrim) {
-      filter["formacionAcademica.program"] = buildSearchRegex(formacionTrim);
+    // Filtro por formación académica
+    if (formacionAcademica) {
+      filter["formacionAcademica.program"] = { $regex: formacionAcademica, $options: "i" };
     }
     if (adminScope?.programTerms?.length) {
       const adminProgramClause = {
@@ -840,24 +389,19 @@ export const getOpportunities = async (req, res) => {
       filter.$and = [...(filter.$and || []), adminProgramClause];
     }
 
-    // Estado: un solo campo en el modelo; prioriza "estado" sobre "estadosRevision" si vienen ambos
-    const estadoTrim = estado != null && String(estado).trim() !== "" ? String(estado).trim() : null;
-    const estadoRevTrim =
-      estadosRevision != null && String(estadosRevision).trim() !== "" ? String(estadosRevision).trim() : null;
-    if (estadoTrim) {
-      filter.estado = estadoTrim;
-    } else if (estadoRevTrim) {
-      filter.estado = estadoRevTrim;
+    // Filtro por estados de revisión
+    if (estadosRevision) {
+      filter.estado = estadosRevision;
     }
 
-    // Requisitos
-    const requisitosTrim = requisitos != null ? String(requisitos).trim() : "";
-    if (requisitosTrim) {
-      filter.requisitos = buildSearchRegex(requisitosTrim);
+    // Filtro por requisitos
+    if (requisitos) {
+      filter.requisitos = { $regex: requisitos, $options: "i" };
     }
 
-    // Solo oportunidades marcadas como confidenciales
-    if (String(empresaConfidenciales) === "true" || empresaConfidenciales === true) {
+    // Filtro por empresas confidenciales
+    if (empresaConfidenciales === 'true') {
+      // Asumimos que las empresas confidenciales tienen requiereConfidencialidad = true
       filter.requiereConfidencialidad = true;
     }
 
@@ -913,12 +457,12 @@ export const getOpportunities = async (req, res) => {
     // Ordenamiento
     const sortOptions = {};
     const sortFieldMap = {
-      fechaCreacion: "createdAt",
-      nombreCargo: "nombreCargo",
-      fechaVencimiento: "fechaVencimiento",
-      estado: "estado",
+      'fechaCreacion': 'createdAt',
+      'nombreCargo': 'nombreCargo',
+      'fechaVencimiento': 'fechaVencimiento',
+      'estado': 'estado'
     };
-    const actualSortField = sortFieldMap[sortField] || "createdAt";
+    const actualSortField = sortFieldMap[sortField] || sortField || 'createdAt';
     sortOptions[actualSortField] = sortDirection === 'asc' ? 1 : -1;
 
     const opportunities = await Opportunity.find(filter)
@@ -1694,180 +1238,6 @@ export const closeOpportunity = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
-  }
-};
-
-const CODE_PRACTICE_START_DAYS_AFTER_EXPIRY = "PRACTICE_START_DAYS_AFTER_EXPIRY";
-
-async function getPracticeStartDaysAfterExpiryForSeleccion() {
-  try {
-    const p = await Parameter.findOne({ code: CODE_PRACTICE_START_DAYS_AFTER_EXPIRY, "metadata.active": true }).lean();
-    const v = p?.value;
-    const n = typeof v === "number" ? v : parseInt(String(v ?? ""), 10);
-    if (Number.isFinite(n) && n >= 0) return n;
-  } catch (_) {}
-  return 0;
-}
-
-function addDaysToYMDStr(isoDateStr, daysToAdd) {
-  if (!isoDateStr) return "";
-  const d = new Date(isoDateStr);
-  d.setDate(d.getDate() + (daysToAdd || 0));
-  return d.toISOString().slice(0, 10);
-}
-
-/** POST /opportunities/:id/applications/:postulacionId/seleccionar — Práctica: seleccionar sin cerrar (mismos datos tutor que al cerrar con contratación). */
-export const seleccionarPostulantePractica = async (req, res) => {
-  try {
-    const { id: opportunityId, postulacionId } = req.params;
-    const body = req.body || {};
-    const requiredTutorFields = [
-      "nombreTutor",
-      "apellidoTutor",
-      "emailTutor",
-      "cargoTutor",
-      "tipoIdentTutor",
-      "identificacionTutor",
-      "arlEmpresa",
-      "fechaInicioPractica",
-    ];
-    for (const field of requiredTutorFields) {
-      const value = body[field];
-      if (value == null || String(value).trim() === "") {
-        return res.status(400).json({ message: `El campo ${field} es obligatorio.` });
-      }
-    }
-
-    const op = await Opportunity.findById(opportunityId).lean();
-    if (!op) return res.status(404).json({ message: "Oportunidad no encontrada" });
-    if (op.estado !== "Activa") {
-      return res.status(400).json({ message: "Solo puede seleccionar cuando la oportunidad está Activa." });
-    }
-    if (String(op.tipo || "").toLowerCase() !== "practica") {
-      return res.status(400).json({ message: "Solo aplica a oportunidades de práctica." });
-    }
-
-    const vacantes = Math.max(1, Number(op.vacantes) || 1);
-    const countSeleccionados = await PostulacionOportunidad.countDocuments({
-      opportunity: opportunityId,
-      estado: "seleccionado_empresa",
-    });
-
-    const po = await PostulacionOportunidad.findOne({
-      _id: postulacionId,
-      opportunity: opportunityId,
-    });
-    if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
-    if (po.estado === "rechazado") {
-      return res.status(400).json({ message: "No puede seleccionar un postulante rechazado." });
-    }
-    if (po.estado === "aceptado_estudiante") {
-      return res.status(400).json({ message: "Este postulante ya aceptó la práctica." });
-    }
-    if (po.estado === "seleccionado_empresa") {
-      return res.json({
-        message: "El postulante ya estaba seleccionado.",
-        estado: "seleccionado_empresa",
-        estadoLabel: "Seleccionado",
-      });
-    }
-
-    if (countSeleccionados >= vacantes) {
-      return res.status(400).json({
-        message: `No hay vacantes disponibles (máximo ${vacantes} seleccionado(s)).`,
-      });
-    }
-
-    const daysAfter = await getPracticeStartDaysAfterExpiryForSeleccion();
-    const vencimientoYMD = op.fechaVencimiento
-      ? new Date(op.fechaVencimiento).toISOString().slice(0, 10)
-      : "";
-    const fechaInicio = new Date(body.fechaInicioPractica);
-    if (Number.isNaN(fechaInicio.getTime())) {
-      return res.status(400).json({ message: "fechaInicioPractica no es una fecha válida." });
-    }
-    const minYmd = addDaysToYMDStr(vencimientoYMD, daysAfter);
-    if (vencimientoYMD && minYmd) {
-      const fiYmd = fechaInicio.toISOString().slice(0, 10);
-      if (fiYmd < minYmd) {
-        return res.status(400).json({
-          message: `La fecha de inicio de la práctica debe ser al menos ${daysAfter} día(s) después de la fecha de vencimiento de la oportunidad (mín. ${minYmd}).`,
-        });
-      }
-    }
-
-    const tutorDoc = {
-      postulacionId: new mongoose.Types.ObjectId(postulacionId),
-      nombreTutor: String(body.nombreTutor).trim(),
-      apellidoTutor: String(body.apellidoTutor).trim(),
-      emailTutor: String(body.emailTutor).trim(),
-      cargoTutor: String(body.cargoTutor).trim(),
-      tipoIdentTutor: String(body.tipoIdentTutor).trim(),
-      arlEmpresa: body.arlEmpresa,
-      identificacionTutor: String(body.identificacionTutor).trim(),
-      fechaInicioPractica: fechaInicio,
-    };
-
-    const rawPrev = op.cierrePostulantesSeleccionados || [];
-    const prevIdStrs = rawPrev.map((x) => {
-      if (x == null) return "";
-      if (typeof x === "object" && x._id) return String(x._id);
-      return String(x);
-    }).filter(Boolean);
-    const mergedIdSet = new Set([...prevIdStrs, String(postulacionId)]);
-    const mergedIds = [...mergedIdSet].map((id) => new mongoose.Types.ObjectId(id));
-
-    const prevDatos = Array.isArray(op.cierreDatosTutor) ? op.cierreDatosTutor : [];
-    const mergedDatos = prevDatos.filter((d) => {
-      const pid = d.postulacionId;
-      const s = pid && typeof pid === "object" && pid._id ? String(pid._id) : String(pid || "");
-      return s !== String(postulacionId);
-    });
-    mergedDatos.push(tutorDoc);
-
-    await Opportunity.findByIdAndUpdate(
-      opportunityId,
-      {
-        $set: {
-          cierrePostulantesSeleccionados: mergedIds,
-          cierreDatosTutor: mergedDatos,
-        },
-      },
-      { runValidators: false }
-    );
-
-    const now = new Date();
-    await PostulacionOportunidad.updateOne(
-      { _id: postulacionId },
-      { $set: { estado: "seleccionado_empresa", seleccionadoAt: now } }
-    );
-
-    const ctxC = await loadPracticaPostulacionContext(postulacionId);
-    if (ctxC) {
-      await dispatchPracticaNotification(
-        "notificacion_resultados_postulacion_estudiantes",
-        {
-          ...ctxC.datos,
-          OBSERVACION:
-            "Ha sido seleccionado(a) en la oportunidad. Revise los siguientes pasos en la plataforma.",
-        },
-        studentOnlyRecipientContext(ctxC.postulantEmail),
-        {
-          opportunityId: String(opportunityId),
-          postulacionId: String(postulacionId),
-          source: "seleccionarPostulantePractica",
-        }
-      );
-    }
-
-    res.json({
-      message: "Postulante seleccionado correctamente",
-      estado: "seleccionado_empresa",
-      estadoLabel: "Seleccionado",
-    });
-  } catch (err) {
-    console.error("[Practica] seleccionarPostulantePractica:", err);
-    res.status(500).json({ message: err.message });
   }
 };
 
@@ -2972,6 +2342,131 @@ export const markApplicationDescargoHv = async (req, res) => {
   }
 };
 
+/** POST /opportunities/:id/applications/:postulacionId/seleccionar — Selección sin cerrar la oportunidad (PostulacionOportunidad): tutor + misma notificación que al cierre con contratación. */
+export const seleccionarPostulantePractica = async (req, res) => {
+  try {
+    const { id: opportunityId, postulacionId } = req.params;
+    const body = req.body || {};
+
+    const opportunity = await Opportunity.findById(opportunityId).select("tipo estado vacantes cierreDatosTutor").lean();
+    if (!opportunity) {
+      return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+    if (String(opportunity.tipo || "").toLowerCase() !== "practica") {
+      return res.status(400).json({ message: "Solo aplica a oportunidades de práctica." });
+    }
+    if (opportunity.estado !== "Activa") {
+      return res.status(400).json({ message: "Solo puede seleccionar postulantes cuando la oportunidad está Activa." });
+    }
+
+    const vacantes = Math.max(1, Number(opportunity.vacantes) || 1);
+    const countSeleccionados = await PostulacionOportunidad.countDocuments({
+      opportunity: opportunityId,
+      estado: "seleccionado_empresa",
+    });
+
+    const po = await PostulacionOportunidad.findOne({
+      _id: postulacionId,
+      opportunity: opportunityId,
+    });
+    if (!po) {
+      return res.status(404).json({ message: "Postulación no encontrada" });
+    }
+
+    if (po.estado === "rechazado") {
+      return res.status(400).json({ message: "No puede seleccionar un postulante rechazado." });
+    }
+    if (po.estado === "aceptado_estudiante") {
+      return res.status(400).json({ message: "Este postulante ya aceptó la práctica." });
+    }
+    if (po.estado === "seleccionado_empresa") {
+      return res.json({
+        message: "El postulante ya estaba seleccionado.",
+        estado: po.estado,
+        estadoLabel: "Seleccionado",
+      });
+    }
+
+    if (countSeleccionados >= vacantes) {
+      return res.status(400).json({
+        message: `No hay vacantes disponibles (máximo ${vacantes} seleccionado(s)).`,
+      });
+    }
+
+    const requiredTutorFields = [
+      "nombreTutor",
+      "apellidoTutor",
+      "emailTutor",
+      "cargoTutor",
+      "tipoIdentTutor",
+      "identificacionTutor",
+      "arlEmpresa",
+      "fechaInicioPractica",
+    ];
+    for (const field of requiredTutorFields) {
+      const value = body[field];
+      if (value == null || String(value).trim() === "") {
+        return res.status(400).json({ message: `El campo ${field} es obligatorio.` });
+      }
+    }
+
+    const now = new Date();
+    const fechaInicio = new Date(body.fechaInicioPractica);
+    if (Number.isNaN(fechaInicio.getTime())) {
+      return res.status(400).json({ message: "fechaInicioPractica no es una fecha válida." });
+    }
+
+    po.estado = "seleccionado_empresa";
+    po.seleccionadoAt = now;
+    await po.save();
+
+    const oppDoc = await Opportunity.findById(opportunityId);
+    if (oppDoc) {
+      const pid = po._id;
+      oppDoc.cierreDatosTutor = (oppDoc.cierreDatosTutor || []).filter(
+        (t) => t?.postulacionId && String(t.postulacionId) !== String(pid)
+      );
+      oppDoc.cierreDatosTutor.push({
+        postulacionId: pid,
+        nombreTutor: String(body.nombreTutor).trim(),
+        apellidoTutor: String(body.apellidoTutor).trim(),
+        emailTutor: String(body.emailTutor).trim(),
+        cargoTutor: String(body.cargoTutor).trim(),
+        tipoIdentTutor: String(body.tipoIdentTutor).trim(),
+        arlEmpresa: String(body.arlEmpresa).trim(),
+        identificacionTutor: String(body.identificacionTutor).trim(),
+        fechaInicioPractica: fechaInicio,
+      });
+      await oppDoc.save();
+    }
+
+    const obs =
+      "Ha sido seleccionado(a) por la entidad. Revise los siguientes pasos en la plataforma.";
+    const ctxC = await loadPracticaPostulacionContext(postulacionId);
+    if (ctxC) {
+      await dispatchPracticaNotification(
+        "notificacion_resultados_postulacion_estudiantes",
+        { ...ctxC.datos, OBSERVACION: obs },
+        studentOnlyRecipientContext(ctxC.postulantEmail),
+        {
+          opportunityId: String(opportunityId),
+          postulacionId: String(postulacionId),
+          source: "seleccionarPostulantePractica",
+        }
+      );
+    }
+
+    res.json({
+      message: "Postulante seleccionado correctamente.",
+      estado: "seleccionado_empresa",
+      estadoLabel: "Seleccionado",
+    });
+  } catch (error) {
+    console.error("[opportunities] seleccionarPostulantePractica:", error?.message || error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // Revisar/Seleccionar postulación
 export const reviewApplication = async (req, res) => {
   try {
@@ -3272,6 +2767,112 @@ export const rejectProgram = async (req, res) => {
       message: `Programa ${programa.program} rechazado correctamente`,
       opportunity: updatedOpportunity
     });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * RQ04_HU004 práctica autogestionada (líder): buscar perfil/HV por código estudiantil, usuario académico o correo.
+ * Query: `q` (obligatorio, mín. 2 caracteres).
+ */
+export const buscarPerfilParaAutogestionada = async (req, res) => {
+  try {
+    const q = String(req.query.q || req.query.query || "").trim();
+    if (q.length < 2) {
+      return res.status(400).json({ message: "Indique al menos 2 caracteres en q" });
+    }
+    const rx = new RegExp(escapeRegex(q), "i");
+    const or = [{ studentCode: rx }, { academicUser: rx }];
+
+    const users = await User.find({ email: rx }).select("_id").limit(20).lean();
+    const uids = users.map((u) => u._id);
+    if (uids.length) {
+      const postulants = await Postulant.find({ postulantId: { $in: uids } }).select("_id").lean();
+      const pids = postulants.map((p) => p._id);
+      if (pids.length) or.push({ postulantId: { $in: pids } });
+    }
+
+    const perfiles = await PostulantProfile.find({ $or: or })
+      .select("_id studentCode academicUser postulantId perfilCompleto filled")
+      .populate({
+        path: "postulantId",
+        select: "postulantId alternateEmail phone",
+        populate: { path: "postulantId", select: "name email" },
+      })
+      .sort({ studentCode: 1 })
+      .limit(25)
+      .lean();
+
+    const resultados = perfiles.map((p) => ({
+      perfilId: p._id,
+      studentCode: p.studentCode,
+      academicUser: p.academicUser ?? null,
+      perfilCompleto: !!p.perfilCompleto,
+      filled: !!p.filled,
+      postulante: p.postulantId
+        ? {
+            id: p.postulantId._id,
+            email: p.postulantId.postulantId?.email ?? null,
+            nombre: p.postulantId.postulantId?.name ?? null,
+            telefono: p.postulantId.phone ?? null,
+            alternateEmail: p.postulantId.alternateEmail ?? null,
+          }
+        : null,
+    }));
+
+    res.json({ resultados, total: resultados.length });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** Empresas elegibles para crear oferta de práctica (autogestionada). Query opcional `q` / `search`. */
+export const getEmpresasParaAutogestionada = async (req, res) => {
+  try {
+    const q = String(req.query.q || req.query.search || "").trim();
+    const filter = {
+      status: "active",
+      canCreateOpportunities: true,
+    };
+    if (q.length >= 2) {
+      filter.$or = [
+        { name: new RegExp(escapeRegex(q), "i") },
+        { commercialName: new RegExp(escapeRegex(q), "i") },
+        { nit: new RegExp(escapeRegex(q), "i") },
+      ];
+    }
+    const companies = await Company.find(filter)
+      .select("name commercialName nit status logo sector canCreateOpportunities")
+      .sort({ commercialName: 1, name: 1 })
+      .limit(200)
+      .lean();
+    res.json({ companies });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * Crea una oferta de práctica en nombre de la empresa (flujo autogestionado). Misma validación que POST /opportunities;
+ * fuerza `tipo: practica` (JSON o `body.data` JSON).
+ */
+export const crearPracticaAutogestionada = async (req, res) => {
+  try {
+    const nextBody = { ...req.body };
+    if (nextBody.data != null) {
+      try {
+        const d =
+          typeof nextBody.data === "string" ? JSON.parse(nextBody.data) : { ...nextBody.data };
+        d.tipo = "practica";
+        nextBody.data = typeof nextBody.data === "string" ? JSON.stringify(d) : d;
+      } catch {
+        return res.status(400).json({ message: "El campo data no es JSON válido" });
+      }
+    } else {
+      nextBody.tipo = "practica";
+    }
+    return createOpportunity({ ...req, body: nextBody }, res);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

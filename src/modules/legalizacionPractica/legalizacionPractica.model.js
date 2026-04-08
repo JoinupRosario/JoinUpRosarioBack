@@ -1,8 +1,6 @@
 import mongoose from "mongoose";
-import {
-  LEGALIZACION_ESTADOS,
-  DEFAULT_LEGALIZACION_ESTADO,
-} from "../../constants/domainEstados.js";
+
+const LEGALIZACION_ESTADOS = ["borrador", "en_revision", "aprobada", "rechazada", "en_ajuste"];
 
 /**
  * Legalización de práctica / pasantía (RQ04_HU004).
@@ -53,7 +51,7 @@ const legalizacionPracticaSchema = new mongoose.Schema(
     estado: {
       type: String,
       enum: LEGALIZACION_ESTADOS,
-      default: DEFAULT_LEGALIZACION_ESTADO,
+      default: "borrador",
       index: true,
     },
     /**

@@ -1,8 +1,14 @@
 import mongoose from "mongoose";
-import {
-  OPPORTUNITY_PRACTICE_ESTADOS,
-  DEFAULT_OPPORTUNITY_PRACTICE_ESTADO,
-} from "../../constants/domainEstados.js";
+
+const OPPORTUNITY_PRACTICE_ESTADOS = [
+  "Creada",
+  "En Revisión",
+  "Revisada",
+  "Activa",
+  "Rechazada",
+  "Cerrada",
+  "Vencida",
+];
 
 const opportunitySchema = new mongoose.Schema(
   {
@@ -192,7 +198,7 @@ const opportunitySchema = new mongoose.Schema(
     estado: {
       type: String,
       enum: OPPORTUNITY_PRACTICE_ESTADOS,
-      default: DEFAULT_OPPORTUNITY_PRACTICE_ESTADO,
+      default: "Creada",
     },
 
     // Fechas de cambio de estado
@@ -347,13 +353,6 @@ const opportunitySchema = new mongoose.Schema(
         default: null
       }
     }],
-
-    /** RQ04_HU004: práctica registrada por líder de práctica (autogestionada) para cargue de legalización. */
-    practicaAutogestionada: {
-      type: Boolean,
-      default: false,
-      index: true,
-    },
 
     // Usuario que creó la oportunidad
     creadoPor: {
