@@ -4,6 +4,7 @@
 import mongoose from "mongoose";
 import LegalizacionPractica from "./legalizacionPractica.model.js";
 import PostulacionOportunidad from "../opportunities/postulacionOportunidad.model.js";
+import Opportunity from "../opportunities/opportunity.model.js";
 import Postulant from "../postulants/models/postulants.schema.js";
 import DocumentPracticeDefinition from "../documentPracticeDefinition/documentPracticeDefinition.model.js";
 import EstudianteHabilitado from "../estudiantesHabilitados/estudianteHabilitado.model.js";
@@ -788,6 +789,37 @@ export const remitirRevisionLegalizacionPractica = async (req, res) => {
   }
 };
 
+/**
+ * Programa(s) del estudiante en listado admin: cruza `formacionAcademica[].program` de la oferta
+ * con los `ProfileEnrolledProgram` del perfil. Si no hay match pero hay programas cursando, usa el primero.
+ */
+function resolveProgramaListaAdminPractica(opp, enrolledRows) {
+  const rows = Array.isArray(enrolledRows) ? enrolledRows : [];
+  if (!rows.length) return null;
+  const fa = opp?.formacionAcademica;
+  const oppProgramKeys = new Set();
+  if (Array.isArray(fa)) {
+    for (const row of fa) {
+      const p = row?.program;
+      if (p != null && String(p).trim() !== "") oppProgramKeys.add(String(p).trim());
+    }
+  }
+  if (oppProgramKeys.size > 0) {
+    const names = [];
+    for (const e of rows) {
+      const pid = e.programId?._id || e.programId;
+      if (!pid) continue;
+      if (oppProgramKeys.has(String(pid))) {
+        const n = e.programId?.name || e.programId?.code;
+        if (n) names.push(String(n).trim());
+      }
+    }
+    if (names.length) return [...new Set(names)].join(", ");
+  }
+  const first = rows[0];
+  return first?.programId?.name || first?.programId?.code || null;
+}
+
 /* ─── Admin / coordinación ─── */
 
 export async function assertAdminLegalizacionAccess(req, postulacionId) {
@@ -821,7 +853,7 @@ export const getLegalizacionesPracticaAdmin = async (req, res) => {
         populate: [
           {
             path: "opportunity",
-            select: "nombreCargo periodo company",
+            select: "nombreCargo periodo company formacionAcademica",
             populate: [
               { path: "periodo", select: "codigo" },
               { path: "company", select: "name commercialName" },
@@ -837,7 +869,10 @@ export const getLegalizacionesPracticaAdmin = async (req, res) => {
     let rows = all.filter((l) => l.postulacionOportunidad);
 
     if (periodo) {
-      rows = rows.filter((l) => l.postulacionOportunidad?.opportunity?.periodo?.codigo === periodo);
+      const pNorm = String(periodo).trim();
+      rows = rows.filter(
+        (l) => String(l.postulacionOportunidad?.opportunity?.periodo?.codigo ?? "").trim() === pNorm
+      );
     }
     if (search) {
       const q = String(search).toLowerCase();
@@ -852,35 +887,104 @@ export const getLegalizacionesPracticaAdmin = async (req, res) => {
 
     const total = rows.length;
     const slice = rows.slice(skip, skip + limitNum);
-    const data = await Promise.all(
-      slice.map(async (l) => {
-        const po = l.postulacionOportunidad;
-        const sp = splitNombreCompleto(po?.postulant?.postulantId?.name);
-        const profileId = po.postulantProfile?._id ?? po.postulantProfile;
-        let programaRow = "—";
-        if (profileId) {
-          const enr = await ProfileEnrolledProgram.findOne({ profileId }).populate("programId", "name code").lean();
-          programaRow = enr?.programId?.name || enr?.programId?.code || "—";
-        }
-        return {
-          postulacionId: po._id,
-          opportunityId: po.opportunity?._id,
-          numeroIdentidad: po.postulantProfile?.studentCode,
-          nombre: sp.nombre,
-          apellido: sp.apellido,
-          programa: programaRow,
-          nombreCargo: po.opportunity?.nombreCargo,
-          periodo: po.opportunity?.periodo?.codigo,
-          empresa: po.opportunity?.company?.commercialName || po.opportunity?.company?.name,
-          estadoLegalizacion: l.estado,
-          estadoPostulacion: po.estado,
-        };
-      })
-    );
+
+    const profileIdsForSlice = [
+      ...new Set(
+        slice
+          .map((l) => l.postulacionOportunidad?.postulantProfile?._id || l.postulacionOportunidad?.postulantProfile)
+          .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
+          .map((id) => String(id))
+      ),
+    ].map((id) => new mongoose.Types.ObjectId(id));
+
+    const enrolledAll =
+      profileIdsForSlice.length > 0
+        ? await ProfileEnrolledProgram.find({ profileId: { $in: profileIdsForSlice } })
+            .populate("programId", "name code")
+            .sort({ _id: 1 })
+            .lean()
+        : [];
+    const enrolledByProfile = new Map();
+    for (const er of enrolledAll) {
+      const k = String(er.profileId);
+      if (!enrolledByProfile.has(k)) enrolledByProfile.set(k, []);
+      enrolledByProfile.get(k).push(er);
+    }
+
+    const data = slice.map((l) => {
+      const po = l.postulacionOportunidad;
+      const sp = splitNombreCompleto(po?.postulant?.postulantId?.name);
+      const profileId = po.postulantProfile?._id ?? po.postulantProfile;
+      const enrolledFor = profileId ? enrolledByProfile.get(String(profileId)) || [] : [];
+      const programaResolved = resolveProgramaListaAdminPractica(po.opportunity, enrolledFor);
+      const programaRow = programaResolved && String(programaResolved).trim() !== "" ? programaResolved : "—";
+      return {
+        postulacionId: po._id,
+        opportunityId: po.opportunity?._id,
+        numeroIdentidad: po.postulantProfile?.studentCode,
+        nombre: sp.nombre,
+        apellido: sp.apellido,
+        programa: programaRow,
+        nombreCargo: po.opportunity?.nombreCargo,
+        periodo: po.opportunity?.periodo?.codigo,
+        empresa: po.opportunity?.company?.commercialName || po.opportunity?.company?.name,
+        estadoLegalizacion: l.estado,
+        estadoPostulacion: po.estado,
+      };
+    });
 
     res.json({ data, total, page: parseInt(page, 10), limit: limitNum, totalPages: Math.max(1, Math.ceil(total / limitNum)) });
   } catch (err) {
     console.error("[LegalizacionPractica] getLegalizacionesPracticaAdmin:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * Períodos y estados presentes en legalizaciones (para filtros admin).
+ * Períodos: DISTINCT de codigo de periodo vía oferta de postulaciones aceptadas ligadas a legalizaciones.
+ */
+export const getMetaFiltrosLegalizacionesPracticaAdmin = async (_req, res) => {
+  try {
+    const estadosRaw = await LegalizacionPractica.distinct("estado");
+    const estados = estadosRaw
+      .filter((e) => e != null && String(e).trim() !== "")
+      .sort((a, b) => String(a).localeCompare(String(b), "es"));
+
+    const poIdsRaw = await LegalizacionPractica.distinct("postulacionOportunidad");
+    const poIds = poIdsRaw.filter((id) => id != null && mongoose.Types.ObjectId.isValid(String(id)));
+    if (poIds.length === 0) {
+      return res.json({ periodos: [], estados });
+    }
+
+    const postulaciones = await PostulacionOportunidad.find({
+      _id: { $in: poIds },
+      estado: "aceptado_estudiante",
+    })
+      .select("opportunity")
+      .lean();
+
+    const oppIds = [...new Set(postulaciones.map((p) => p.opportunity).filter(Boolean))];
+    if (oppIds.length === 0) {
+      return res.json({ periodos: [], estados });
+    }
+
+    const opps = await Opportunity.find({ _id: { $in: oppIds } })
+      .populate("periodo", "codigo")
+      .select("periodo")
+      .lean();
+
+    const periodos = [
+      ...new Set(
+        opps
+          .map((o) => (o.periodo?.codigo != null ? String(o.periodo.codigo).trim() : ""))
+          .filter((c) => c !== "")
+      ),
+    ].sort((a, b) => String(a).localeCompare(String(b), "es"));
+
+    res.json({ periodos, estados });
+  } catch (err) {
+    console.error("[LegalizacionPractica] getMetaFiltrosLegalizacionesPracticaAdmin:", err);
     res.status(500).json({ message: err.message });
   }
 };

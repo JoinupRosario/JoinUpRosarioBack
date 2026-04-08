@@ -89,6 +89,25 @@ const POPULATE_FIELDS = [
   { path: "cierrePostulantesSeleccionados", populate: { path: "postulant", populate: { path: "postulantId", select: "name" } } },
 ];
 
+/**
+ * Nombres de programa(s) del estudiante que coinciden con los programas permitidos por la oferta MTM
+ * (perfil con el que aplicó ∩ programas de la oportunidad). No lista todos los programas de la oferta.
+ */
+function programaCoincidenteAlumnoOportunidadMTM(opp, profileId, enrolledByProfile) {
+  if (!opp?.programas?.length || !profileId) return null;
+  const oppIds = new Set(opp.programas.map((p) => String(p._id || p)));
+  const rows = enrolledByProfile.get(String(profileId)) || [];
+  const names = [];
+  for (const e of rows) {
+    const pid = e.programId?._id || e.programId;
+    if (!pid || !oppIds.has(String(pid))) continue;
+    const name = e.programId?.name || e.programId?.code;
+    if (name) names.push(String(name).trim());
+  }
+  if (!names.length) return null;
+  return [...new Set(names)].join(", ");
+}
+
 /** GET /oportunidades-mtm/meta/distinct-estados — valores de `estado` presentes en BD. */
 export const getDistinctEstadosMTM = async (req, res) => {
   try {
@@ -985,13 +1004,27 @@ export const getMisAceptadasMTM = async (req, res) => {
       planAprobadoByPost[String(pl.postulacionMTM)] = pl.estado === "aprobado";
     });
 
+    const profileIdsRaw = list.map((p) => p.postulantProfile?._id || p.postulantProfile).filter(Boolean);
+    const profileIdsUnique = [...new Set(profileIdsRaw.map((id) => String(id)))].map((id) => new mongoose.Types.ObjectId(id));
+    const enrolledRowsAceptadas =
+      profileIdsUnique.length > 0
+        ? await ProfileEnrolledProgram.find({ profileId: { $in: profileIdsUnique } })
+            .populate("programId", "name code")
+            .lean()
+        : [];
+    const enrolledByProfileAceptadas = new Map();
+    for (const e of enrolledRowsAceptadas) {
+      const k = String(e.profileId);
+      if (!enrolledByProfileAceptadas.has(k)) enrolledByProfileAceptadas.set(k, []);
+      enrolledByProfileAceptadas.get(k).push(e);
+    }
+
     const nombreCompleto = postulant.postulantId?.name || "";
 
     const data = list.map((p) => {
       const opp = p.oportunidadMTM;
-      const programaOportunidad = opp?.programas?.length
-        ? opp.programas.map((prog) => prog?.name).filter(Boolean).join(", ") || opp.programas[0]?.name
-        : null;
+      const profileId = p.postulantProfile?._id || p.postulantProfile;
+      const programaOportunidad = programaCoincidenteAlumnoOportunidadMTM(opp, profileId, enrolledByProfileAceptadas);
       return {
         _id: p._id,
         oportunidadId: opp?._id,
@@ -2048,11 +2081,34 @@ export const getLegalizacionesMTMAdmin = async (req, res) => {
       .lean();
 
     const postulacionesValidas = legs.filter((l) => l.postulacionMTM != null);
+    const profileIds = [
+      ...new Set(
+        postulacionesValidas
+          .map((l) => l.postulacionMTM?.postulantProfile?._id || l.postulacionMTM?.postulantProfile)
+          .filter(Boolean)
+          .map((id) => String(id))
+      ),
+    ].map((id) => new mongoose.Types.ObjectId(id));
+
+    const enrolledRows =
+      profileIds.length > 0
+        ? await ProfileEnrolledProgram.find({ profileId: { $in: profileIds } })
+            .populate("programId", "name code")
+            .lean()
+        : [];
+    const enrolledByProfile = new Map();
+    for (const e of enrolledRows) {
+      const k = String(e.profileId);
+      if (!enrolledByProfile.has(k)) enrolledByProfile.set(k, []);
+      enrolledByProfile.get(k).push(e);
+    }
+
     let list = postulacionesValidas.map((l) => {
       const po = l.postulacionMTM;
       const opp = po?.oportunidadMTM;
       const nombreCompleto = po?.postulant?.postulantId?.name || "";
-      const programaOportunidad = opp?.programas?.length ? opp.programas.map((p) => p?.name).filter(Boolean).join(", ") : null;
+      const profileId = po?.postulantProfile?._id || po?.postulantProfile;
+      const programaAlumno = programaCoincidenteAlumnoOportunidadMTM(opp, profileId, enrolledByProfile);
       const coordinador = opp?.profesorResponsable
         ? [opp.profesorResponsable.nombres, opp.profesorResponsable.apellidos].filter(Boolean).join(" ")
         : null;
@@ -2063,7 +2119,7 @@ export const getLegalizacionesMTMAdmin = async (req, res) => {
         numeroIdentidad: po?.postulantProfile?.studentCode ?? null,
         nombre: nombreCompleto.split(" ").slice(0, -1).join(" ") || nombreCompleto,
         apellido: nombreCompleto.split(" ").slice(-1)[0] || "",
-        programa: programaOportunidad,
+        programa: programaAlumno,
         codigoMTM: opp?._id?.toString?.()?.slice(-8) ?? null,
         nombreMTM: opp?.nombreCargo ?? null,
         periodo: periodoCodigo,
@@ -2120,14 +2176,24 @@ async function getLegalizacionMTMAdminByPostulacion(postulacionId) {
   if (!leg) return null;
   const opp = po.oportunidadMTM;
   const profileId = po.postulantProfile?._id ?? null;
-  const [postulantUser, postulantDatos, enrolledProgram, cedulaSupport] = await Promise.all([
+  const [postulantUser, postulantDatos, enrolledProgramsList, cedulaSupport] = await Promise.all([
     Postulant.findById(po.postulant).populate("postulantId", "name email").lean(),
     Postulant.findById(po.postulant).select("phone address alternateEmail cityResidenceId zonaResidencia").populate("cityResidenceId", "name").lean(),
     profileId
-      ? ProfileEnrolledProgram.findOne({ profileId }).populate("programId", "name code").populate({ path: "programFacultyId", select: "facultyId", populate: { path: "facultyId", select: "name" } }).lean()
-      : null,
+      ? ProfileEnrolledProgram.find({ profileId })
+          .populate("programId", "name code")
+          .populate({ path: "programFacultyId", select: "facultyId", populate: { path: "facultyId", select: "name" } })
+          .lean()
+      : [],
     profileId ? ProfileSupport.findOne({ profileId }).populate("attachmentId", "name").lean() : null,
   ]);
+  const oppProgramIds = new Set((opp.programas || []).map((p) => String(p._id || p)));
+  const enrolledProgram =
+    Array.isArray(enrolledProgramsList) && enrolledProgramsList.length
+      ? enrolledProgramsList.find(
+          (e) => e.programId && oppProgramIds.has(String(e.programId._id || e.programId))
+        ) || enrolledProgramsList[0]
+      : null;
   const cedulaAttachment =
     cedulaSupport?.attachmentId != null
       ? { _id: cedulaSupport.attachmentId._id, name: cedulaSupport.attachmentId.name || "Documento de identidad" }

@@ -12,6 +12,7 @@ import {
   deleteDocumentoLegalizacionPractica,
   remitirRevisionLegalizacionPractica,
   getLegalizacionesPracticaAdmin,
+  getMetaFiltrosLegalizacionesPracticaAdmin,
   getEstadisticasLegalizacionPractica,
   getLegalizacionPracticaAdmin,
   getDocumentoLegalizacionPracticaUrlAdmin,
@@ -191,6 +192,11 @@ router.delete(
 router.get("/mis-aceptadas", authorizeRoles("student"), getMisLegalizacionesPractica);
 
 router.get("/admin/list", authorizeRoles("admin", "superadmin", "leader"), getLegalizacionesPracticaAdmin);
+router.get(
+  "/admin/meta/filtros",
+  authorizeRoles("admin", "superadmin", "leader"),
+  getMetaFiltrosLegalizacionesPracticaAdmin
+);
 router.get("/admin/estadisticas", authorizeRoles("admin", "superadmin", "leader"), getEstadisticasLegalizacionPractica);
 router.get(
   "/admin/:postulacionId/acuerdo-vinculacion/pdf",

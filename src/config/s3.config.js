@@ -61,6 +61,16 @@ export function normalizeS3Key(key) {
   k = k.replace(/\\/g, "/");
   k = k.replace(/\/+/g, "/");
   if (k.startsWith("/")) k = k.slice(1);
+  /** Prefijos legado MySQL (adjuntos postulant/company) pueden venir con distinta capitalización. */
+  k = k.replace(/^postulant\//i, "postulant/");
+  k = k.replace(/^company\//i, "company/");
+  if (k.includes("%")) {
+    try {
+      k = decodeURIComponent(k);
+    } catch {
+      /* mantener k */
+    }
+  }
   return k;
 }
 
@@ -99,7 +109,8 @@ async function objectExistsInBucket(client, bucket, key) {
 
 /**
  * Elige el bucket donde existe el objeto (lectura/borrado).
- * Para `company/...` y `postulant/...` prueba legacy y luego el bucket principal (migraciones parciales).
+ * Para `company/...` y `postulant/...` (p. ej. legalizaciones MTM migradas con filepath legado) prueba
+ * primero `AWS_S3_BUCKET_DOC_VIEJO` y luego el bucket principal (migraciones parciales o copias).
  * @returns {Promise<string|null>} null si la clave no existe en ningún bucket configurado.
  */
 export async function resolveBucketForRead(key) {
@@ -110,6 +121,7 @@ export async function resolveBucketForRead(key) {
   if (!isLegacyAttachmentKeyPrefix(normalized)) {
     return resolveBucketForKey(normalized);
   }
+  /** Sin bucket legacy configurado: solo el principal (objetos copiados al bucket nuevo). */
   if (!legacyBucket) {
     return resolveBucketForKey(normalized);
   }

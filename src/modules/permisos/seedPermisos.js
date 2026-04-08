@@ -235,6 +235,8 @@ const permisosIniciales = [
   { codigo: 'DASH_POS', nombre: 'Ver gráfica Postulaciones por Mes en Dashboard', modulo: 'DASHBOARD' },
   { codigo: 'DASH_EDP', nombre: 'Ver gráfica Estado de Prácticas en Dashboard', modulo: 'DASHBOARD' },
   { codigo: 'DASH_TEN', nombre: 'Ver gráfica Tendencia de Postulaciones en Dashboard', modulo: 'DASHBOARD' },
+  /** Pestaña y métricas MTM en el inicio admin (indicadores de monitorías/tutorías/mentorías). */
+  { codigo: 'DASH_MON', nombre: 'Ver dashboard de monitorías en el inicio (pestaña e indicadores MTM)', modulo: 'DASHBOARD' },
 
   // ========== MÓDULO GESTIÓN DE PERIODOS (186-191) ==========
   { codigo: 'AMGP', nombre: 'Acceso al módulo de Gestión de Periodos', modulo: 'PERIODOS' },
