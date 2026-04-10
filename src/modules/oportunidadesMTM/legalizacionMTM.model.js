@@ -1,9 +1,23 @@
 import mongoose from "mongoose";
 
+const legalizacionHistorialEntrySchema = new mongoose.Schema(
+  {
+    estadoAnterior: { type: String, default: null },
+    estadoNuevo: { type: String, default: null },
+    usuario: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    fecha: { type: Date, default: Date.now },
+    detalle: { type: String, default: "" },
+    ip: { type: String, default: null },
+  },
+  { _id: false }
+);
+
 /**
  * Legalización MTM (RQ04_HU004). Una por postulación aceptada.
- * Estado: borrador → en_revision → aprobada | rechazada | en_ajuste (coordinador pide ajustes).
+ * Estado: creada (legado UrJobs CREATED/DRAFT) → en_revision → aprobada | rechazada | en_ajuste.
  * Por documento: estadoDocumento pendiente | aprobado | rechazado + motivoRechazo (revisión coordinador).
+ *
+ * `historial`: migrado desde monitoring_legalized + change_status_monitoring_legalized (migrateOpportunitiesFromMySQL.js).
  */
 const legalizacionMTMSchema = new mongoose.Schema(
   {
@@ -16,14 +30,15 @@ const legalizacionMTMSchema = new mongoose.Schema(
     },
     estado: {
       type: String,
-      enum: ["borrador", "en_revision", "aprobada", "rechazada", "en_ajuste"],
-      default: "borrador",
+      enum: ["creada", "en_revision", "aprobada", "rechazada", "en_ajuste"],
+      default: "creada",
       index: true,
     },
     eps: { type: mongoose.Schema.Types.ObjectId, ref: "items", default: null },
     tipoCuenta: { type: mongoose.Schema.Types.ObjectId, ref: "items", default: null },
     /** Tipo de cuenta directo: "Ahorros" | "Corriente" (sin depender de lista parametrizada). */
     tipoCuentaValor: { type: String, enum: ["Ahorros", "Corriente"], default: null },
+    /** Ítem catálogo bancos: `listId` L_FINANCIAL_BANK (Gestión de parámetros → Bancos). */
     banco: { type: mongoose.Schema.Types.ObjectId, ref: "items", default: null },
     numeroCuenta: { type: String, trim: true, default: null },
     /**
@@ -39,6 +54,10 @@ const legalizacionMTMSchema = new mongoose.Schema(
     aprobadoAt: { type: Date, default: null },
     rechazadoAt: { type: Date, default: null },
     rechazoMotivo: { type: String, default: null },
+    historial: {
+      type: [legalizacionHistorialEntrySchema],
+      default: [],
+    },
   },
   { timestamps: true }
 );

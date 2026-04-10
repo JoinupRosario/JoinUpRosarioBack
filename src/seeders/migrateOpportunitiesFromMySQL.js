@@ -15,6 +15,7 @@
  * - document_monitoring
  * - monitoring_plan
  * - monitoring_plan_schedule
+ * - monitoring_activity_log (+ tracing_monitoring para ámbito por legalización)
  *
  * Archivo opcional de filas MySQL (auditoría / respaldo, no sustituye colecciones de negocio):
  * - Fase 11 opcional (**desactivada por defecto**): si `MIGRATION_MYSQL_DOMAIN_ARCHIVE=1`, copia filas de
@@ -60,12 +61,16 @@
  * - opportunity_programs, opportunity_language + academic_practice_opportunity_language → $set en Opportunity/MTM
  * - document_practice → objeto documentos dentro de una LegalizacionPractica
  * - document_monitoring → objeto documentos dentro de una LegalizacionMTM
- * - monitoring_plan_schedule → muchos SeguimientoMTM (sin índice único que impida varias filas)
+ * - monitoring_plan_schedule → muchos SeguimientoMTM (cronograma planificado; sin índice único)
+ * - monitoring_activity_log → SeguimientoMTM adicionales (ejecución / bitácora legado; scope mtm_activity_log;
+ *   `first_attachment` / `second_attachment` → documentoSoporte; re-ejecución actualiza filas ya mapeadas)
  *
  * Empalme con producción (sin “normalizar” encima de lo existente):
  * - reconcileExistingMappings() arma claves naturales en memoria desde Mongo ya guardado y solo
  *   registra en legacy_entity_mappings / salta creación si ya existe equivalencia.
- * - No ejecuta updates masivos sobre oportunidades o postulaciones ya existentes.
+ * - No ejecuta updates masivos sobre oportunidades o postulaciones ya existentes, salvo la fase opcional
+ *   que enlaza `monitoring_legalized.user_coordinator` (MySQL user.id) con `User.mysqlId` → `UserAdministrativo`
+ *   y hace `$set` de `OportunidadMTM.profesorResponsable` (idempotente; conviene re-ejecutar tras sincronizar usuarios admin).
  *
  * Notas:
  * - Como algunos esquemas destino no tienen mysqlId, se usa la colección
@@ -82,6 +87,11 @@
  * Opcional — últimas N oportunidades por id: MIGRATION_RECENT_OPPORTUNITIES_FIRST=1 (requiere N>0).
  * Opcional — foco por ids MySQL: MIGRATION_FOCUS_PRACTICE_OPP_IDS=1,2,3 y/o MIGRATION_FOCUS_MTM_OPP_IDS=4,5
  *   (encadena postulaciones, legalizaciones, planes y cronograma solo para esos opportunity.id).
+ * Opcional — manifiesto para revertir después: por defecto se escribe `.migration-runs/run-<RUN_ID>.json` al terminar OK.
+ *   MIGRATION_SAVE_ROLLBACK_MANIFEST=0 — no guardar manifiesto.
+ * Opcional — revertir en la misma corrida tras éxito: MIGRATION_REVERT_AFTER_SUCCESS=1
+ *   (borra solo documentos **creados** en esta corrida; ver rollbackCreatedDocuments).
+ * Revertir manual: `npm run migrate:opportunities:revert -- <runId>` (runId = el de la línea RESULTADO / manifiesto).
  * Opcional — saltar ramas: MIGRATION_SKIP_PRACTICE_OPPORTUNITIES_PIPELINE=1 / MIGRATION_SKIP_MTM_OPPORTUNITIES_PIPELINE=1
  * Opcional — no rellenar historialEstados desde change_status_opportunity ni el backfill desde opportunity.status:
  *   MIGRATION_SKIP_OPPORTUNITY_STATUS_HISTORY=1
@@ -113,6 +123,8 @@
 
 import crypto from "crypto";
 import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import connectDB from "../config/db.js";
@@ -140,6 +152,7 @@ import PostulantProfile from "../modules/postulants/models/profile/profile.schem
 import ProfileCv from "../modules/postulants/models/profile/profileCv.schema.js";
 import Attachment from "../modules/shared/attachment/attachment.schema.js";
 import User from "../modules/users/user.model.js";
+import UserAdministrativo from "../modules/usersAdministrativos/userAdministrativo.model.js";
 import DocumentPracticeDefinition from "../modules/documentPracticeDefinition/documentPracticeDefinition.model.js";
 import DocumentMonitoringDefinition from "../modules/documentMonitoringDefinition/documentMonitoringDefinition.model.js";
 
@@ -152,9 +165,14 @@ import {
   mapMysqlChangeStatusLegalizedToLegalizacionEstado,
   mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado,
   mapMysqlMonitoringPlanStatusToPlanTrabajoMtmEstado,
+  mapMysqlMonitoringActivityLogStatusToSeguimientoMtmEstado,
   mapMysqlLegalizacionDocumentoEstado,
   defaultEstadoSeguimientoMtmNuevo,
 } from "./mysqlChangeStatusMappers.js";
+import {
+  comentariosFromMysqlActivityLogRow,
+  documentoSoporteFromActivityLogRow,
+} from "./mtmActivityLogSeguimiento.helpers.js";
 
 dotenv.config();
 
@@ -167,6 +185,7 @@ const LEGACY_SCOPE = Object.freeze({
   MTM_LEGALIZATION: "mtm_legalization",
   MTM_PLAN: "mtm_plan",
   MTM_PLAN_SCHEDULE: "mtm_plan_schedule",
+  MTM_ACTIVITY_LOG: "mtm_activity_log",
 });
 
 const legacyEntityMappingSchema = new mongoose.Schema(
@@ -237,6 +256,7 @@ const OPPORTUNITY_MYSQL_ARCHIVE_TABLES = Object.freeze([
   { table: "document_monitoring", pk: ["document_monitoring_definition_id", "monitoring_legalized_id"], oppCols: [] },
   { table: "monitoring_plan", pk: ["id"], oppCols: ["study_working_id"], postCols: ["postulant_id"] },
   { table: "monitoring_plan_schedule", pk: ["id"], oppCols: [] },
+  { table: "monitoring_activity_log", pk: ["activity_log_id"], oppCols: [] },
 ]);
 
 const BATCH_SIZE = Number(process.env.MIGRATION_BATCH_SIZE || 500);
@@ -247,6 +267,11 @@ const INTER_BATCH_SLEEP_MS = Math.max(0, Math.floor(Number(process.env.MIGRATION
 const MONGO_RETRIES = Number(process.env.MIGRATION_MONGO_RETRIES || 8);
 const MONGO_RETRY_BASE_MS = Number(process.env.MIGRATION_MONGO_RETRY_BASE_MS || 2500);
 const RUN_ID = `${new Date().toISOString()}__${crypto.randomBytes(4).toString("hex")}`;
+
+const __migrateDir = path.dirname(fileURLToPath(import.meta.url));
+const MIGRATION_RUNS_DIR = path.join(__migrateDir, "..", "..", ".migration-runs");
+const MIGRATION_SAVE_ROLLBACK_MANIFEST = process.env.MIGRATION_SAVE_ROLLBACK_MANIFEST !== "0";
+const MIGRATION_REVERT_AFTER_SUCCESS = process.env.MIGRATION_REVERT_AFTER_SUCCESS === "1";
 
 /**
  * Tope de filas por consulta MySQL. 0 = sin límite (migración completa por defecto).
@@ -949,13 +974,16 @@ function buildHistorialLegalizacionPracticaFromMysql(rows, maps, defaultUserId) 
     ]
       .filter(Boolean)
       .join(" | ");
-    const legado = `MySQL ${str(getRowCol(row, "status_legalized_before"))} → ${str(getRowCol(row, "status_legalized_after"))}`;
+    const antesRaw = str(getRowCol(row, "status_legalized_before")) || "—";
+    const despuesRaw = str(getRowCol(row, "status_legalized_after")) || "—";
+    const legado = `MySQL: ${antesRaw} → ${despuesRaw}`;
+    const detalle = [obs, legado].filter(Boolean).join(" · ");
     out.push({
       estadoAnterior: antes,
       estadoNuevo: despues,
       usuario: resolveUserIdFromMysqlUserId(maps, getRowCol(row, "user_id"), defaultUserId),
       fecha: date(getRowCol(row, "change_status_date")) || new Date(),
-      detalle: obs || legado,
+      detalle,
       ip: null,
     });
   }
@@ -976,17 +1004,39 @@ function buildHistorialLegalizacionMtmFromMysql(rows, maps, defaultUserId) {
     ]
       .filter(Boolean)
       .join(" | ");
-    const legado = `MySQL ${str(getRowCol(row, "status_legalized_before"))} → ${str(getRowCol(row, "status_legalized_after"))}`;
+    const antesRaw = str(getRowCol(row, "status_legalized_before")) || "—";
+    const despuesRaw = str(getRowCol(row, "status_legalized_after")) || "—";
+    const legado = `MySQL: ${antesRaw} → ${despuesRaw}`;
+    const detalle = [obs, legado].filter(Boolean).join(" · ");
     out.push({
       estadoAnterior: antes,
       estadoNuevo: despues,
       usuario: resolveUserIdFromMysqlUserId(maps, getRowCol(row, "user_id"), defaultUserId),
       fecha: date(getRowCol(row, "change_status_date")) || new Date(),
-      detalle: obs || legado,
+      detalle,
       ip: null,
     });
   }
   return out;
+}
+
+function historialLegalEntryKey(e) {
+  const f = e?.fecha ? new Date(e.fecha).getTime() : 0;
+  return `${f}|${e.estadoAnterior ?? ""}|${e.estadoNuevo ?? ""}|${String(e.detalle || "").slice(0, 160)}`;
+}
+
+function mergeHistorialLegalizacionMtm(prev, fromChanges) {
+  const merged = Array.isArray(prev) ? [...prev] : [];
+  const seen = new Set(merged.map(historialLegalEntryKey));
+  for (const e of fromChanges) {
+    const k = historialLegalEntryKey(e);
+    if (!seen.has(k)) {
+      merged.push(e);
+      seen.add(k);
+    }
+  }
+  merged.sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+  return merged;
 }
 
 function buildHistorialPlanTrabajoPracticaFromMysqlRows(rows, fuenteTabla, maps, defaultUserId) {
@@ -1251,8 +1301,12 @@ async function migrateLegacyDetailedMirrorHistoriales(maps, stats) {
     const mongoId = getLegacyMongoId(maps, LEGACY_SCOPE.MTM_LEGALIZATION, mlId);
     if (!mongoId) return;
     try {
-      const historial = buildHistorialLegalizacionMtmFromMysql(rows, maps, defaultUserId);
-      if (!historial.length) return;
+      const fromChanges = buildHistorialLegalizacionMtmFromMysql(rows, maps, defaultUserId);
+      if (!fromChanges.length) return;
+      const doc = await withMongoRetry(`LegalizacionMTM.findOne historial ml=${mlId}`, () =>
+        LegalizacionMTM.findById(mongoId).select("historial").lean()
+      );
+      const historial = mergeHistorialLegalizacionMtm(doc?.historial, fromChanges);
       await withMongoRetry(`LegalizacionMTM.historial ml=${mlId}`, () =>
         LegalizacionMTM.updateOne({ _id: mongoId }, { $set: { historial } })
       );
@@ -1617,6 +1671,7 @@ async function preloadMaps() {
     mtmDocDefs,
     legacyRows,
     cvs,
+    userAdministrativoRows,
   ] = await withMongoRetry("preloadMaps", () =>
     Promise.all([
       Company.find({ mysqlId: { $exists: true } }).select("_id mysqlId").lean(),
@@ -1633,6 +1688,7 @@ async function preloadMaps() {
       DocumentMonitoringDefinition.find({ mysqlId: { $exists: true } }).select("_id mysqlId").lean(),
       LegacyEntityMapping.find({}).select("scope legacyId mongoId meta").lean(),
       ProfileCv.find({}).select("profileId attachmentId").lean(),
+      UserAdministrativo.find({}).select("_id user").lean(),
     ])
   );
 
@@ -1656,6 +1712,25 @@ async function preloadMaps() {
       cvs.map((r) => [String(r.attachmentId), String(r.profileId)])
     ),
   };
+
+  const adminUserRefs = [...new Set(userAdministrativoRows.map((a) => a.user).filter(Boolean))];
+  const usersBridgingAdmin =
+    adminUserRefs.length > 0
+      ? await withMongoRetry("User.find (puente UserAdministrativo ↔ mysqlId legado)", () =>
+          User.find({ _id: { $in: adminUserRefs }, mysqlId: { $exists: true, $ne: null } })
+            .select("_id mysqlId")
+            .lean()
+        )
+      : [];
+  const mongoUserIdToMysql = new Map(usersBridgingAdmin.map((u) => [String(u._id), num(u.mysqlId)]));
+  const userAdministrativoByLegacyUserMysqlId = new Map();
+  for (const ua of userAdministrativoRows) {
+    if (!ua.user) continue;
+    const mid = mongoUserIdToMysql.get(String(ua.user));
+    if (mid == null || !Number.isFinite(mid) || mid <= 0) continue;
+    if (!userAdministrativoByLegacyUserMysqlId.has(mid)) userAdministrativoByLegacyUserMysqlId.set(mid, ua._id);
+  }
+  maps.userAdministrativoByLegacyUserMysqlId = userAdministrativoByLegacyUserMysqlId;
 
   return maps;
 }
@@ -1781,8 +1856,8 @@ function trackCreated(ctx, key, id) {
   ctx[key].push(id);
 }
 
-async function rollbackCreatedDocuments(ctx) {
-  console.log(`\n↩️  Iniciando rollback de la corrida ${RUN_ID}...`);
+async function rollbackCreatedDocuments(ctx, runIdForMeta = RUN_ID) {
+  console.log(`\n↩️  Iniciando rollback de la corrida ${runIdForMeta}...`);
   await withMongoRetry("rollback SeguimientoMTM", () =>
     SeguimientoMTM.deleteMany({ _id: { $in: ctx.mtmSchedule } })
   );
@@ -1808,12 +1883,92 @@ async function rollbackCreatedDocuments(ctx) {
     Opportunity.deleteMany({ _id: { $in: ctx.practiceOpportunities } })
   );
   await withMongoRetry("rollback LegacyEntityMapping", () =>
-    LegacyEntityMapping.deleteMany({ "meta.runId": RUN_ID })
+    LegacyEntityMapping.deleteMany({ "meta.runId": runIdForMeta })
   );
   await withMongoRetry("rollback OpportunityStatusChangeLog", () =>
-    OpportunityStatusChangeLog.deleteMany({ "meta.runId": RUN_ID })
+    OpportunityStatusChangeLog.deleteMany({ "meta.runId": runIdForMeta })
   );
   console.log("✅ Rollback completado.");
+}
+
+function idsToStrings(ids) {
+  return (ids || []).filter(Boolean).map((id) => String(id));
+}
+
+function printMigrationPreflight() {
+  const mysqlHost = process.env.MYSQL_HOST || "127.0.0.1";
+  const mysqlPort = process.env.MYSQL_PORT || "3306";
+  const mysqlDb = process.env.MYSQL_DATABASE || "tenant-1";
+  const lines = [
+    "",
+    "======================================================================",
+    "  RESUMEN PREVIO — migrateOpportunitiesFromMySQL.js",
+    "======================================================================",
+    "  Qué hará esta ejecución:",
+    `  • Leerá MySQL en ${mysqlHost}:${mysqlPort}, base \"${mysqlDb}\".`,
+    "  • Escribirá en MongoDB según MONGO_URI (oportunidades, postulaciones, legalizaciones, planes, seguimientos MTM/práctica, mapeos legacy).",
+    `  • Pipeline práctica: ${SKIP_PRACTICE_OPPORTUNITIES_PIPELINE ? "OMITIDO" : "ACTIVO"}${FOCUS_PRACTICE_OPP_IDS?.length ? ` — foco opportunity.id = [${FOCUS_PRACTICE_OPP_IDS.join(", ")}]` : ""}.`,
+    `  • Pipeline MTM (monitoría): ${SKIP_MTM_OPPORTUNITIES_PIPELINE ? "OMITIDO" : "ACTIVO"}${FOCUS_MTM_OPP_IDS?.length ? ` — foco opportunity.id = [${FOCUS_MTM_OPP_IDS.join(", ")}]` : ""}.`,
+    `  • Tras terminar bien: ${MIGRATION_SAVE_ROLLBACK_MANIFEST ? "guardará manifiesto .migration-runs/run-<RUN_ID>.json para poder revertir." : "NO guardará manifiesto (MIGRATION_SAVE_ROLLBACK_MANIFEST=0)."}`,
+    `  • ${MIGRATION_REVERT_AFTER_SUCCESS ? "Tras el resumen, BORRARÁ lo insertado en esta corrida (MIGRATION_REVERT_AFTER_SUCCESS=1)." : "No borrará al final. Para revertir después: npm run migrate:opportunities:revert -- <runId>"}`,
+    "  • Si ocurre un error: rollback automático de los mismos inserts rastreados en esta corrida.",
+    "",
+    "  Requisitos: catálogos ya migrados en Mongo (empresas, postulantes, ítems, periodos, programas, adjuntos, definiciones de documentos).",
+    "======================================================================",
+    "",
+  ];
+  console.log(lines.join("\n"));
+}
+
+function writeRollbackManifest(rollbackCtx, stats, runId) {
+  if (!MIGRATION_SAVE_ROLLBACK_MANIFEST) return null;
+  try {
+    fs.mkdirSync(MIGRATION_RUNS_DIR, { recursive: true });
+  } catch (e) {
+    migrationLog(`No se pudo crear ${MIGRATION_RUNS_DIR}: ${e.message}`, { useStderr: true });
+    return null;
+  }
+  const manifest = {
+    version: 1,
+    runId,
+    savedAt: new Date().toISOString(),
+    note:
+      "Incluye solo ObjectIds insertados en esta corrida. Las actualizaciones (p. ej. historial en documentos ya existentes) no se deshacen con este script.",
+    envSnapshot: {
+      MIGRATION_FOCUS_PRACTICE_OPP_IDS: process.env.MIGRATION_FOCUS_PRACTICE_OPP_IDS || "",
+      MIGRATION_FOCUS_MTM_OPP_IDS: process.env.MIGRATION_FOCUS_MTM_OPP_IDS || "",
+      MIGRATION_SKIP_PRACTICE_OPPORTUNITIES_PIPELINE: String(SKIP_PRACTICE_OPPORTUNITIES_PIPELINE),
+      MIGRATION_SKIP_MTM_OPPORTUNITIES_PIPELINE: String(SKIP_MTM_OPPORTUNITIES_PIPELINE),
+    },
+    createdIds: {
+      practiceOpportunities: idsToStrings(rollbackCtx.practiceOpportunities),
+      mtmOpportunities: idsToStrings(rollbackCtx.mtmOpportunities),
+      practiceApplications: idsToStrings(rollbackCtx.practiceApplications),
+      mtmApplications: idsToStrings(rollbackCtx.mtmApplications),
+      practiceLegalizations: idsToStrings(rollbackCtx.practiceLegalizations),
+      mtmLegalizations: idsToStrings(rollbackCtx.mtmLegalizations),
+      mtmPlans: idsToStrings(rollbackCtx.mtmPlans),
+      mtmSchedule: idsToStrings(rollbackCtx.mtmSchedule),
+    },
+    statsCreated: {
+      practiceOpportunities: stats.practiceOpportunitiesCreated,
+      mtmOpportunities: stats.mtmOpportunitiesCreated,
+      practiceApplications: stats.practiceApplicationsCreated,
+      mtmApplications: stats.mtmApplicationsCreated,
+      practiceLegalizations: stats.practiceLegalizationsCreated,
+      mtmLegalizations: stats.mtmLegalizationsCreated,
+      mtmPlans: stats.mtmPlansCreated,
+      mtmSchedule: stats.mtmScheduleCreated,
+      mtmActivityLogs: stats.mtmActivityLogsCreated,
+    },
+   };
+  /** Windows no admite ":" en nombres de archivo; el runId ISO los incluye. */
+  const manifestBase = `run-${String(runId).replace(/:/g, "-")}.json`;
+  const file = path.join(MIGRATION_RUNS_DIR, manifestBase);
+  fs.writeFileSync(file, JSON.stringify(manifest, null, 2), "utf8");
+  console.log(`\n[rollback] Manifiesto guardado: ${file}`);
+  migrationLog(`Manifiesto rollback: ${file}`, { useStderr: true });
+  return file;
 }
 
 async function migratePracticeOpportunities(maps, stats, rollbackCtx) {
@@ -2823,6 +2978,25 @@ async function migrateMTMLegalizationsAndDocs(maps, stats, rollbackCtx) {
     const queuedPostulacionThisBatch = new Set();
     const duplicateLegalSamePostulacion = [];
 
+    const attachmentMysqlIdsNeeded = new Set();
+    for (const l of rowBatch) {
+      const lid = num(l.monitoring_legalized_id);
+      for (const d of docsByLegal.get(lid) || []) {
+        const aid = num(d.document_attached_id);
+        if (aid && !maps.attachmentsByMysqlId.get(aid)) attachmentMysqlIdsNeeded.add(aid);
+      }
+    }
+    const attIdArr = [...attachmentMysqlIdsNeeded];
+    const sqlAttachmentByMysqlId = new Map();
+    if (attIdArr.length > 0) {
+      const ph = attIdArr.map(() => "?").join(",");
+      const attRows = await runQuery(`SELECT id, name, filepath FROM attachment WHERE id IN (${ph})`, attIdArr);
+      for (const ar of attRows || []) {
+        const aid = num(ar.id);
+        if (aid) sqlAttachmentByMysqlId.set(aid, { filepath: str(ar.filepath), name: str(ar.name) });
+      }
+    }
+
     for (const l of rowBatch) {
       const legacyId = num(l.monitoring_legalized_id);
       if (getLegacyMongoId(maps, LEGACY_SCOPE.MTM_LEGALIZATION, legacyId)) {
@@ -2860,11 +3034,16 @@ async function migrateMTMLegalizationsAndDocs(maps, stats, rollbackCtx) {
       const documentos = {};
       for (const d of docsByLegal.get(legacyId) || []) {
         const def = maps.mtmDocDefByMysqlId.get(num(d.document_monitoring_definition_id));
-        const att = maps.attachmentsByMysqlId.get(num(d.document_attached_id));
-        if (!def?._id || !att?._id) continue;
+        if (!def?._id) continue;
+        const aid = num(d.document_attached_id);
+        const mongoAtt = aid ? maps.attachmentsByMysqlId.get(aid) : null;
+        const sqlAtt = aid && !mongoAtt ? sqlAttachmentByMysqlId.get(aid) : null;
+        const att = mongoAtt || sqlAtt;
+        const key = att?.filepath != null ? str(att.filepath) : "";
+        if (!key) continue;
         documentos[String(def._id)] = {
-          key: att.filepath || "",
-          originalName: att.name || "",
+          key,
+          originalName: att?.name != null ? str(att.name) || "" : "",
           size: null,
           estadoDocumento: mapMysqlLegalizacionDocumentoEstado(d.document_status),
           motivoRechazo: null,
@@ -2894,7 +3073,7 @@ async function migrateMTMLegalizationsAndDocs(maps, stats, rollbackCtx) {
             estadoNuevo: mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado(x.l.status),
             usuario: null,
             fecha: date(x.l.date_creation) || new Date(),
-            detalle: "Migrado desde monitoring_legalized",
+            detalle: `Migrado desde monitoring_legalized · MySQL status: ${str(x.l.status) || "—"}`,
             ip: null,
           },
         ],
@@ -2950,7 +3129,7 @@ async function migrateMTMLegalizationsAndDocs(maps, stats, rollbackCtx) {
 async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
   const exM = sqlMtmOppIdsInExpr();
   const planWhere = exM
-    ? `WHERE monitoring_legalized_id IN (
+    ? `WHERE mp.monitoring_legalized_id IN (
       SELECT monitoring_legalized_id FROM monitoring_legalized
       WHERE study_working_id IN ${exM}
     )`
@@ -2966,14 +3145,24 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
     )`
     : "";
   const schedOrder = exM || MIGRATION_RECENT_OPPORTUNITIES_FIRST ? "DESC" : "ASC";
+  const actLogWhere = exM
+    ? `WHERE tm.monitoring_legalized_id IN (
+      SELECT monitoring_legalized_id FROM monitoring_legalized
+      WHERE study_working_id IN ${exM}
+    )`
+    : "";
 
   const [plans, schedule] = await Promise.all([
     runQuery(
       limitSqlMtmLegalChain(`
-      SELECT id, monitoring_legalized_id, summary, general_objective, specific_objectives, status, date_creation
-      FROM monitoring_plan
+      SELECT mp.id, mp.monitoring_legalized_id, mp.summary,
+        mp.general_skills, mp.specific_skills, mp.general_objective, mp.specific_objectives, mp.observations,
+        mp.status, mp.date_creation, mp.date_approved,
+        ml.user_teacher, ml.user_coordinator, ml.responsable, ml.mail_responsable
+      FROM monitoring_plan mp
+      INNER JOIN monitoring_legalized ml ON ml.monitoring_legalized_id = mp.monitoring_legalized_id
       ${planWhere}
-      ORDER BY id ${planOrder}
+      ORDER BY mp.id ${planOrder}
     `)
     ),
     runQuery(
@@ -2985,6 +3174,31 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
     `)
     ),
   ]);
+
+  const schedByPlanId = new Map();
+  for (const s of schedule) {
+    const pid = num(s.monitoring_plan_id);
+    if (!schedByPlanId.has(pid)) schedByPlanId.set(pid, []);
+    schedByPlanId.get(pid).push(s);
+  }
+  for (const arr of schedByPlanId.values()) {
+    arr.sort((a, b) => {
+      const ta = (date(a.date) || date(a.date_creation) || new Date(0)).getTime();
+      const tb = (date(b.date) || date(b.date_creation) || new Date(0)).getTime();
+      if (ta !== tb) return ta - tb;
+      return num(a.id) - num(b.id);
+    });
+  }
+
+  function actividadesEmbeddedForPlanMysqlId(planMysqlId) {
+    return (schedByPlanId.get(num(planMysqlId)) || []).map((s) => ({
+      fecha: date(s.date) || date(s.date_creation) || new Date(),
+      tema: str(s.monitoring_theme) || "",
+      estrategiasMetodologias: [str(s.monitoring_strategies), str(s.monitoring_activities)]
+        .filter(Boolean)
+        .join("\n\n"),
+    }));
+  }
 
   function planEstadoFromRow(p) {
     return mapMysqlMonitoringPlanStatusToPlanTrabajoMtmEstado(p.status);
@@ -3007,6 +3221,27 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
           )
         : [];
     const postByLegalMongo = new Map(legalsLean.map((x) => [String(x._id), x.postulacionMTM]));
+
+    const uidSet = new Set();
+    for (const p of planBatch) {
+      const tid = num(p.user_teacher);
+      const cid = num(p.user_coordinator);
+      if (tid) uidSet.add(tid);
+      if (cid) uidSet.add(cid);
+    }
+    const uidArr = [...uidSet];
+    const planUsers =
+      uidArr.length > 0
+        ? await withMongoRetry("User.find(mysqlId plan batch)", () =>
+            User.find({ mysqlId: { $in: uidArr } }).select("mysqlId nombre email").lean()
+          )
+        : [];
+    const planUserByMysql = new Map(planUsers.map((u) => [num(u.mysqlId), u]));
+    function planUserLabel(mysqlUserId) {
+      const u = planUserByMysql.get(num(mysqlUserId));
+      if (!u) return "";
+      return str(u.nombre) || str(u.email) || "";
+    }
 
     const mappingOnly = [];
     const toCreate = [];
@@ -3049,6 +3284,7 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
       }
 
       const estado = planEstadoFromRow(p);
+      const docApprovedAt = date(p.date_approved);
       queuedPostulacionPlanBatch.add(postKey);
       toCreate.push({
         legacyId,
@@ -3057,10 +3293,17 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
           postulacionMTM,
           estado,
           justificacion: str(p.summary) || "",
+          habilidadesGenerales: str(p.general_skills) || "",
+          habilidadesEspecificas: str(p.specific_skills) || "",
+          observacionesPlan: str(p.observations) || "",
           objetivoGeneral: str(p.general_objective) || "",
           objetivosEspecificos: str(p.specific_objectives) || "",
+          actividades: actividadesEmbeddedForPlanMysqlId(legacyId),
+          coordinadorMonitoria: planUserLabel(p.user_coordinator) || "",
+          profesorResponsable:
+            planUserLabel(p.user_teacher) || str(p.mail_responsable) || str(p.responsable) || "",
           enviadoRevisionAt: estado === "enviado_revision" ? date(p.date_creation) : null,
-          aprobadoPorProfesorAt: estado === "aprobado" ? date(p.date_creation) : null,
+          aprobadoPorProfesorAt: docApprovedAt || (estado === "aprobado" ? date(p.date_creation) : null),
           rechazadoAt: estado === "rechazado" ? date(p.date_creation) : null,
         },
       });
@@ -3201,12 +3444,253 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
     await processScheduleBatch(part);
     if (INTER_BATCH_SLEEP_MS > 0) await sleep(INTER_BATCH_SLEEP_MS);
   }
+
+  const activityLogs = await runQuery(
+    limitSqlMtmLegalChain(`
+    SELECT mal.activity_log_id, mal.activity_type,
+      mal.observation_activity, mal.actions, mal.activity_date, mal.date_creation, mal.status,
+      mal.complete_activity, mal.called_student_count, mal.student_count, mal.hour_count,
+      mal.date_approved_activity, mal.first_attachment, mal.second_attachment,
+      tm.monitoring_legalized_id
+    FROM monitoring_activity_log mal
+    INNER JOIN tracing_monitoring tm ON tm.tracing_monitoring_id = mal.tracing_monitoring_id
+    ${actLogWhere}
+    ORDER BY mal.activity_log_id ${schedOrder}
+  `)
+  );
+
+  async function processActivityLogBatch(logBatch) {
+    const legalMysqlIds = [...new Set(logBatch.map((r) => num(r.monitoring_legalized_id)).filter((n) => n != null))];
+    const legalMongoIds = [
+      ...new Set(
+        legalMysqlIds
+          .map((id) => getLegacyMongoId(maps, LEGACY_SCOPE.MTM_LEGALIZATION, id))
+          .filter(Boolean)
+          .map((id) => String(id))
+      ),
+    ];
+    const legalOid = legalMongoIds.map((id) => new mongoose.Types.ObjectId(id));
+    const legalsLean =
+      legalOid.length > 0
+        ? await withMongoRetry("LegalizacionMTM.find($in activity_log)", () =>
+            LegalizacionMTM.find({ _id: { $in: legalOid } }).select("_id postulacionMTM").lean()
+          )
+        : [];
+    const postByLegalMongo = new Map(legalsLean.map((x) => [String(x._id), x.postulacionMTM]));
+    const postByMysqlLegal = new Map();
+    for (const mid of legalMysqlIds) {
+      const lmongo = getLegacyMongoId(maps, LEGACY_SCOPE.MTM_LEGALIZATION, mid);
+      if (!lmongo) continue;
+      const post = postByLegalMongo.get(String(lmongo));
+      if (post) postByMysqlLegal.set(num(mid), post);
+    }
+
+    const attachmentMysqlIdsNeeded = new Set();
+    for (const row of logBatch) {
+      const a1 = num(row.first_attachment);
+      const a2 = num(row.second_attachment);
+      if (a1 && !maps.attachmentsByMysqlId.get(a1)) attachmentMysqlIdsNeeded.add(a1);
+      if (a2 && !maps.attachmentsByMysqlId.get(a2)) attachmentMysqlIdsNeeded.add(a2);
+    }
+    const attIdArr = [...attachmentMysqlIdsNeeded];
+    const sqlAttachmentByMysqlId = new Map();
+    if (attIdArr.length > 0) {
+      const ph = attIdArr.map(() => "?").join(",");
+      const attRows = await runQuery(`SELECT id, name, filepath FROM attachment WHERE id IN (${ph})`, attIdArr);
+      for (const ar of attRows || []) {
+        const aid = num(ar.id);
+        if (aid) sqlAttachmentByMysqlId.set(aid, { filepath: str(ar.filepath), name: str(ar.name) });
+      }
+    }
+
+    const toCreate = [];
+    const toUpdate = [];
+
+    for (const row of logBatch) {
+      const legacyId = num(row.activity_log_id);
+      const existingMongoId = getLegacyMongoId(maps, LEGACY_SCOPE.MTM_ACTIVITY_LOG, legacyId);
+      const mlId = num(row.monitoring_legalized_id);
+      const postulacionMTM = postByMysqlLegal.get(mlId);
+      if (!postulacionMTM) {
+        stats.mtmActivityLogsErrors++;
+        continue;
+      }
+      const tipoItem = maps.itemsByMysqlId.get(num(row.activity_type));
+      const tipoActividad = str(tipoItem?.value) || "Actividad monitoría (legado)";
+      const estadoSeg = mapMysqlMonitoringActivityLogStatusToSeguimientoMtmEstado(row.status);
+      const comentarios = comentariosFromMysqlActivityLogRow(row);
+      const documentoSoporte = documentoSoporteFromActivityLogRow(
+        maps.attachmentsByMysqlId,
+        row,
+        sqlAttachmentByMysqlId
+      );
+      const dApr = date(row.date_approved_activity);
+      const mongoDoc = {
+        postulacionMTM,
+        tipoActividad,
+        fecha: date(row.activity_date) || date(row.date_creation) || new Date(),
+        numeroEstudiantesConvocados:
+          row.called_student_count != null && row.called_student_count !== ""
+            ? Number(row.called_student_count)
+            : null,
+        numeroEstudiantesAtendidos:
+          row.student_count != null && row.student_count !== "" ? Number(row.student_count) : null,
+        cantidadHoras: row.hour_count != null && row.hour_count !== "" ? Number(row.hour_count) : null,
+        comentarios,
+        descripcion: null,
+        documentoSoporte,
+        estado: estadoSeg,
+        aprobadoAt: estadoSeg === "aprobado" ? dApr || date(row.date_creation) : null,
+        creadoPor: null,
+        actualizadoPor: null,
+      };
+      if (existingMongoId) {
+        toUpdate.push({
+          legacyId,
+          mongoId: existingMongoId,
+          mongoDoc: {
+            postulacionMTM: mongoDoc.postulacionMTM,
+            tipoActividad: mongoDoc.tipoActividad,
+            fecha: mongoDoc.fecha,
+            numeroEstudiantesConvocados: mongoDoc.numeroEstudiantesConvocados,
+            numeroEstudiantesAtendidos: mongoDoc.numeroEstudiantesAtendidos,
+            cantidadHoras: mongoDoc.cantidadHoras,
+            comentarios: mongoDoc.comentarios,
+            descripcion: mongoDoc.descripcion,
+            documentoSoporte: mongoDoc.documentoSoporte,
+            estado: mongoDoc.estado,
+            aprobadoAt: mongoDoc.aprobadoAt,
+          },
+        });
+      } else {
+        toCreate.push({ legacyId, mongoDoc });
+      }
+    }
+
+    for (const wc of chunk(toUpdate, MONGO_WRITE_BATCH)) {
+      if (!wc.length) continue;
+      await withMongoRetry("SeguimientoMTM.bulkWrite(activity_log upsert)", () =>
+        SeguimientoMTM.bulkWrite(
+          wc.map((x) => ({
+            updateOne: {
+              filter: { _id: x.mongoId },
+              update: { $set: x.mongoDoc },
+            },
+          })),
+          { ordered: false }
+        )
+      );
+      stats.mtmActivityLogsUpdated += wc.length;
+    }
+
+    for (const wc of chunk(toCreate, MONGO_WRITE_BATCH)) {
+      if (!wc.length) continue;
+      const inserted = await withMongoRetry("SeguimientoMTM.insertMany(activity_log)", () =>
+        SeguimientoMTM.insertMany(
+          wc.map((x) => x.mongoDoc),
+          { ordered: true }
+        )
+      );
+      const mapEntries = wc.map((x, i) => ({
+        scope: LEGACY_SCOPE.MTM_ACTIVITY_LOG,
+        legacyId: x.legacyId,
+        mongoId: inserted[i]._id,
+        meta: { source: "monitoring_activity_log" },
+      }));
+      await bulkUpsertLegacyMappings(mapEntries);
+      for (let i = 0; i < wc.length; i++) {
+        const x = wc[i];
+        const id = inserted[i]._id;
+        maps.legacyByScopeAndId.set(`${LEGACY_SCOPE.MTM_ACTIVITY_LOG}:${x.legacyId}`, { mongoId: id });
+        trackCreated(rollbackCtx, "mtmSchedule", id);
+        stats.mtmActivityLogsCreated++;
+      }
+    }
+  }
+
+  for (const part of chunk(activityLogs, BATCH_SIZE)) {
+    await processActivityLogBatch(part);
+    if (INTER_BATCH_SLEEP_MS > 0) await sleep(INTER_BATCH_SLEEP_MS);
+  }
+}
+
+/**
+ * `monitoring_legalized.user_coordinator` = `user.id` en MySQL. En Mongo: `User.mysqlId` y `UserAdministrativo.user` → ref.
+ * Actualiza `OportunidadMTM.profesorResponsable` por `study_working_id` (mismo id que opportunity MTM en mappings).
+ * Por convocatoria se usa el coordinador de la legalización con `monitoring_legalized_id` más alto (revisión más reciente).
+ */
+async function syncMtmProfesorResponsableFromLegalizedCoordinators(maps, stats) {
+  stats.mtmProfesorResponsableCoordinatorModified = stats.mtmProfesorResponsableCoordinatorModified ?? 0;
+  stats.mtmProfesorResponsableCoordinatorMatched = stats.mtmProfesorResponsableCoordinatorMatched ?? 0;
+  stats.mtmProfesorResponsableCoordinatorNoMapping = stats.mtmProfesorResponsableCoordinatorNoMapping ?? 0;
+  stats.mtmProfesorResponsableCoordinatorNoAdmin = stats.mtmProfesorResponsableCoordinatorNoAdmin ?? 0;
+
+  const adminMap = maps.userAdministrativoByLegacyUserMysqlId;
+  if (!adminMap?.size) {
+    migrationLog(
+      "syncMtmProfesorResponsableFromLegalizedCoordinators: 0 UserAdministrativo con User.mysqlId; no se actualiza profesorResponsable."
+    );
+    return;
+  }
+
+  const exM = sqlMtmOppIdsInExpr();
+  const whereStudy = exM ? `AND ml.study_working_id IN ${exM}` : "";
+  const sql = limitSqlMtmLegalChain(`
+    SELECT ml.study_working_id, ml.user_coordinator, ml.monitoring_legalized_id
+    FROM monitoring_legalized ml
+    WHERE ml.user_coordinator IS NOT NULL AND ml.user_coordinator != 0
+    ${whereStudy}
+    ORDER BY ml.study_working_id ASC, ml.monitoring_legalized_id DESC
+  `);
+
+  const rows = await runQuery(sql);
+  const studyWorkToCoordMysql = new Map();
+  for (const r of rows) {
+    const sw = num(r.study_working_id);
+    const cid = num(r.user_coordinator);
+    if (!sw || !cid) continue;
+    if (!studyWorkToCoordMysql.has(sw)) studyWorkToCoordMysql.set(sw, cid);
+  }
+
+  const bulkOps = [];
+  for (const [studyWorkId, coordMysqlUserId] of studyWorkToCoordMysql) {
+    const oppMongoId = getLegacyMongoId(maps, LEGACY_SCOPE.MTM_OPPORTUNITY, studyWorkId);
+    if (!oppMongoId) {
+      stats.mtmProfesorResponsableCoordinatorNoMapping++;
+      continue;
+    }
+    const adminId = adminMap.get(coordMysqlUserId);
+    if (!adminId) {
+      stats.mtmProfesorResponsableCoordinatorNoAdmin++;
+      continue;
+    }
+    bulkOps.push({
+      updateOne: {
+        filter: { _id: oppMongoId },
+        update: { $set: { profesorResponsable: adminId } },
+      },
+    });
+  }
+
+  for (const part of chunk(bulkOps, MONGO_WRITE_BATCH)) {
+    if (!part.length) continue;
+    const res = await withMongoRetry("OportunidadMTM.bulkWrite(profesorResponsable coordinador)", () =>
+      OportunidadMTM.bulkWrite(part, { ordered: false })
+    );
+    stats.mtmProfesorResponsableCoordinatorMatched += res.matchedCount ?? 0;
+    stats.mtmProfesorResponsableCoordinatorModified += res.modifiedCount ?? 0;
+  }
+
+  migrationLog(
+    `MTM profesorResponsable ← monitoring_legalized.user_coordinator: matched=${stats.mtmProfesorResponsableCoordinatorMatched} modified=${stats.mtmProfesorResponsableCoordinatorModified} sin mapping oportunidad=${stats.mtmProfesorResponsableCoordinatorNoMapping} sin UserAdministrativo=${stats.mtmProfesorResponsableCoordinatorNoAdmin} (mapa admin mysqlId: ${adminMap.size})`
+  );
 }
 
 async function migrate() {
   console.log("🔄 Iniciando migración integral de oportunidades (MySQL → MongoDB)");
   console.log(`🧾 RunId: ${RUN_ID}`);
   migrationLog(`=== INICIO corrida runId=${RUN_ID} ===`);
+  printMigrationPreflight();
 
   await connectDB();
   const mongoDb = mongoose.connection.db?.databaseName ?? "?";
@@ -3268,6 +3752,14 @@ async function migrate() {
     mtmScheduleCreated: 0,
     mtmScheduleSkipped: 0,
     mtmScheduleErrors: 0,
+    mtmActivityLogsCreated: 0,
+    mtmActivityLogsUpdated: 0,
+    mtmActivityLogsSkipped: 0,
+    mtmActivityLogsErrors: 0,
+    mtmProfesorResponsableCoordinatorMatched: 0,
+    mtmProfesorResponsableCoordinatorModified: 0,
+    mtmProfesorResponsableCoordinatorNoMapping: 0,
+    mtmProfesorResponsableCoordinatorNoAdmin: 0,
     practiceStatusHistoryUpdated: 0,
     mtmStatusHistoryUpdated: 0,
     practiceStatusHistoryBackfilled: 0,
@@ -3337,6 +3829,10 @@ async function migrate() {
       migrationLog("Fase 10/11: migrateMTMPlansAndSchedule...");
       await migrateMTMPlansAndSchedule(maps, stats, rollbackCtx);
       migrationLog("Fase 10/11: migrateMTMPlansAndSchedule OK");
+
+      migrationLog("Fase 10b/11: sync profesorResponsable MTM desde user_coordinator (MySQL)...");
+      await syncMtmProfesorResponsableFromLegalizedCoordinators(maps, stats);
+      migrationLog("Fase 10b/11: sync profesorResponsable MTM OK");
     } else {
       migrationLog("Fases 7–10 omitidas (pipeline MTM desactivada)");
     }
@@ -3359,6 +3855,13 @@ async function migrate() {
   }
 
   printMigrationSummary(stats, RUN_ID);
+  writeRollbackManifest(rollbackCtx, stats, RUN_ID);
+  if (MIGRATION_REVERT_AFTER_SUCCESS) {
+    console.log("\nMIGRATION_REVERT_AFTER_SUCCESS=1 — revirtiendo documentos creados en esta corrida...");
+    migrationLog("MIGRATION_REVERT_AFTER_SUCCESS: iniciando rollback post-éxito", { useStderr: true });
+    await rollbackCreatedDocuments(rollbackCtx);
+    migrationLog("MIGRATION_REVERT_AFTER_SUCCESS: rollback post-éxito terminado", { useStderr: true });
+  }
 }
 
 /** Resumen multilínea + línea RESULTADO en stderr (ver migrationLog). */
@@ -3398,6 +3901,15 @@ function printMigrationSummary(stats, runId) {
   MTM — cronograma (seguim.)     creadas: ${s.mtmScheduleCreated}
                                omitidas: ${s.mtmScheduleSkipped}
                                 errores: ${s.mtmScheduleErrors}
+  MTM — bitácora (activity_log)  creadas: ${s.mtmActivityLogsCreated}
+                          actualizadas: ${s.mtmActivityLogsUpdated}
+                               omitidas: ${s.mtmActivityLogsSkipped}
+                                errores: ${s.mtmActivityLogsErrors}
+  MTM — profesorResponsable (FK user_coordinator → UserAdministrativo):
+                               matched: ${s.mtmProfesorResponsableCoordinatorMatched}
+                             modified: ${s.mtmProfesorResponsableCoordinatorModified}
+                    sin mapping oportunidad: ${s.mtmProfesorResponsableCoordinatorNoMapping}
+                  sin UserAdministrativo: ${s.mtmProfesorResponsableCoordinatorNoAdmin}
 
   Historial estados (change_status_opportunity + backfill opportunity.status):
     práctica — vía change_log:               ${s.practiceStatusHistoryUpdated}
@@ -3426,6 +3938,9 @@ function printMigrationSummary(stats, runId) {
 
   Omitidas = ya en legacy_entity_mappings o misma clave natural en Mongo.
   Creadas  = documentos nuevos en esta corrida.
+
+  Revertir esta corrida después (si guardaste manifiesto):
+    npm run migrate:opportunities:revert -- ${runId}
 ======================================================================
 `;
   console.log(text.trim());

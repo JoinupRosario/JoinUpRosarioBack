@@ -20,7 +20,8 @@ const LABELS_POSTULACION = {
 };
 
 const LABELS_LEGALIZACION = {
-  borrador: "Borrador",
+  creada: "Creada",
+  borrador: "Creada",
   en_revision: "En revisión",
   aprobada: "Aprobada",
   rechazada: "Rechazada",

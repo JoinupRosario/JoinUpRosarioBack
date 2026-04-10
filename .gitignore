@@ -4,6 +4,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Manifiestos de rollback de migrate:opportunities (run-<ISO>__hex.json)
+.migration-runs/
+
 # Environment variables
 .env
 .env.local

@@ -33,6 +33,7 @@ import {
   deleteDocumentoLegalizacionMTM,
   remitirRevisionLegalizacionMTM,
   getLegalizacionesMTMAdmin,
+  getMetaFiltrosLegalizacionesMTMAdmin,
   getLegalizacionMTMAdmin,
   getDocumentoLegalizacionUrlAdmin,
   getDocumentoLegalizacionDownloadAdmin,
@@ -142,6 +143,11 @@ router.get(
   "/legalizaciones-admin/estadisticas",
   requireStaffPermission("LLMO", "CLMO", "AMMO", "ADLM"),
   getEstadisticasLegalizacionMTM
+);
+router.get(
+  "/legalizaciones-admin/meta/filtros",
+  requireStaffPermission("LLMO", "CLMO", "AMMO", "ADLM"),
+  getMetaFiltrosLegalizacionesMTMAdmin
 );
 router.get(
   "/legalizaciones-admin/:postulacionId",

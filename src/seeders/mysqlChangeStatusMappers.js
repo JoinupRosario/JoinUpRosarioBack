@@ -25,17 +25,17 @@ const OPPORTUNITY_PRACTICE_ESTADOS = Object.freeze([
 ]);
 const DEFAULT_OPPORTUNITY_PRACTICE_ESTADO = "Creada";
 
-const OPORTUNIDAD_MTM_ESTADOS = Object.freeze(["Borrador", "Activa", "Inactiva"]);
-const DEFAULT_OPORTUNIDAD_MTM_ESTADO = "Borrador";
+const OPORTUNIDAD_MTM_ESTADOS = Object.freeze(["Creada", "Activa", "Inactiva"]);
+const DEFAULT_OPORTUNIDAD_MTM_ESTADO = "Creada";
 
 const LEGALIZACION_ESTADOS = Object.freeze([
-  "borrador",
+  "creada",
   "en_revision",
   "aprobada",
   "rechazada",
   "en_ajuste",
 ]);
-const DEFAULT_LEGALIZACION_ESTADO = "borrador";
+const DEFAULT_LEGALIZACION_ESTADO = "creada";
 
 const POSTULACION_ESTADOS = Object.freeze([
   "aplicado",
@@ -99,11 +99,11 @@ const MYSQL_OPPORTUNITY_ROW_TO_PRACTICE_MONGO = Object.freeze({
  * Misma tabla/columnas cuando la oferta es MTM (`OportunidadMTM.estado`).
  */
 const MYSQL_OPPORTUNITY_ROW_TO_MTM_MONGO = Object.freeze({
-  CREATED: "Borrador",
-  CREATE: "Borrador",
-  REVIEW: "Borrador",
-  REVISED: "Borrador",
-  DRAFT: "Borrador",
+  CREATED: "Creada",
+  CREATE: "Creada",
+  REVIEW: "Creada",
+  REVISED: "Creada",
+  DRAFT: "Creada",
   ACTIVED: "Activa",
   ACTIVE: "Activa",
   ACTIVATED: "Activa",
@@ -139,6 +139,7 @@ function fuzzyMtmFromMysqlKey(s) {
   if (!s || s === "NO_EXIST") return null;
   if (["ACTIVE", "ACTIVATED", "PUBLISHED", "APPROVED"].some((k) => s.includes(k))) return "Activa";
   if (["CLOSED", "FINISHED", "CANCEL", "EXPIRED", "INACTIVE"].some((k) => s.includes(k))) return "Inactiva";
+  if (["CREAT", "DRAFT", "REVIS", "PEND"].some((k) => s.includes(k))) return "Creada";
   return null;
 }
 
@@ -173,6 +174,7 @@ export function mapMysqlChangeStatusOpportunityToMtmEstado(raw, opts = {}) {
   const nullable = !!opts.nullable;
   const n = norm(raw);
   if (nullable && (!n || normKey(raw) === "NO_EXIST")) return null;
+  if (n === "Borrador") return "Creada";
 
   const labeled = passThroughIfMongoLabel(raw, OPORTUNIDAD_MTM_ESTADOS);
   if (labeled !== undefined) return labeled;
@@ -197,30 +199,48 @@ function mysqlRowBool(v) {
   if (typeof v === "boolean") return v;
   if (typeof v === "number") return v !== 0;
   if (Buffer.isBuffer(v)) return v[0] === 1;
+  /** JSON.stringify/parse de filas MySQL (p. ej. summarizeMonitoria → archivo .json) */
+  if (typeof v === "object" && v.type === "Buffer" && Array.isArray(v.data)) {
+    return Number(v.data[0]) === 1;
+  }
   const s = String(v).toLowerCase();
   return s === "1" || s === "true";
 }
 
 /** `opportunity_application` (no es change_status; mismo archivo de migración). */
 export function mapMysqlOpportunityApplicationToPostulacionEstado(row) {
-  let r = "aplicado";
-  if (mysqlRowBool(row?.contracted)) r = "aceptado_estudiante";
-  else {
-    const s = String(row?.status || "").toUpperCase();
-    if (s.includes("REJECT")) r = "rechazado";
-    else if (s.includes("SELECT")) r = "seleccionado_empresa";
-    else if (mysqlRowBool(row?.downloaded)) r = "empresa_descargo_hv";
-    else if (mysqlRowBool(row?.viewed) || mysqlRowBool(row?.revisedCompany)) r = "empresa_consulto_perfil";
+  if (mysqlRowBool(row?.contracted)) return "aceptado_estudiante";
+
+  const s = normKey(row?.status);
+  if (s && s !== "NO_EXIST") {
+    if (s.includes("REJECT")) return "rechazado";
+    if (s.includes("SELECT")) return "seleccionado_empresa";
+    if (
+      s === "ACCEPTED" ||
+      s === "ACEPTADO_ESTUDIANTE" ||
+      s === "STUDENT_ACCEPTED" ||
+      (s.includes("ACCEPT") && (s.includes("STUDENT") || s.includes("ESTUD")))
+    ) {
+      return "aceptado_estudiante";
+    }
+    if (s === "APPLIED" || s === "CREATED" || s.includes("APPLY") || s.includes("PENDIENTE_APLIC")) {
+      return "aplicado";
+    }
   }
-  return POSTULACION_ESTADOS.includes(r) ? r : DEFAULT_POSTULACION_ESTADO;
+
+  if (mysqlRowBool(row?.downloaded)) return "empresa_descargo_hv";
+  if (mysqlRowBool(row?.viewed) || mysqlRowBool(row?.revisedCompany)) return "empresa_consulto_perfil";
+  return DEFAULT_POSTULACION_ESTADO;
 }
 
 /**
  * `change_status_legalized` y `change_status_monitoring_legalized`: columnas status_legalized_before/after.
  */
 const MYSQL_LEGALIZED_STATUS_TO_MONGO = Object.freeze({
-  DRAFT: "borrador",
-  BORRADOR: "borrador",
+  CREATED: "creada",
+  CREATE: "creada",
+  DRAFT: "creada",
+  BORRADOR: "creada",
   IN_REVIEW: "en_revision",
   REVIEW: "en_revision",
   EN_REVISION: "en_revision",
@@ -243,10 +263,13 @@ function fuzzyLegalizacionFromUpper(s) {
   if (s.includes("CANCEL")) return "rechazada";
   if (s.includes("ADJUST")) return "en_ajuste";
   if (s.includes("REVIEW")) return "en_revision";
-  return "borrador";
+  if (s.includes("CREAT") || s.includes("DRAFT")) return "creada";
+  return "creada";
 }
 
 export function mapMysqlChangeStatusLegalizedToLegalizacionEstado(raw) {
+  if (norm(raw) === "borrador") return "creada";
+
   const labeled = passThroughIfMongoLabel(raw, LEGALIZACION_ESTADOS);
   if (labeled !== undefined) return labeled;
 
@@ -328,6 +351,37 @@ export function mapMysqlLegalizacionDocumentoEstado(raw) {
   if (s.includes("APPROV")) return "aprobado";
   if (s.includes("REJECT")) return "rechazado";
   return DEFAULT_DOC_ESTADO_DOCUMENTO;
+}
+
+/**
+ * `monitoring_activity_log.status` → `SeguimientoMTM.estado`.
+ */
+const MYSQL_MONITORING_ACTIVITY_LOG_STATUS_TO_SEGUIMIENTO = Object.freeze({
+  PENDING_REVIEW_ACTIVITY_LOG: "pendiente_revision",
+  PENDING_REVIEW: "pendiente_revision",
+  APPROVED_ACTIVITY_LOG: "aprobado",
+  APPROVED: "aprobado",
+  REJECTED_ACTIVITY_LOG: "rechazado",
+  REJECTED: "rechazado",
+});
+
+function fuzzySeguimientoMtmFromActivityLogUpper(s) {
+  if (s.includes("APPROV")) return "aprobado";
+  if (s.includes("REJECT")) return "rechazado";
+  return "pendiente_revision";
+}
+
+export function mapMysqlMonitoringActivityLogStatusToSeguimientoMtmEstado(raw) {
+  const labeled = passThroughIfMongoLabel(raw, ["pendiente_revision", "aprobado", "rechazado"]);
+  if (labeled !== undefined) return labeled;
+
+  const k = normKey(raw);
+  if (!k) return DEFAULT_SEGUIMIENTO_MTM_ESTADO;
+  const direct = MYSQL_MONITORING_ACTIVITY_LOG_STATUS_TO_SEGUIMIENTO[k];
+  if (direct) return direct;
+
+  const fuzzy = fuzzySeguimientoMtmFromActivityLogUpper(k);
+  return fuzzy;
 }
 
 export { DEFAULT_SEGUIMIENTO_MTM_ESTADO as defaultEstadoSeguimientoMtmNuevo };

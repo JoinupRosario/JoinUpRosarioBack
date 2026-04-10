@@ -108,6 +108,43 @@ function programaCoincidenteAlumnoOportunidadMTM(opp, profileId, enrolledByProfi
   return [...new Set(names)].join(", ");
 }
 
+/**
+ * La columna "programa" del admin puede concatenar varios nombres con coma.
+ * Para filtros se tratan como tokens individuales (unificados en meta y búsqueda por uno).
+ */
+function tokensProgramaColumnaMTMAdmin(programaCell) {
+  if (programaCell == null || String(programaCell).trim() === "") return [];
+  return [
+    ...new Set(
+      String(programaCell)
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s !== "")
+    ),
+  ];
+}
+
+/** Legalización MTM antes de revisión (`creada`, legado `borrador`) o en ajuste. */
+function legalizacionMtmEditablePorEstudiante(est) {
+  return est === "creada" || est === "borrador" || est === "en_ajuste";
+}
+
+/**
+ * Separa nombres y apellidos desde un solo campo (ej. User.name).
+ * Convención usada en listados: las dos últimas palabras son apellidos (paterno + materno en CO);
+ * el resto son nombres. 1 palabra → solo nombre; 2 → nombre + apellido.
+ */
+function nombresYApellidosDesdeNombreCompleto(fullName) {
+  const raw = String(fullName ?? "")
+    .trim()
+    .replace(/\s+/g, " ");
+  if (!raw) return { nombre: "", apellido: "" };
+  const parts = raw.split(" ");
+  if (parts.length === 1) return { nombre: parts[0], apellido: "" };
+  if (parts.length === 2) return { nombre: parts[0], apellido: parts[1] };
+  return { nombre: parts.slice(0, -2).join(" "), apellido: parts.slice(-2).join(" ") };
+}
+
 /** GET /oportunidades-mtm/meta/distinct-estados — valores de `estado` presentes en BD. */
 export const getDistinctEstadosMTM = async (req, res) => {
   try {
@@ -386,7 +423,7 @@ export const getEstadisticasLegalizacionMTM = async (req, res) => {
           $group: {
             _id: "$periodoDoc.codigo",
             total: { $sum: 1 },
-            borrador: { $sum: { $cond: [{ $eq: ["$estado", "borrador"] }, 1, 0] } },
+            creada: { $sum: { $cond: [{ $in: ["$estado", ["creada", "borrador"]] }, 1, 0] } },
             en_revision: { $sum: { $cond: [{ $eq: ["$estado", "en_revision"] }, 1, 0] } },
             aprobada: { $sum: { $cond: [{ $eq: ["$estado", "aprobada"] }, 1, 0] } },
             rechazada: { $sum: { $cond: [{ $eq: ["$estado", "rechazada"] }, 1, 0] } },
@@ -401,7 +438,7 @@ export const getEstadisticasLegalizacionMTM = async (req, res) => {
           $group: {
             _id: null,
             total: { $sum: 1 },
-            borrador: { $sum: { $cond: [{ $eq: ["$estado", "borrador"] }, 1, 0] } },
+            creada: { $sum: { $cond: [{ $in: ["$estado", ["creada", "borrador"]] }, 1, 0] } },
             en_revision: { $sum: { $cond: [{ $eq: ["$estado", "en_revision"] }, 1, 0] } },
             aprobada: { $sum: { $cond: [{ $eq: ["$estado", "aprobada"] }, 1, 0] } },
             rechazada: { $sum: { $cond: [{ $eq: ["$estado", "rechazada"] }, 1, 0] } },
@@ -412,13 +449,13 @@ export const getEstadisticasLegalizacionMTM = async (req, res) => {
     ]);
 
     const porEstadoMap = Object.fromEntries((porEstado || []).map((e) => [e._id || "sin_estado", e.count]));
-    const totalesLeg = totales?.[0] || { total: 0, borrador: 0, en_revision: 0, aprobada: 0, rechazada: 0, en_ajuste: 0 };
+    const totalesLeg = totales?.[0] || { total: 0, creada: 0, en_revision: 0, aprobada: 0, rechazada: 0, en_ajuste: 0 };
 
     res.json({
       success: true,
       porEstado: porEstadoMap,
       total: totalesLeg.total,
-      borrador: totalesLeg.borrador,
+      creada: totalesLeg.creada,
       en_revision: totalesLeg.en_revision,
       aprobada: totalesLeg.aprobada,
       rechazada: totalesLeg.rechazada,
@@ -426,7 +463,7 @@ export const getEstadisticasLegalizacionMTM = async (req, res) => {
       porPeriodo: (porPeriodo || []).map((p) => ({
         periodo: p._id || "—",
         total: p.total,
-        borrador: p.borrador,
+        creada: p.creada,
         en_revision: p.en_revision,
         aprobada: p.aprobada,
         rechazada: p.rechazada,
@@ -519,12 +556,12 @@ export const createOportunidadMTM = async (req, res) => {
       programas: programas || [],
       funciones: funciones || null,
       requisitos: requisitos || null,
-      estado: "Borrador",
+      estado: "Creada",
       creadoPor: userId || null,
       historialEstados: [
         {
           estadoAnterior: null,
-          estadoNuevo: "Borrador",
+          estadoNuevo: "Creada",
           cambiadoPor: userId,
           motivo: "Creación"
         }
@@ -624,7 +661,7 @@ export const changeStatusMTM = async (req, res) => {
     const userId = req.user?.id;
     const { estado, motivo } = req.body;
 
-    const VALID_STATES = ["Borrador", "Activa", "Inactiva"];
+    const VALID_STATES = ["Creada", "Activa", "Inactiva"];
     if (!VALID_STATES.includes(estado)) {
       return res.status(400).json({ message: "Estado inválido" });
     }
@@ -662,13 +699,13 @@ export const duplicateOportunidadMTM = async (req, res) => {
     const copia = await OportunidadMTM.create({
       ...rest,
       nombreCargo: `${rest.nombreCargo} (copia)`,
-      estado: "Borrador",
+      estado: "Creada",
       creadoPor: userId || null,
       actualizadoPor: null,
       historialEstados: [
         {
           estadoAnterior: null,
-          estadoNuevo: "Borrador",
+          estadoNuevo: "Creada",
           cambiadoPor: userId,
           motivo: `Duplicado desde ${_id}`
         }
@@ -991,9 +1028,10 @@ export const getMisAceptadasMTM = async (req, res) => {
     const labelEstadoLegalizacionMTM = (estado) => {
       if (!estado) return "Pendiente de iniciar";
       const map = {
-        borrador: "Borrador",
+        creada: "Creada",
+        borrador: "Creada",
         en_revision: "En revisión",
-        aprobada: "Aprobada",
+        aprobada: "Legalizada",
         rechazada: "Rechazada",
         en_ajuste: "En ajuste",
       };
@@ -1025,19 +1063,20 @@ export const getMisAceptadasMTM = async (req, res) => {
       const opp = p.oportunidadMTM;
       const profileId = p.postulantProfile?._id || p.postulantProfile;
       const programaOportunidad = programaCoincidenteAlumnoOportunidadMTM(opp, profileId, enrolledByProfileAceptadas);
+      const { nombre: nombreAlumno, apellido: apellidoAlumno } = nombresYApellidosDesdeNombreCompleto(nombreCompleto);
       return {
         _id: p._id,
         oportunidadId: opp?._id,
         numeroIdentidad: p.postulantProfile?.studentCode ?? null,
-        nombre: nombreCompleto.split(" ").slice(0, -1).join(" ") || nombreCompleto,
-        apellido: nombreCompleto.split(" ").slice(-1)[0] || "",
+        nombre: nombreAlumno,
+        apellido: apellidoAlumno,
         programa: programaOportunidad,
         codigoMonitoria: opp?._id?.toString?.()?.slice(-8) ?? null,
         nombreMonitoria: opp?.nombreCargo ?? null,
         periodo: opp?.periodo?.codigo ?? null,
         coordinador: opp?.profesorResponsable ? [opp.profesorResponsable.nombres, opp.profesorResponsable.apellidos].filter(Boolean).join(" ") : (opp?.nombreProfesor ?? null),
         estado: "Aceptado",
-        /** Código del modelo LegalizacionMTM (borrador | en_revision | aprobada | rechazada | en_ajuste); null si aún no existe registro de legalización */
+        /** Código del modelo LegalizacionMTM (creada | en_revision | aprobada | rechazada | en_ajuste); null si aún no existe registro de legalización */
         estadoLegalizacionCodigo: estadoLegByPost[String(p._id)] ?? null,
         estadoLegalizacion: labelEstadoLegalizacionMTM(estadoLegByPost[String(p._id)]),
         planAprobado: planAprobadoByPost[String(p._id)] === true,
@@ -1766,7 +1805,7 @@ export const getLegalizacionMTM = async (req, res) => {
     if (!leg) {
       leg = await LegalizacionMTM.create({
         postulacionMTM: postulacionId,
-        estado: "borrador",
+        estado: "creada",
       });
       leg = await LegalizacionMTM.findById(leg._id).populate("eps tipoCuenta banco", "value description listId").lean();
     }
@@ -1828,7 +1867,9 @@ export const updateLegalizacionMTM = async (req, res) => {
 
     const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId });
     if (!leg) return res.status(404).json({ message: "Legalización no encontrada" });
-    if (leg.estado !== "borrador" && leg.estado !== "en_ajuste") return res.status(400).json({ message: "Solo se puede editar en estado borrador o en ajuste" });
+    if (!legalizacionMtmEditablePorEstudiante(leg.estado)) {
+      return res.status(400).json({ message: "Solo se puede editar en estado creada o en ajuste" });
+    }
 
     const { eps, tipoCuenta, tipoCuentaValor, banco, numeroCuenta } = req.body || {};
     if (eps !== undefined) leg.eps = eps || null;
@@ -1862,9 +1903,11 @@ export const uploadDocLegalizacionMTM = async (req, res) => {
 
     let leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId });
     if (!leg) {
-      leg = await LegalizacionMTM.create({ postulacionMTM: postulacionId, estado: "borrador" });
+      leg = await LegalizacionMTM.create({ postulacionMTM: postulacionId, estado: "creada" });
     }
-    if (leg.estado !== "borrador" && leg.estado !== "en_ajuste") return res.status(400).json({ message: "Solo se puede subir documentos en estado borrador o en ajuste" });
+    if (!legalizacionMtmEditablePorEstudiante(leg.estado)) {
+      return res.status(400).json({ message: "Solo se puede subir documentos en estado creada o en ajuste" });
+    }
 
     const definitionId = (req.body?.definitionId ?? "").toString().trim();
 
@@ -1964,7 +2007,9 @@ export const deleteDocumentoLegalizacionMTM = async (req, res) => {
 
     const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId });
     if (!leg) return res.status(404).json({ message: "Legalización no encontrada" });
-    if (leg.estado !== "borrador" && leg.estado !== "en_ajuste") return res.status(400).json({ message: "Solo se puede eliminar documentos en estado borrador o en ajuste" });
+    if (!legalizacionMtmEditablePorEstudiante(leg.estado)) {
+      return res.status(400).json({ message: "Solo se puede eliminar documentos en estado creada o en ajuste" });
+    }
 
     const resolved = getMtmDocByParam(leg, definitionId);
     if (!resolved) return res.status(404).json({ message: "Documento no encontrado" });
@@ -1996,7 +2041,9 @@ export const remitirRevisionLegalizacionMTM = async (req, res) => {
 
     const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId });
     if (!leg) return res.status(404).json({ message: "Legalización no encontrada" });
-    if (leg.estado !== "borrador" && leg.estado !== "en_ajuste") return res.status(400).json({ message: "Solo se puede remitir desde estado borrador o en ajuste" });
+    if (!legalizacionMtmEditablePorEstudiante(leg.estado)) {
+      return res.status(400).json({ message: "Solo se puede remitir desde estado creada o en ajuste" });
+    }
 
     const docs = leg.documentos || {};
     const defs = await listDefinicionesDocumentosMonitoring();
@@ -2053,95 +2100,207 @@ export const remitirRevisionLegalizacionMTM = async (req, res) => {
 };
 
 // ─── Admin: listar legalizaciones MTM (RQ04_HU006) ─────────────────────────────
+
+/** Filas enriquecidas para listado admin (sin paginar ni filtrar por periodo/programa/búsqueda). */
+async function buildLegalizacionesMTMAdminListRows(mongoFilter = {}) {
+  const legs = await LegalizacionMTM.find(mongoFilter)
+    .populate({
+      path: "postulacionMTM",
+      select: "oportunidadMTM postulant postulantProfile aceptadoEstudianteAt estado",
+      populate: [
+        {
+          path: "oportunidadMTM",
+          select: "nombreCargo periodo nombreProfesor profesorResponsable programas",
+          populate: [
+            { path: "periodo", select: "codigo" },
+            { path: "profesorResponsable", select: "nombres apellidos", populate: { path: "user", select: "email" } },
+            { path: "programas", select: "name code" },
+          ],
+        },
+        { path: "postulant", select: "postulantId", populate: { path: "postulantId", select: "name" } },
+        { path: "postulantProfile", select: "studentCode" },
+      ],
+    })
+    .sort({ updatedAt: -1 })
+    .lean();
+
+  const postulacionesValidas = legs.filter((l) => l.postulacionMTM != null);
+  const profileIds = [
+    ...new Set(
+      postulacionesValidas
+        .map((l) => l.postulacionMTM?.postulantProfile?._id || l.postulacionMTM?.postulantProfile)
+        .filter(Boolean)
+        .map((id) => String(id))
+    ),
+  ].map((id) => new mongoose.Types.ObjectId(id));
+
+  const enrolledRows =
+    profileIds.length > 0
+      ? await ProfileEnrolledProgram.find({ profileId: { $in: profileIds } })
+          .populate("programId", "name code")
+          .lean()
+      : [];
+  const enrolledByProfile = new Map();
+  for (const e of enrolledRows) {
+    const k = String(e.profileId);
+    if (!enrolledByProfile.has(k)) enrolledByProfile.set(k, []);
+    enrolledByProfile.get(k).push(e);
+  }
+
+  const postulacionIds = postulacionesValidas.map((l) => l.postulacionMTM._id).filter(Boolean);
+  const planesCoordinador =
+    postulacionIds.length > 0
+      ? await PlanDeTrabajoMTM.find({ postulacionMTM: { $in: postulacionIds } })
+          .select("postulacionMTM coordinadorMonitoria")
+          .lean()
+      : [];
+  const coordinadorPorPostulacion = new Map();
+  for (const pl of planesCoordinador) {
+    const k = String(pl.postulacionMTM);
+    const texto = (pl.coordinadorMonitoria || "").trim();
+    if (!texto) continue;
+    if (!coordinadorPorPostulacion.has(k)) coordinadorPorPostulacion.set(k, texto);
+  }
+
+  const list = postulacionesValidas.map((l) => {
+    const po = l.postulacionMTM;
+    const opp = po?.oportunidadMTM;
+    const nombreCompleto = po?.postulant?.postulantId?.name || "";
+    const { nombre: nombreAlumno, apellido: apellidoAlumno } = nombresYApellidosDesdeNombreCompleto(nombreCompleto);
+    const profileId = po?.postulantProfile?._id || po?.postulantProfile;
+    const programaAlumno = programaCoincidenteAlumnoOportunidadMTM(opp, profileId, enrolledByProfile);
+    const desdeRef = opp?.profesorResponsable
+      ? [opp.profesorResponsable.nombres, opp.profesorResponsable.apellidos].filter(Boolean).join(" ").trim()
+      : "";
+    const desdeNombreLibre = (opp?.nombreProfesor && String(opp.nombreProfesor).trim()) || "";
+    const desdePlanMigrado = coordinadorPorPostulacion.get(String(po?._id)) || "";
+    const coordinador = desdeRef || desdeNombreLibre || desdePlanMigrado || null;
+    const periodoCodigo = opp?.periodo?.codigo ?? null;
+    return {
+      _id: l._id,
+      postulacionId: po?._id,
+      numeroIdentidad: po?.postulantProfile?.studentCode ?? null,
+      nombre: nombreAlumno,
+      apellido: apellidoAlumno,
+      programa: programaAlumno,
+      codigoMTM: opp?._id?.toString?.()?.slice(-8) ?? null,
+      nombreMTM: opp?.nombreCargo ?? null,
+      periodo: periodoCodigo,
+      coordinador,
+      estadoAlumnoMTM: po?.estado ?? null,
+      estadoMTM:
+        l.estado === "en_revision"
+          ? "en_revision"
+          : l.estado === "aprobada"
+            ? "legalizada"
+            : l.estado === "rechazada"
+              ? "anulada"
+              : l.estado === "en_ajuste"
+                ? "en_ajuste"
+                : l.estado === "creada" || l.estado === "borrador"
+                  ? "aceptada"
+                  : l.estado,
+      enviadoRevisionAt: l.enviadoRevisionAt,
+      aprobadoAt: l.aprobadoAt,
+      rechazadoAt: l.rechazadoAt,
+    };
+  });
+
+  return { list };
+}
+
+function mongoFilterEstadoLegalizacionAdmin(estado) {
+  const filter = {};
+  if (!estado || String(estado).trim() === "") return filter;
+  const e = String(estado).trim();
+  /** Compat: valores de UI antigua; en BD `LegalizacionMTM.estado` es creada|borrador|en_revision|aprobada|… */
+  const estadoDoc = { legalizada: "aprobada", anulada: "rechazada" }[e];
+  if (e === "aceptada") {
+    filter.estado = { $in: ["creada", "borrador"] };
+  } else if (estadoDoc) {
+    filter.estado = estadoDoc;
+  } else {
+    filter.estado = e;
+  }
+  return filter;
+}
+
+/**
+ * Estados, periodos y programas presentes en legalizaciones MTM (filtros admin).
+ * Programas = valores reales mostrados en columna (intersección oferta × matrícula del perfil).
+ */
+export const getMetaFiltrosLegalizacionesMTMAdmin = async (_req, res) => {
+  try {
+    const estadosRaw = await LegalizacionMTM.distinct("estado");
+    const estados = estadosRaw
+      .filter((x) => x != null && String(x).trim() !== "")
+      .sort((a, b) => String(a).localeCompare(String(b), "es"));
+
+    const postIdsRaw = await LegalizacionMTM.distinct("postulacionMTM");
+    const postIds = postIdsRaw.filter((id) => id != null && mongoose.Types.ObjectId.isValid(String(id)));
+    let periodos = [];
+    if (postIds.length > 0) {
+      const posts = await PostulacionMTM.find({ _id: { $in: postIds } }).select("oportunidadMTM").lean();
+      const oppIds = [...new Set(posts.map((p) => p.oportunidadMTM).filter(Boolean))];
+      if (oppIds.length > 0) {
+        const opps = await OportunidadMTM.find({ _id: { $in: oppIds } })
+          .populate("periodo", "codigo")
+          .select("periodo")
+          .lean();
+        periodos = [
+          ...new Set(
+            opps.map((o) => (o.periodo?.codigo != null ? String(o.periodo.codigo).trim() : "")).filter((c) => c !== "")
+          ),
+        ].sort((a, b) => String(a).localeCompare(String(b), "es"));
+      }
+    }
+
+    const { list } = await buildLegalizacionesMTMAdminListRows({});
+    const programaSet = new Set();
+    for (const r of list) {
+      for (const t of tokensProgramaColumnaMTMAdmin(r.programa)) {
+        programaSet.add(t);
+      }
+    }
+    const programas = [...programaSet].sort((a, b) => a.localeCompare(b, "es"));
+
+    res.json({ estados, periodos, programas });
+  } catch (err) {
+    console.error("[MTM] getMetaFiltrosLegalizacionesMTMAdmin:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
 export const getLegalizacionesMTMAdmin = async (req, res) => {
   try {
-    const { estado, periodo, page = 1, limit = 20 } = req.query;
-    const filter = {};
-    if (estado) filter.estado = estado;
-    const legs = await LegalizacionMTM.find(filter)
-      .populate({
-        path: "postulacionMTM",
-        match: { estado: "aceptado_estudiante" },
-        select: "oportunidadMTM postulant postulantProfile aceptadoEstudianteAt",
-        populate: [
-          {
-            path: "oportunidadMTM",
-            select: "nombreCargo periodo profesorResponsable programas",
-            populate: [
-              { path: "periodo", select: "codigo" },
-              { path: "profesorResponsable", select: "nombres apellidos", populate: { path: "user", select: "email" } },
-              { path: "programas", select: "name code" },
-            ],
-          },
-          { path: "postulant", select: "postulantId", populate: { path: "postulantId", select: "name" } },
-          { path: "postulantProfile", select: "studentCode" },
-        ],
-      })
-      .sort({ updatedAt: -1 })
-      .lean();
+    const { estado, periodo, programa, page = 1, limit = 20, search = "" } = req.query;
+    const mongoFilter = mongoFilterEstadoLegalizacionAdmin(estado);
+    let { list } = await buildLegalizacionesMTMAdminListRows(mongoFilter);
 
-    const postulacionesValidas = legs.filter((l) => l.postulacionMTM != null);
-    const profileIds = [
-      ...new Set(
-        postulacionesValidas
-          .map((l) => l.postulacionMTM?.postulantProfile?._id || l.postulacionMTM?.postulantProfile)
-          .filter(Boolean)
-          .map((id) => String(id))
-      ),
-    ].map((id) => new mongoose.Types.ObjectId(id));
-
-    const enrolledRows =
-      profileIds.length > 0
-        ? await ProfileEnrolledProgram.find({ profileId: { $in: profileIds } })
-            .populate("programId", "name code")
-            .lean()
-        : [];
-    const enrolledByProfile = new Map();
-    for (const e of enrolledRows) {
-      const k = String(e.profileId);
-      if (!enrolledByProfile.has(k)) enrolledByProfile.set(k, []);
-      enrolledByProfile.get(k).push(e);
+    if (periodo != null && String(periodo).trim() !== "") {
+      const p = String(periodo).trim();
+      list = list.filter((r) => String(r.periodo ?? "") === p);
+    }
+    if (programa != null && String(programa).trim() !== "") {
+      const pr = String(programa).trim();
+      list = list.filter((r) => tokensProgramaColumnaMTMAdmin(r.programa).includes(pr));
+    }
+    const q = String(search ?? "").trim().toLowerCase();
+    if (q) {
+      list = list.filter((r) => {
+        const fields = [r.numeroIdentidad, r.nombre, r.apellido, r.programa, r.codigoMTM, r.nombreMTM, r.coordinador];
+        return fields.some((f) => String(f ?? "").toLowerCase().includes(q));
+      });
     }
 
-    let list = postulacionesValidas.map((l) => {
-      const po = l.postulacionMTM;
-      const opp = po?.oportunidadMTM;
-      const nombreCompleto = po?.postulant?.postulantId?.name || "";
-      const profileId = po?.postulantProfile?._id || po?.postulantProfile;
-      const programaAlumno = programaCoincidenteAlumnoOportunidadMTM(opp, profileId, enrolledByProfile);
-      const coordinador = opp?.profesorResponsable
-        ? [opp.profesorResponsable.nombres, opp.profesorResponsable.apellidos].filter(Boolean).join(" ")
-        : null;
-      const periodoCodigo = opp?.periodo?.codigo ?? null;
-      return {
-        _id: l._id,
-        postulacionId: po?._id,
-        numeroIdentidad: po?.postulantProfile?.studentCode ?? null,
-        nombre: nombreCompleto.split(" ").slice(0, -1).join(" ") || nombreCompleto,
-        apellido: nombreCompleto.split(" ").slice(-1)[0] || "",
-        programa: programaAlumno,
-        codigoMTM: opp?._id?.toString?.()?.slice(-8) ?? null,
-        nombreMTM: opp?.nombreCargo ?? null,
-        periodo: periodoCodigo,
-        coordinador,
-        estadoAlumnoMTM: null,
-        estadoMTM: l.estado === "en_revision" ? "en_revision" : l.estado === "aprobada" ? "legalizada" : l.estado === "rechazada" ? "anulada" : l.estado === "en_ajuste" ? "en_ajuste" : l.estado === "borrador" ? "aceptada" : l.estado,
-        enviadoRevisionAt: l.enviadoRevisionAt,
-        aprobadoAt: l.aprobadoAt,
-        rechazadoAt: l.rechazadoAt,
-      };
-    });
-
-    if (periodo) {
-      list = list.filter((r) => r.periodo === periodo);
-    }
     const total = list.length;
     const pageNum = Math.max(1, parseInt(page, 10));
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10)));
+    const limitNum = Math.min(5000, Math.max(1, parseInt(limit, 10)));
+    const totalPages = Math.max(1, Math.ceil(total / limitNum));
     const start = (pageNum - 1) * limitNum;
     list = list.slice(start, start + limitNum);
 
-    res.json({ data: list, total, page: pageNum, limit: limitNum });
+    res.json({ data: list, total, page: pageNum, limit: limitNum, totalPages });
   } catch (err) {
     console.error("[MTM] getLegalizacionesMTMAdmin:", err);
     res.status(500).json({ message: err.message });
@@ -2152,7 +2311,6 @@ export const getLegalizacionesMTMAdmin = async (req, res) => {
 async function getLegalizacionMTMAdminByPostulacion(postulacionId) {
   const po = await PostulacionMTM.findOne({
     _id: postulacionId,
-    estado: "aceptado_estudiante",
   })
     .populate({
       path: "oportunidadMTM",
@@ -2649,7 +2807,8 @@ export const getSeguimientosMTM = async (req, res) => {
       const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).select("estado").lean();
       if (!plan || plan.estado !== "aprobado") return res.status(400).json({ message: "Los seguimientos se habilitan cuando el plan de trabajo esté aprobado por el profesor" });
     } else {
-      const po = await PostulacionMTM.findOne({ _id: postulacionId, estado: "aceptado_estudiante" }).lean();
+      /** Admin: no filtrar por `aceptado_estudiante` (datos migrados / listado legalización pueden tener otro estado). */
+      const po = await PostulacionMTM.findOne({ _id: postulacionId }).lean();
       if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
     }
     const list = await SeguimientoMTM.find({ postulacionMTM: postulacionId })
@@ -2698,7 +2857,7 @@ export const createSeguimientoMTM = async (req, res) => {
       const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).select("estado").lean();
       if (!plan || plan.estado !== "aprobado") return res.status(400).json({ message: "Los seguimientos se habilitan cuando el plan de trabajo esté aprobado por el profesor" });
     } else {
-      const po = await PostulacionMTM.findOne({ _id: postulacionId, estado: "aceptado_estudiante" }).lean();
+      const po = await PostulacionMTM.findOne({ _id: postulacionId }).lean();
       if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
     }
     const seg = await SeguimientoMTM.create({
@@ -2891,7 +3050,7 @@ export const accionMasivaSeguimientosMTM = async (req, res) => {
     if (accion !== "aprobar" && accion !== "rechazar") {
       return res.status(400).json({ message: "accion debe ser 'aprobar' o 'rechazar'" });
     }
-    const po = await PostulacionMTM.findOne({ _id: postulacionId, estado: "aceptado_estudiante" }).lean();
+    const po = await PostulacionMTM.findOne({ _id: postulacionId }).lean();
     if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
 
     const ids = seguimientoIds.filter((id) => id && mongoose.Types.ObjectId.isValid(id));
@@ -2973,7 +3132,7 @@ export const accionMasivaSeguimientosMTM = async (req, res) => {
 export const getTotalHorasSeguimientosMTM = async (req, res) => {
   try {
     const { postulacionId } = req.params;
-    const po = await PostulacionMTM.findOne({ _id: postulacionId, estado: "aceptado_estudiante" }).lean();
+    const po = await PostulacionMTM.findOne({ _id: postulacionId }).lean();
     if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
     const result = await SeguimientoMTM.aggregate([
       { $match: { postulacionMTM: new mongoose.Types.ObjectId(postulacionId), estado: "aprobado" } },
@@ -3079,8 +3238,14 @@ export const getOrCreateLinkAsistenciaMTM = async (req, res) => {
       const result = await getLegalizacionMTMForStudent(req, postulacionId);
       if (result.error) return res.status(result.error).json({ message: result.message });
     }
-    const po = await PostulacionMTM.findOne({ _id: postulacionId, estado: "aceptado_estudiante" });
-    if (!po) return res.status(404).json({ message: "Postulación no encontrada o no aceptada" });
+    const po = await PostulacionMTM.findOne(
+      isStudent ? { _id: postulacionId, estado: "aceptado_estudiante" } : { _id: postulacionId }
+    );
+    if (!po) {
+      return res.status(404).json({
+        message: isStudent ? "Postulación no encontrada o no aceptada" : "Postulación no encontrada",
+      });
+    }
     let linkRecienCreado = false;
     if (!po.linkAsistenciaToken) {
       po.linkAsistenciaToken = crypto.randomUUID();

@@ -43,9 +43,15 @@ const planDeTrabajoMTMSchema = new mongoose.Schema(
     correoInstitucional: { type: String, trim: true, default: "" },
     // Campos que diligencia el estudiante
     justificacion: { type: String, trim: true, default: "" },
+    /** Legado MySQL monitoring_plan.general_skills / specific_skills / observations */
+    habilidadesGenerales: { type: String, trim: true, default: "" },
+    habilidadesEspecificas: { type: String, trim: true, default: "" },
+    observacionesPlan: { type: String, trim: true, default: "" },
     objetivoGeneral: { type: String, trim: true, default: "" },
     objetivosEspecificos: { type: String, trim: true, default: "" },
     actividades: [actividadSchema],
+    /** Nombre legible del coordinador (MySQL monitoring_legalized.user_coordinator → User). */
+    coordinadorMonitoria: { type: String, trim: true, default: "" },
     // Aprobaciones y trazabilidad
     enviadoRevisionAt: { type: Date, default: null },
     aprobadoPorProfesorAt: { type: Date, default: null },

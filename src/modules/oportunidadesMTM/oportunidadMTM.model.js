@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 
-const OPORTUNIDAD_MTM_ESTADOS = ["Borrador", "Activa", "Inactiva"];
+/** Alineado a oferta en legado: CREATED → «Creada» (antes se guardaba «Borrador»). */
+const OPORTUNIDAD_MTM_ESTADOS = ["Creada", "Activa", "Inactiva"];
 
 const historialEstadoSchema = new mongoose.Schema(
   {
@@ -140,11 +141,11 @@ const oportunidadMTMSchema = new mongoose.Schema(
       default: null
     },
 
-    // Estado con flujo: Borrador → Activa → Inactiva
+    // Estado con flujo: Creada → Activa → Inactiva
     estado: {
       type: String,
       enum: OPORTUNIDAD_MTM_ESTADOS,
-      default: "Borrador",
+      default: "Creada",
     },
 
     // Historial de cambios de estado
