@@ -468,6 +468,14 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/** SeguimientoMTM exige min: 0 en convocados/atendidos/horas; el legado usa -1 u otros negativos. */
+function mtmNonNegativeNumberOrNull(raw) {
+  if (raw == null || raw === "") return null;
+  const n = num(raw);
+  if (n == null || n < 0) return null;
+  return n;
+}
+
 function str(v) {
   return v == null ? null : String(v).trim();
 }
@@ -1307,8 +1315,13 @@ async function migrateLegacyDetailedMirrorHistoriales(maps, stats) {
         LegalizacionMTM.findById(mongoId).select("historial").lean()
       );
       const historial = mergeHistorialLegalizacionMtm(doc?.historial, fromChanges);
-      await withMongoRetry(`LegalizacionMTM.historial ml=${mlId}`, () =>
-        LegalizacionMTM.updateOne({ _id: mongoId }, { $set: { historial } })
+      const lastRaw = getRowCol(rows[rows.length - 1], "status_legalized_after");
+      const patch = { historial };
+      if (lastRaw != null && String(lastRaw).trim() !== "") {
+        patch.estado = mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado(lastRaw);
+      }
+      await withMongoRetry(`LegalizacionMTM.historial+estado ml=${mlId}`, () =>
+        LegalizacionMTM.updateOne({ _id: mongoId }, { $set: patch })
       );
       stats.legacyMtmLegalHistorialUpdated++;
     } catch (e) {
@@ -3529,13 +3542,9 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
         postulacionMTM,
         tipoActividad,
         fecha: date(row.activity_date) || date(row.date_creation) || new Date(),
-        numeroEstudiantesConvocados:
-          row.called_student_count != null && row.called_student_count !== ""
-            ? Number(row.called_student_count)
-            : null,
-        numeroEstudiantesAtendidos:
-          row.student_count != null && row.student_count !== "" ? Number(row.student_count) : null,
-        cantidadHoras: row.hour_count != null && row.hour_count !== "" ? Number(row.hour_count) : null,
+        numeroEstudiantesConvocados: mtmNonNegativeNumberOrNull(row.called_student_count),
+        numeroEstudiantesAtendidos: mtmNonNegativeNumberOrNull(row.student_count),
+        cantidadHoras: mtmNonNegativeNumberOrNull(row.hour_count),
         comentarios,
         descripcion: null,
         documentoSoporte,

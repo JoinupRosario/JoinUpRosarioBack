@@ -8,7 +8,7 @@
  * | change_status_opportunity | status_* (MTM) | mapMysqlChangeStatusOpportunityToMtmEstado |
  * | opportunity | status | mapMysqlOpportunityTableStatusToPracticeEstado / …MtmEstado |
  * | change_status_legalized | status_legalized_* | mapMysqlChangeStatusLegalizedToLegalizacionEstado |
- * | change_status_monitoring_legalized | status_legalized_* | mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado |
+ * | change_status_monitoring_legalized | status_legalized_* | mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado (incl. Finalizada → finalizada) |
  * | monitoring_plan | status | mapMysqlMonitoringPlanStatusToPlanTrabajoMtmEstado |
  * | document_practice / document_monitoring / approval_monitoring_documents | document_status / approval_document_status_* | mapMysqlLegalizacionDocumentoEstado |
  * | opportunity_application | status, flags | mapMysqlOpportunityApplicationToPostulacionEstado |
@@ -35,6 +35,22 @@ const LEGALIZACION_ESTADOS = Object.freeze([
   "rechazada",
   "en_ajuste",
 ]);
+
+/** Solo monitoría: UrJobs «Finalizada» y códigos equivalentes en `monitoring_legalized` / `change_status_monitoring_legalized`. */
+const MYSQL_MONITORING_LEGALIZED_STATUS_TO_MONGO = Object.freeze({
+  FINISHED: "finalizada",
+  FINALIZED: "finalizada",
+  FINALIZADA: "finalizada",
+  FINALIZADO: "finalizada",
+  COMPLETED: "finalizada",
+  COMPLETE: "finalizada",
+  DONE: "finalizada",
+  TERMINADA: "finalizada",
+  TERMINADO: "finalizada",
+  CLOSED: "finalizada",
+  CERRADA: "finalizada",
+  CERRADO: "finalizada",
+});
 const DEFAULT_LEGALIZACION_ESTADO = "creada";
 
 const POSTULACION_ESTADOS = Object.freeze([
@@ -267,6 +283,17 @@ function fuzzyLegalizacionFromUpper(s) {
   return "creada";
 }
 
+/** Fuzzy solo MTM: «Finalizada» y variantes no listadas en el mapa explícito. */
+function fuzzyMonitoringLegalizacionFinalizadaFromUpper(s) {
+  if (!s || s === "NO_EXIST") return null;
+  if (s.includes("FINAL") || s.includes("FINISH")) return "finalizada";
+  if (s.includes("TERMIN")) return "finalizada";
+  if (s.includes("COMPLET") && !s.includes("INCOMPLET")) return "finalizada";
+  if (s === "CLOSED" || (s.includes("CLOSED") && !s.includes("CANCEL"))) return "finalizada";
+  if (s.includes("CERRAD") && !s.includes("CANCEL")) return "finalizada";
+  return null;
+}
+
 export function mapMysqlChangeStatusLegalizedToLegalizacionEstado(raw) {
   if (norm(raw) === "borrador") return "creada";
 
@@ -282,8 +309,24 @@ export function mapMysqlChangeStatusLegalizedToLegalizacionEstado(raw) {
   return LEGALIZACION_ESTADOS.includes(fuzzy) ? fuzzy : DEFAULT_LEGALIZACION_ESTADO;
 }
 
-/** Misma semántica que práctica; tabla distinta en MySQL (monitoring). */
+/**
+ * Monitoría: además de los códigos de práctica, mapea UrJobs «Finalizada» y sincroniza con `change_status_monitoring_legalized`.
+ * No usar en legalización de práctica (modelo sin `finalizada`).
+ */
 export function mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado(raw) {
+  if (norm(raw) === "borrador") return "creada";
+
+  const mtmPassThrough = passThroughIfMongoLabel(raw, [...LEGALIZACION_ESTADOS, "finalizada"]);
+  if (mtmPassThrough !== undefined) return mtmPassThrough;
+
+  const k = normKey(raw);
+  if (k) {
+    const mtmDirect = MYSQL_MONITORING_LEGALIZED_STATUS_TO_MONGO[k];
+    if (mtmDirect) return mtmDirect;
+    const mtmFuzzyFin = fuzzyMonitoringLegalizacionFinalizadaFromUpper(k);
+    if (mtmFuzzyFin) return mtmFuzzyFin;
+  }
+
   return mapMysqlChangeStatusLegalizedToLegalizacionEstado(raw);
 }
 
