@@ -90,6 +90,13 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+function mtmNonNegativeNumberOrNull(raw) {
+  if (raw == null || raw === "") return null;
+  const n = num(raw);
+  if (n == null || n < 0) return null;
+  return n;
+}
+
 function str(v) {
   return v == null ? "" : String(v).trim();
 }
@@ -653,13 +660,9 @@ export async function seedMonitoriaFromSummaryJson(data, opts = {}) {
         postulacionMTM: postMongoId,
         tipoActividad,
         fecha: date(row.activity_date) || date(row.date_creation) || new Date(),
-        numeroEstudiantesConvocados:
-          row.called_student_count != null && row.called_student_count !== ""
-            ? Number(row.called_student_count)
-            : null,
-        numeroEstudiantesAtendidos:
-          row.student_count != null && row.student_count !== "" ? Number(row.student_count) : null,
-        cantidadHoras: row.hour_count != null && row.hour_count !== "" ? Number(row.hour_count) : null,
+        numeroEstudiantesConvocados: mtmNonNegativeNumberOrNull(row.called_student_count),
+        numeroEstudiantesAtendidos: mtmNonNegativeNumberOrNull(row.student_count),
+        cantidadHoras: mtmNonNegativeNumberOrNull(row.hour_count),
         comentarios,
         descripcion: null,
         documentoSoporte,

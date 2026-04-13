@@ -129,6 +129,13 @@ function legalizacionMtmEditablePorEstudiante(est) {
   return est === "creada" || est === "borrador" || est === "en_ajuste";
 }
 
+/** Coordinación aprobó (`aprobada`) o legado UrJobs cerró el flujo (`finalizada`): plan de trabajo / seguimientos. */
+function legalizacionMtmAprobadaOFinalizada(estado) {
+  if (estado == null) return false;
+  const e = String(estado).trim().toLowerCase();
+  return e === "aprobada" || e === "finalizada" || e === "legalizada";
+}
+
 /**
  * Separa nombres y apellidos desde un solo campo (ej. User.name).
  * Convención usada en listados: las dos últimas palabras son apellidos (paterno + materno en CO);
@@ -426,6 +433,7 @@ export const getEstadisticasLegalizacionMTM = async (req, res) => {
             creada: { $sum: { $cond: [{ $in: ["$estado", ["creada", "borrador"]] }, 1, 0] } },
             en_revision: { $sum: { $cond: [{ $eq: ["$estado", "en_revision"] }, 1, 0] } },
             aprobada: { $sum: { $cond: [{ $eq: ["$estado", "aprobada"] }, 1, 0] } },
+            finalizada: { $sum: { $cond: [{ $eq: ["$estado", "finalizada"] }, 1, 0] } },
             rechazada: { $sum: { $cond: [{ $eq: ["$estado", "rechazada"] }, 1, 0] } },
             en_ajuste: { $sum: { $cond: [{ $eq: ["$estado", "en_ajuste"] }, 1, 0] } },
           },
@@ -441,6 +449,7 @@ export const getEstadisticasLegalizacionMTM = async (req, res) => {
             creada: { $sum: { $cond: [{ $in: ["$estado", ["creada", "borrador"]] }, 1, 0] } },
             en_revision: { $sum: { $cond: [{ $eq: ["$estado", "en_revision"] }, 1, 0] } },
             aprobada: { $sum: { $cond: [{ $eq: ["$estado", "aprobada"] }, 1, 0] } },
+            finalizada: { $sum: { $cond: [{ $eq: ["$estado", "finalizada"] }, 1, 0] } },
             rechazada: { $sum: { $cond: [{ $eq: ["$estado", "rechazada"] }, 1, 0] } },
             en_ajuste: { $sum: { $cond: [{ $eq: ["$estado", "en_ajuste"] }, 1, 0] } },
           },
@@ -449,7 +458,15 @@ export const getEstadisticasLegalizacionMTM = async (req, res) => {
     ]);
 
     const porEstadoMap = Object.fromEntries((porEstado || []).map((e) => [e._id || "sin_estado", e.count]));
-    const totalesLeg = totales?.[0] || { total: 0, creada: 0, en_revision: 0, aprobada: 0, rechazada: 0, en_ajuste: 0 };
+    const totalesLeg = totales?.[0] || {
+      total: 0,
+      creada: 0,
+      en_revision: 0,
+      aprobada: 0,
+      finalizada: 0,
+      rechazada: 0,
+      en_ajuste: 0,
+    };
 
     res.json({
       success: true,
@@ -458,6 +475,7 @@ export const getEstadisticasLegalizacionMTM = async (req, res) => {
       creada: totalesLeg.creada,
       en_revision: totalesLeg.en_revision,
       aprobada: totalesLeg.aprobada,
+      finalizada: totalesLeg.finalizada ?? 0,
       rechazada: totalesLeg.rechazada,
       en_ajuste: totalesLeg.en_ajuste,
       porPeriodo: (porPeriodo || []).map((p) => ({
@@ -466,6 +484,7 @@ export const getEstadisticasLegalizacionMTM = async (req, res) => {
         creada: p.creada,
         en_revision: p.en_revision,
         aprobada: p.aprobada,
+        finalizada: p.finalizada ?? 0,
         rechazada: p.rechazada,
         en_ajuste: p.en_ajuste,
       })),
@@ -1032,6 +1051,7 @@ export const getMisAceptadasMTM = async (req, res) => {
         borrador: "Creada",
         en_revision: "En revisión",
         aprobada: "Legalizada",
+        finalizada: "Finalizada",
         rechazada: "Rechazada",
         en_ajuste: "En ajuste",
       };
@@ -2193,13 +2213,15 @@ async function buildLegalizacionesMTMAdminListRows(mongoFilter = {}) {
           ? "en_revision"
           : l.estado === "aprobada"
             ? "legalizada"
-            : l.estado === "rechazada"
-              ? "anulada"
-              : l.estado === "en_ajuste"
-                ? "en_ajuste"
-                : l.estado === "creada" || l.estado === "borrador"
-                  ? "aceptada"
-                  : l.estado,
+            : l.estado === "finalizada"
+              ? "finalizada"
+              : l.estado === "rechazada"
+                ? "anulada"
+                : l.estado === "en_ajuste"
+                  ? "en_ajuste"
+                  : l.estado === "creada" || l.estado === "borrador"
+                    ? "aceptada"
+                    : l.estado,
       enviadoRevisionAt: l.enviadoRevisionAt,
       aprobadoAt: l.aprobadoAt,
       rechazadoAt: l.rechazadoAt,
@@ -2606,7 +2628,8 @@ export const getPlanTrabajoMTM = async (req, res) => {
       const result = await getLegalizacionMTMForStudent(req, postulacionId);
       if (result.error) return res.status(result.error).json({ message: result.message });
       const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId }).lean();
-      if (!leg || leg.estado !== "aprobada") return res.status(400).json({ message: "Solo puede gestionar el plan de trabajo cuando la legalización está aprobada" });
+      if (!leg || !legalizacionMtmAprobadaOFinalizada(leg.estado))
+        return res.status(400).json({ message: "Solo puede gestionar el plan de trabajo cuando la legalización está aprobada" });
       const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).lean();
       if (!plan) return res.status(404).json({ message: "Plan de trabajo no encontrado. Puede crearlo desde el detalle de la legalización." });
       const datosPrecargados = await getDatosPrecargadosPlanTrabajo(result);
@@ -2631,7 +2654,8 @@ export const createPlanTrabajoMTM = async (req, res) => {
     const result = await getLegalizacionMTMForStudent(req, postulacionId);
     if (result.error) return res.status(result.error).json({ message: result.message });
     const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId }).lean();
-    if (!leg || leg.estado !== "aprobada") return res.status(400).json({ message: "Solo puede crear el plan de trabajo cuando la legalización está aprobada" });
+    if (!leg || !legalizacionMtmAprobadaOFinalizada(leg.estado))
+      return res.status(400).json({ message: "Solo puede crear el plan de trabajo cuando la legalización está aprobada" });
     const existente = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId });
     if (existente) return res.status(400).json({ message: "Ya existe un plan de trabajo para esta legalización" });
     const datosPrecargados = await getDatosPrecargadosPlanTrabajo(result);
@@ -2784,7 +2808,8 @@ export const getPlanTrabajoMTMDatosCrear = async (req, res) => {
     const result = await getLegalizacionMTMForStudent(req, postulacionId);
     if (result.error) return res.status(result.error).json({ message: result.message });
     const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId }).lean();
-    if (!leg || leg.estado !== "aprobada") return res.status(400).json({ message: "Solo puede crear el plan cuando la legalización está aprobada" });
+    if (!leg || !legalizacionMtmAprobadaOFinalizada(leg.estado))
+      return res.status(400).json({ message: "Solo puede crear el plan cuando la legalización está aprobada" });
     const existente = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).lean();
     if (existente) return res.json({ plan: existente, yaExiste: true });
     const datosPrecargados = await getDatosPrecargadosPlanTrabajo(result);
