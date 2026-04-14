@@ -37,6 +37,7 @@
     "migrate:periodos": "node src/seeders/migratePeriodosFromMySQL.js",
     "migrate:opportunities": "node src/seeders/migrateOpportunitiesFromMySQL.js",
     "migrate:pick-mtm-ids": "node src/seeders/pickMtmOpportunityIdsForMigration.js",
+    "audit:mtm-legal-mysql-mongo": "node src/seeders/auditMtmLegalEstadosMysqlVsMongo.js",
     "migrate:opportunities:revert": "node src/seeders/revertOpportunitiesMigrationRun.js",
     "mysql:summarize-monitoria": "node src/seeders/summarizeMonitoriaMysqlByCodigo.js",
     "seed:monitoria-from-summary-json": "node src/seeders/seedMonitoria5861FromSummaryJson.js",

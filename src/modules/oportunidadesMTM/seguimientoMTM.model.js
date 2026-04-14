@@ -19,6 +19,12 @@ const documentoSoporteSchema = new mongoose.Schema(
 
 const seguimientoMTMSchema = new mongoose.Schema(
   {
+    /**
+     * PK legado: `monitoring_plan_schedule.id` o `monitoring_activity_log.activity_log_id`
+     * (conviven en la misma colección; no usar como único global sin `legacy_entity_mappings`).
+     */
+    mysqlId: { type: Number, default: null, index: true, sparse: true },
+
     postulacionMTM: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "PostulacionMTM",

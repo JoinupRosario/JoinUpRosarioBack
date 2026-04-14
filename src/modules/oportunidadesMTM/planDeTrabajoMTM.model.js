@@ -18,6 +18,9 @@ const actividadSchema = new mongoose.Schema(
 
 const planDeTrabajoMTMSchema = new mongoose.Schema(
   {
+    /** PK MySQL `monitoring_plan.id`; trazabilidad migración. */
+    mysqlId: { type: Number, default: null, index: true, sparse: true },
+
     postulacionMTM: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "PostulacionMTM",

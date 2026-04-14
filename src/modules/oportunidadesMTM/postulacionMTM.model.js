@@ -15,6 +15,9 @@ const POSTULACION_ESTADOS = [
  */
 const postulacionMTMSchema = new mongoose.Schema(
   {
+    /** PK MySQL `opportunity_application.id`; trazabilidad migración. */
+    mysqlId: { type: Number, default: null, index: true, sparse: true },
+
     postulant: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Postulant",

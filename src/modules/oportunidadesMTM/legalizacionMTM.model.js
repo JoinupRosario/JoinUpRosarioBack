@@ -22,6 +22,9 @@ const legalizacionHistorialEntrySchema = new mongoose.Schema(
  */
 const legalizacionMTMSchema = new mongoose.Schema(
   {
+    /** PK MySQL `monitoring_legalized.monitoring_legalized_id`; trazabilidad migración. */
+    mysqlId: { type: Number, default: null, index: true, sparse: true },
+
     postulacionMTM: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "PostulacionMTM",

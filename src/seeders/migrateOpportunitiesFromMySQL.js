@@ -73,7 +73,7 @@
  *   y hace `$set` de `OportunidadMTM.profesorResponsable` (idempotente; conviene re-ejecutar tras sincronizar usuarios admin).
  *
  * Notas:
- * - Como algunos esquemas destino no tienen mysqlId, se usa la colección
+ * - Entidades MTM en Mongo incluyen `mysqlId` (PK legado) además de
  *   legacy_entity_mappings para idempotencia y trazabilidad.
  * - Este script asume que ya se migraron catálogos base:
  *   companies, postulants, postulant_profiles, items, periodos, programs,
@@ -1316,9 +1316,21 @@ async function migrateLegacyDetailedMirrorHistoriales(maps, stats) {
       );
       const historial = mergeHistorialLegalizacionMtm(doc?.historial, fromChanges);
       const lastRaw = getRowCol(rows[rows.length - 1], "status_legalized_after");
-      const patch = { historial };
+      const patch = { historial, mysqlId: mlId };
       if (lastRaw != null && String(lastRaw).trim() !== "") {
-        patch.estado = mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado(lastRaw);
+        const estadoUltimo = mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado(lastRaw);
+        const [mlRow] = await runQuery(
+          `SELECT status FROM monitoring_legalized WHERE monitoring_legalized_id = ? LIMIT 1`,
+          [mlId]
+        );
+        const estadoFila = mlRow
+          ? mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado(mlRow.status)
+          : null;
+        if (estadoFila === "finalizada" && estadoUltimo === "aprobada") {
+          patch.estado = "finalizada";
+        } else {
+          patch.estado = estadoUltimo;
+        }
       }
       await withMongoRetry(`LegalizacionMTM.historial+estado ml=${mlId}`, () =>
         LegalizacionMTM.updateOne({ _id: mongoId }, { $set: patch })
@@ -1824,6 +1836,26 @@ async function bulkUpsertLegacyMappings(entries) {
     }));
     await withMongoRetry("LegacyEntityMapping.bulkWrite", () =>
       LegacyEntityMapping.bulkWrite(ops, { ordered: false })
+    );
+  }
+}
+
+const MYSQL_ID_ABSENT_FILTER = { $or: [{ mysqlId: { $exists: false } }, { mysqlId: null }] };
+
+/** Rellena `mysqlId` en documentos MTM ya existentes (p. ej. deduplicados por clave natural). Solo si aún no está definido. */
+async function bulkSetMtmMysqlIdIfAbsent(Model, pairs) {
+  if (!pairs?.length) return;
+  for (const part of chunk(pairs, MONGO_WRITE_BATCH)) {
+    await withMongoRetry(`bulkSetMtmMysqlIdIfAbsent(${Model.modelName})`, () =>
+      Model.bulkWrite(
+        part.map(({ mongoId, legacyId }) => ({
+          updateOne: {
+            filter: { _id: mongoId, ...MYSQL_ID_ABSENT_FILTER },
+            update: { $set: { mysqlId: num(legacyId) } },
+          },
+        })),
+        { ordered: false }
+      )
     );
   }
 }
@@ -2663,6 +2695,7 @@ async function migrateMTMOpportunities(maps, stats, rollbackCtx) {
         legacyId,
         naturalKey,
         mongoDoc: {
+          mysqlId: legacyId,
           company,
           nombreCargo: str(row.job_title) || "Monitoria sin nombre",
           dedicacionHoras: maps.itemsByMysqlId.get(num(row.dedication_hours))?._id || null,
@@ -2683,7 +2716,13 @@ async function migrateMTMOpportunities(maps, stats, rollbackCtx) {
       });
     }
 
-    if (mappingOnly.length) await bulkUpsertLegacyMappings(mappingOnly);
+    if (mappingOnly.length) {
+      await bulkUpsertLegacyMappings(mappingOnly);
+      await bulkSetMtmMysqlIdIfAbsent(
+        OportunidadMTM,
+        mappingOnly.map((m) => ({ mongoId: m.mongoId, legacyId: m.legacyId }))
+      );
+    }
 
     for (const sc of chunk(toCreate, MONGO_WRITE_BATCH)) {
       if (!sc.length) continue;
@@ -2727,6 +2766,7 @@ async function migrateMTMOpportunities(maps, stats, rollbackCtx) {
           },
         },
       ]);
+      await bulkSetMtmMysqlIdIfAbsent(OportunidadMTM, [{ mongoId, legacyId: d.legacyId }]);
       maps.legacyByScopeAndId.set(`${LEGACY_SCOPE.MTM_OPPORTUNITY}:${d.legacyId}`, { mongoId });
       stats.mtmOpportunitiesSkipped++;
     }
@@ -2854,6 +2894,7 @@ async function migrateMTMApplications(maps, stats, rollbackCtx) {
             row,
             appNaturalKey,
             mongoDoc: {
+              mysqlId: legacyId,
               postulant,
               oportunidadMTM: oppMtm,
               postulantProfile,
@@ -2870,7 +2911,13 @@ async function migrateMTMApplications(maps, stats, rollbackCtx) {
           });
         }
 
-        if (mappingOnly.length) await bulkUpsertLegacyMappings(mappingOnly);
+        if (mappingOnly.length) {
+          await bulkUpsertLegacyMappings(mappingOnly);
+          await bulkSetMtmMysqlIdIfAbsent(
+            PostulacionMTM,
+            mappingOnly.map((m) => ({ mongoId: m.mongoId, legacyId: m.legacyId }))
+          );
+        }
 
         for (const wc of chunk(toCreate, MONGO_WRITE_BATCH)) {
           if (!wc.length) continue;
@@ -2918,6 +2965,7 @@ async function migrateMTMApplications(maps, stats, rollbackCtx) {
               },
             },
           ]);
+          await bulkSetMtmMysqlIdIfAbsent(PostulacionMTM, [{ mongoId, legacyId: d.legacyId }]);
           maps.legacyByScopeAndId.set(`${LEGACY_SCOPE.MTM_APPLICATION}:${d.legacyId}`, {
             mongoId,
           });
@@ -3067,11 +3115,18 @@ async function migrateMTMLegalizationsAndDocs(maps, stats, rollbackCtx) {
       toCreate.push({ legacyId, postulacionMTM, l, documentos });
     }
 
-    if (mappingOnly.length) await bulkUpsertLegacyMappings(mappingOnly);
+    if (mappingOnly.length) {
+      await bulkUpsertLegacyMappings(mappingOnly);
+      await bulkSetMtmMysqlIdIfAbsent(
+        LegalizacionMTM,
+        mappingOnly.map((m) => ({ mongoId: m.mongoId, legacyId: m.legacyId }))
+      );
+    }
 
     for (const wc of chunk(toCreate, MONGO_WRITE_BATCH)) {
       if (!wc.length) continue;
       const mongoDocs = wc.map((x) => ({
+        mysqlId: x.legacyId,
         postulacionMTM: x.postulacionMTM,
         estado: mapMysqlChangeStatusMonitoringLegalizedToLegalizacionEstado(x.l.status),
         eps: maps.itemsByMysqlId.get(num(x.l.eps))?._id || null,
@@ -3128,6 +3183,7 @@ async function migrateMTMLegalizationsAndDocs(maps, stats, rollbackCtx) {
           },
         },
       ]);
+      await bulkSetMtmMysqlIdIfAbsent(LegalizacionMTM, [{ mongoId, legacyId: d.legacyId }]);
       maps.legacyByScopeAndId.set(`${LEGACY_SCOPE.MTM_LEGALIZATION}:${d.legacyId}`, { mongoId });
       stats.mtmLegalizationsSkipped++;
     }
@@ -3303,6 +3359,7 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
         legacyId,
         postulacionMTM,
         mongoDoc: {
+          mysqlId: legacyId,
           postulacionMTM,
           estado,
           justificacion: str(p.summary) || "",
@@ -3322,7 +3379,13 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
       });
     }
 
-    if (mappingOnly.length) await bulkUpsertLegacyMappings(mappingOnly);
+    if (mappingOnly.length) {
+      await bulkUpsertLegacyMappings(mappingOnly);
+      await bulkSetMtmMysqlIdIfAbsent(
+        PlanDeTrabajoMTM,
+        mappingOnly.map((m) => ({ mongoId: m.mongoId, legacyId: m.legacyId }))
+      );
+    }
 
     for (const wc of chunk(toCreate, MONGO_WRITE_BATCH)) {
       if (!wc.length) continue;
@@ -3366,6 +3429,7 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
           },
         },
       ]);
+      await bulkSetMtmMysqlIdIfAbsent(PlanDeTrabajoMTM, [{ mongoId, legacyId: d.legacyId }]);
       maps.legacyByScopeAndId.set(`${LEGACY_SCOPE.MTM_PLAN}:${d.legacyId}`, { mongoId });
       stats.mtmPlansSkipped++;
     }
@@ -3416,6 +3480,7 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
       toCreate.push({
         legacyId,
         mongoDoc: {
+          mysqlId: legacyId,
           postulacionMTM,
           tipoActividad: str(s.monitoring_theme) || "",
           fecha: date(s.date) || date(s.date_creation) || new Date(),
@@ -3539,6 +3604,7 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
       );
       const dApr = date(row.date_approved_activity);
       const mongoDoc = {
+        mysqlId: legacyId,
         postulacionMTM,
         tipoActividad,
         fecha: date(row.activity_date) || date(row.date_creation) || new Date(),
@@ -3558,6 +3624,7 @@ async function migrateMTMPlansAndSchedule(maps, stats, rollbackCtx) {
           legacyId,
           mongoId: existingMongoId,
           mongoDoc: {
+            mysqlId: legacyId,
             postulacionMTM: mongoDoc.postulacionMTM,
             tipoActividad: mongoDoc.tipoActividad,
             fecha: mongoDoc.fecha,

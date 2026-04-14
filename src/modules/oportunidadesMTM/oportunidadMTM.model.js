@@ -16,6 +16,9 @@ const historialEstadoSchema = new mongoose.Schema(
 
 const oportunidadMTMSchema = new mongoose.Schema(
   {
+    /** PK MySQL `opportunity.id` (monitoría); trazabilidad migración. */
+    mysqlId: { type: Number, default: null, index: true, sparse: true },
+
     // Empresa (siempre Universidad del Rosario)
     company: {
       type: mongoose.Schema.Types.ObjectId,
