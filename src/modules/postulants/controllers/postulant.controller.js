@@ -60,6 +60,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
+ * Genera un header Content-Disposition seguro para cualquier nombre de archivo.
+ * Usa RFC 5987 (filename*=UTF-8'') para soportar caracteres no-ASCII (tildes,
+ * guiones largos, etc.) evitando el error "Invalid character in header content".
+ */
+function safeContentDisposition(filename, type = "attachment") {
+  const safe = (filename || "archivo")
+    .replace(/[^\w\s.\-_()[\]]/gu, "_") // ASCII fallback: reemplaza caracteres no seguros
+    .trim() || "archivo";
+  const encoded = encodeURIComponent(filename || "archivo");
+  return `${type}; filename="${safe}"; filename*=UTF-8''${encoded}`;
+}
+
+/**
  * Raíz de directorio para subidas (PDFs de hoja de vida, etc.).
  * En Vercel/serverless el filesystem es de solo lectura excepto /tmp, por eso se usa os.tmpdir().
  * Nota: en Vercel los archivos en /tmp son efímeros; una descarga posterior puede fallar si el archivo ya no existe.
@@ -1796,7 +1809,7 @@ export const generateHojaVidaPdf = async (req, res) => {
     });
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${displayName}"`);
+    res.setHeader("Content-Disposition", safeContentDisposition(displayName));
     res.send(pdfBuffer);
   } catch (error) {
     console.error("[generateHojaVidaPdf]", error);
@@ -2038,7 +2051,7 @@ export const generateCartaPresentacionPdf = async (req, res) => {
     const displayName = `${baseName}.pdf`;
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${displayName}"`);
+    res.setHeader("Content-Disposition", safeContentDisposition(displayName));
     res.send(pdfBuffer);
   } catch (error) {
     console.error("[generateCartaPresentacionPdf]", error);
@@ -2090,7 +2103,7 @@ export const downloadAttachment = async (req, res) => {
       const { body, contentType } = await getObjectFromS3(filepath);
       const downloadName = attachment.name || path.basename(filepath);
       res.setHeader("Content-Type", contentType || "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename="${downloadName.replace(/"/g, '\\"')}"`);
+      res.setHeader("Content-Disposition", safeContentDisposition(downloadName));
       return res.send(body);
     }
 
@@ -2100,7 +2113,8 @@ export const downloadAttachment = async (req, res) => {
       return res.status(404).json({ message: "Archivo no encontrado en el servidor" });
     }
     const downloadName = attachment.name || path.basename(filepath);
-    res.download(fullPath, downloadName);
+    const safeDownloadName = (downloadName || "archivo").replace(/[^\w\s.\-_()[\]]/gu, "_").trim() || "archivo";
+    res.download(fullPath, safeDownloadName);
   } catch (error) {
     res.status(500).json({ message: error.message || "Error al descargar" });
   }

@@ -57,6 +57,13 @@ function addBusinessDays(date, days) {
   return d;
 }
 
+/** Genera un header Content-Disposition seguro para nombres con caracteres especiales (RFC 5987). */
+function safeContentDisposition(filename, type = "attachment") {
+  const safe = (filename || "archivo").replace(/[^\w\s.\-_()[\]]/gu, "_").trim() || "archivo";
+  const encoded = encodeURIComponent(filename || "archivo");
+  return `${type}; filename="${safe}"; filename*=UTF-8''${encoded}`;
+}
+
 /** Dispara plantilla activa + cola/correo si existe evento `value` tipo monitoría. */
 async function dispatchMonitoriaNotificacion(eventValue, datos, recipientContext, metadataExtra = {}) {
   try {
@@ -905,7 +912,7 @@ export const aplicarOportunidadMTM = async (req, res) => {
     if (!postulant) return res.status(403).json({ message: "No se encontró postulante asociado al usuario" });
 
     const { id } = req.params;
-    const { postulantProfileId, profileVersionId } = req.body || {};
+    const { postulantProfileId, profileVersionId, documentosSoporteIds } = req.body || {};
 
     if (!postulantProfileId) {
       return res.status(400).json({ message: "Debe indicar el perfil (hoja de vida) con el que aplica (postulantProfileId)." });
@@ -926,11 +933,31 @@ export const aplicarOportunidadMTM = async (req, res) => {
     const existe = await PostulacionMTM.findOne({ postulant: postulant._id, oportunidadMTM: id }).lean();
     if (existe) return res.status(400).json({ message: "Ya ha aplicado a esta oportunidad." });
 
+    // Resolver documentos de soporte opcionales adjuntados por el estudiante
+    let documentosSoporte = [];
+    if (Array.isArray(documentosSoporteIds) && documentosSoporteIds.length > 0) {
+      const postulantDocIdStr = postulant._id.toString();
+      // Validar que los supports pertenezcan a algún perfil del postulante
+      const misPerfiles = await PostulantProfile.find({ postulantId: postulant._id }).select("_id").lean();
+      const misPerfilesIds = misPerfiles.map((p) => p._id);
+      const supports = await ProfileSupport.find({
+        _id: { $in: documentosSoporteIds },
+        profileId: { $in: misPerfilesIds },
+      }).populate("attachmentId", "name filepath contentType").lean();
+      documentosSoporte = supports.map((s) => ({
+        attachmentId: s.attachmentId?._id ?? s.attachmentId,
+        documentLabel: s.documentLabel || "",
+        originalName: s.attachmentId?.name || "",
+        postulantDocId: postulantDocIdStr,
+      }));
+    }
+
     const nueva = await PostulacionMTM.create({
       postulant: postulant._id,
       oportunidadMTM: id,
       postulantProfile: profileDoc._id,
       profileVersionId: profileVersionId || null,
+      documentosSoporte,
       estado: "aplicado",
     });
 
@@ -943,6 +970,35 @@ export const aplicarOportunidadMTM = async (req, res) => {
   } catch (err) {
     console.error("[MTM] aplicarOportunidadMTM:", err);
     res.status(500).json({ message: err.response?.data?.message || err.message || "Error al aplicar" });
+  }
+};
+
+/**
+ * GET /oportunidades-mtm/mis-documentos-soporte
+ * Retorna todos los ProfileSupport del estudiante logueado (para el modal de aplicación).
+ */
+export const getMisDocumentosSoporte = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ message: "No autenticado" });
+    const postulant = await Postulant.findOne({ postulantId: userId }).select("_id").lean();
+    if (!postulant) return res.status(403).json({ message: "No se encontró perfil de postulante" });
+    const misPerfiles = await PostulantProfile.find({ postulantId: postulant._id }).select("_id").lean();
+    const misPerfilesIds = misPerfiles.map((p) => p._id);
+    const supports = await ProfileSupport.find({ profileId: { $in: misPerfilesIds } })
+      .populate("attachmentId", "name filepath contentType")
+      .lean();
+    const documentos = supports.map((s) => ({
+      _id: s._id,
+      documentLabel: s.documentLabel || s.attachmentId?.name || "Documento",
+      originalName: s.attachmentId?.name || "",
+      attachmentId: s.attachmentId?._id ?? s.attachmentId,
+      postulantDocId: postulant._id.toString(),
+    }));
+    res.json({ documentos });
+  } catch (err) {
+    console.error("[MTM] getMisDocumentosSoporte:", err);
+    res.status(500).json({ message: err.message });
   }
 };
 
@@ -1051,6 +1107,7 @@ export const getMisAceptadasMTM = async (req, res) => {
         borrador: "Creada",
         en_revision: "En revisión",
         aprobada: "Legalizada",
+        solicitada_finalizacion: "Solicitud de finalización",
         finalizada: "Finalizada",
         rechazada: "Rechazada",
         en_ajuste: "En ajuste",
@@ -1100,7 +1157,7 @@ export const getMisAceptadasMTM = async (req, res) => {
         estadoLegalizacionCodigo: estadoLegByPost[String(p._id)] ?? null,
         estadoLegalizacion: labelEstadoLegalizacionMTM(estadoLegByPost[String(p._id)]),
         planAprobado: planAprobadoByPost[String(p._id)] === true,
-        finalizadoPorMonitor: null,
+        finalizadoPorMonitor: ["solicitada_finalizacion", "finalizada"].includes(estadoLegByPost[String(p._id)]) ? "SI" : null,
         aceptadoEstudianteAt: p.aceptadoEstudianteAt,
         oportunidad: opp,
       };
@@ -1314,6 +1371,9 @@ export const getApplicationDetailMTM = async (req, res) => {
 
     if (!po) return res.status(404).json({ message: "Postulación no encontrada" });
 
+    // Cargar postulación completa (con documentosSoporte)
+    const poFull = await PostulacionMTM.findById(postulacionId).select("documentosSoporte").lean();
+
     if (po.estado === "aplicado" && !po.empresaConsultoPerfilAt) {
       await PostulacionMTM.updateOne(
         { _id: postulacionId },
@@ -1402,6 +1462,12 @@ export const getApplicationDetailMTM = async (req, res) => {
         attachmentId: c.attachmentId?._id,
         name: c.attachmentId?.name || "Hoja de vida",
         postulantDocId: postulantDocId || postulantDoc?._id?.toString(),
+      })),
+      documentosSoporte: (poFull?.documentosSoporte || []).map((d) => ({
+        attachmentId: d.attachmentId,
+        documentLabel: d.documentLabel || d.originalName || "Documento",
+        originalName: d.originalName || "",
+        postulantDocId: d.postulantDocId || postulantDocId || postulantDoc?._id?.toString(),
       })),
     });
   } catch (err) {
@@ -2249,21 +2315,27 @@ function mongoFilterEstadoLegalizacionAdmin(estado) {
 
 /**
  * Estados, periodos y programas presentes en legalizaciones MTM (filtros admin).
- * Programas = valores reales mostrados en columna (intersección oferta × matrícula del perfil).
+ * Programas = union de (programas de la oportunidad ∩ programas matriculados del postulante).
+ * Consulta eficiente: NO llama a buildLegalizacionesMTMAdminListRows para evitar carga total.
  */
 export const getMetaFiltrosLegalizacionesMTMAdmin = async (_req, res) => {
   try {
+    // 1. Estados únicos — consulta rápida
     const estadosRaw = await LegalizacionMTM.distinct("estado");
     const estados = estadosRaw
       .filter((x) => x != null && String(x).trim() !== "")
       .sort((a, b) => String(a).localeCompare(String(b), "es"));
 
+    // 2. Periodos — desde oportunidades vinculadas
     const postIdsRaw = await LegalizacionMTM.distinct("postulacionMTM");
     const postIds = postIdsRaw.filter((id) => id != null && mongoose.Types.ObjectId.isValid(String(id)));
     let periodos = [];
+    let oppIds = [];
     if (postIds.length > 0) {
-      const posts = await PostulacionMTM.find({ _id: { $in: postIds } }).select("oportunidadMTM").lean();
-      const oppIds = [...new Set(posts.map((p) => p.oportunidadMTM).filter(Boolean))];
+      const posts = await PostulacionMTM.find({ _id: { $in: postIds } })
+        .select("oportunidadMTM postulantProfile")
+        .lean();
+      oppIds = [...new Set(posts.map((p) => String(p.oportunidadMTM)).filter(Boolean))];
       if (oppIds.length > 0) {
         const opps = await OportunidadMTM.find({ _id: { $in: oppIds } })
           .populate("periodo", "codigo")
@@ -2275,18 +2347,45 @@ export const getMetaFiltrosLegalizacionesMTMAdmin = async (_req, res) => {
           ),
         ].sort((a, b) => String(a).localeCompare(String(b), "es"));
       }
-    }
 
-    const { list } = await buildLegalizacionesMTMAdminListRows({});
-    const programaSet = new Set();
-    for (const r of list) {
-      for (const t of tokensProgramaColumnaMTMAdmin(r.programa)) {
-        programaSet.add(t);
+      // 3. Programas — union eficiente: programas de oportunidades + programas matriculados de perfiles
+      const profileIdsRaw = posts.map((p) => p.postulantProfile).filter(Boolean);
+      const profileIds = [...new Set(profileIdsRaw.map((id) => String(id)))].filter(
+        (id) => mongoose.Types.ObjectId.isValid(id)
+      );
+
+      const programaSet = new Set();
+
+      // 3a. Programas declarados en las oportunidades MTM
+      if (oppIds.length > 0) {
+        const oppsConProg = await OportunidadMTM.find({ _id: { $in: oppIds } })
+          .populate("programas", "name code")
+          .select("programas")
+          .lean();
+        for (const o of oppsConProg) {
+          for (const p of o.programas || []) {
+            const name = p?.name || p?.code;
+            if (name) programaSet.add(String(name).trim());
+          }
+        }
       }
-    }
-    const programas = [...programaSet].sort((a, b) => a.localeCompare(b, "es"));
 
-    res.json({ estados, periodos, programas });
+      // 3b. Programas matriculados de los perfiles de estudiantes
+      if (profileIds.length > 0) {
+        const enrolledRows = await ProfileEnrolledProgram.find({ profileId: { $in: profileIds } })
+          .populate("programId", "name code")
+          .lean();
+        for (const e of enrolledRows) {
+          const name = e.programId?.name || e.programId?.code;
+          if (name) programaSet.add(String(name).trim());
+        }
+      }
+
+      const programas = [...programaSet].filter(Boolean).sort((a, b) => a.localeCompare(b, "es"));
+      return res.json({ estados, periodos, programas });
+    }
+
+    res.json({ estados, periodos, programas: [] });
   } catch (err) {
     console.error("[MTM] getMetaFiltrosLegalizacionesMTMAdmin:", err);
     res.status(500).json({ message: err.message });
@@ -2443,9 +2542,9 @@ export const getDocumentoLegalizacionDownloadAdmin = async (req, res) => {
     const doc = resolved.doc;
     if (!doc?.key) return res.status(404).json({ message: "Documento no encontrado" });
     const { body, contentType } = await getObjectFromS3(doc.key);
-    const fileName = (doc.originalName || `${definitionId}.pdf`).replace(/[^a-zA-Z0-9._-]/g, "_") || "documento.pdf";
+    const fileName = doc.originalName || `${definitionId}.pdf`;
     res.setHeader("Content-Type", contentType || "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.setHeader("Content-Disposition", safeContentDisposition(fileName));
     res.send(body);
   } catch (err) {
     if (err.message?.includes("S3 no está configurado")) {
@@ -2847,14 +2946,19 @@ export const getSeguimientosMTM = async (req, res) => {
     ]);
     const totalHorasAprobadas = totalResult[0]?.totalHoras ?? 0;
     const pendientes = await SeguimientoMTM.countDocuments({ postulacionMTM: postulacionId, estado: "pendiente_revision" });
-    const todosSeguimientosResueltos = pendientes === 0; // HU009: para finalizar MTM todos deben estar aprobados o rechazados
+    const todosSeguimientosResueltos = pendientes === 0; // HU009/HU011
+    const aprobados = await SeguimientoMTM.countDocuments({ postulacionMTM: postulacionId, estado: "aprobado" });
+    const tieneAlgunAprobado = aprobados > 0;
     // Actividades del plan de trabajo aprobado para el select "Tipo de actividad"
     const plan = await PlanDeTrabajoMTM.findOne({ postulacionMTM: postulacionId }).select("actividades estado").lean();
     const actividadesPlan =
       plan?.estado === "aprobado" && Array.isArray(plan.actividades)
         ? plan.actividades.map((a) => (a.tema || "").trim()).filter(Boolean)
         : [];
-    res.json({ data: list, totalHorasAprobadas, todosSeguimientosResueltos, actividadesPlan });
+    // HU011: estado de la legalización para habilitar botón de solicitud de finalización
+    const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId }).select("estado").lean();
+    const legalizacionEstado = leg?.estado ?? null;
+    res.json({ data: list, totalHorasAprobadas, todosSeguimientosResueltos, tieneAlgunAprobado, legalizacionEstado, actividadesPlan });
   } catch (err) {
     console.error("[MTM] getSeguimientosMTM:", err);
     res.status(500).json({ message: err.message });
@@ -3244,7 +3348,7 @@ export const getDocumentoSeguimientoDownloadAdmin = async (req, res) => {
     const { buffer, contentType } = await getObjectFromS3(seg.documentoSoporte.key);
     const filename = seg.documentoSoporte.originalName || "soporte-seguimiento.pdf";
     res.setHeader("Content-Type", contentType || "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${filename.replace(/"/g, "%22")}"`);
+    res.setHeader("Content-Disposition", safeContentDisposition(filename));
     res.send(buffer);
   } catch (err) {
     if (err.message?.includes("S3 no está configurado")) return res.status(503).json({ message: "Almacenamiento no disponible" });
@@ -3551,6 +3655,261 @@ export const getReporteAsistenciaMTM = async (req, res) => {
     res.json({ data, total, page: pageNum, limit: limitNum });
   } catch (err) {
     console.error("[MTM] getReporteAsistenciaMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ─── Aprobación masiva de legalizaciones MTM (admin) ─────────────────────────
+
+/**
+ * POST /oportunidades-mtm/legalizaciones-admin/aprobar-masivo
+ * Aprueba en bloque las legalizaciones seleccionadas que estén en `en_revision`.
+ * Auto-aprueba todos los documentos pendientes (no rechazados) y pone la legalización en `aprobada`.
+ */
+export const aprobarMasivoLegalizacionesMTM = async (req, res) => {
+  try {
+    const { postulacionIds } = req.body || {};
+    if (!Array.isArray(postulacionIds) || postulacionIds.length === 0) {
+      return res.status(400).json({ message: "Debe enviar al menos una postulación para aprobar." });
+    }
+    const ids = postulacionIds.filter((id) => isValidObjectId24(String(id)));
+    if (ids.length === 0) return res.status(400).json({ message: "IDs inválidos." });
+
+    let aprobadas = 0;
+    let omitidas = 0;
+    const errores = [];
+
+    for (const postulacionId of ids) {
+      try {
+        const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId });
+        if (!leg || leg.estado !== "en_revision") { omitidas++; continue; }
+
+        // Auto-aprobar todos los documentos cargados que no estén rechazados
+        const docs = leg.documentos || {};
+        let changed = false;
+        for (const key of Object.keys(docs)) {
+          const doc = docs[key];
+          if (doc?.key && doc.estadoDocumento !== "rechazado") {
+            docs[key] = { ...doc, estadoDocumento: "aprobado", motivoRechazo: null };
+            changed = true;
+          }
+        }
+        if (changed) {
+          leg.documentos = docs;
+          leg.markModified("documentos");
+        }
+        leg.estado = "aprobada";
+        leg.aprobadoAt = new Date();
+        leg.rechazoMotivo = null;
+        leg.historial.push({
+          estadoAnterior: "en_revision",
+          estadoNuevo: "aprobada",
+          usuario: req.user?.id ?? null,
+          detalle: "Aprobación masiva desde el listado de legalizaciones",
+        });
+        await leg.save();
+
+        // Notificación al estudiante (sin bloquear si falla)
+        try {
+          const ctx = await loadMtmPostulacionContext(postulacionId);
+          if (ctx) {
+            await dispatchMonitoriaNotificacion("aprobacion_legalizacion_monitoria", ctx.datos, {
+              estudiante: ctx.estudianteEmail,
+              postulante: ctx.estudianteEmail,
+            });
+          }
+        } catch (_) {}
+
+        aprobadas++;
+      } catch (err) {
+        errores.push({ postulacionId, error: err.message });
+        omitidas++;
+      }
+    }
+
+    res.json({
+      message: `Se legalizaron ${aprobadas} monitoría(s). ${omitidas > 0 ? `${omitidas} omitida(s) (no estaban en revisión o tuvieron error).` : ""}`.trim(),
+      aprobadas,
+      omitidas,
+      errores: errores.length > 0 ? errores : undefined,
+    });
+  } catch (err) {
+    console.error("[MTM] aprobarMasivoLegalizacionesMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * POST /oportunidades-mtm/legalizaciones-admin/finalizar-masivo
+ * Confirma en bloque la finalización de las legalizaciones seleccionadas que estén en `solicitada_finalizacion`.
+ */
+export const finalizarMasivoLegalizacionesMTM = async (req, res) => {
+  try {
+    const { postulacionIds } = req.body || {};
+    if (!Array.isArray(postulacionIds) || postulacionIds.length === 0) {
+      return res.status(400).json({ message: "Debe enviar al menos una postulación para finalizar." });
+    }
+    const ids = postulacionIds.filter((id) => isValidObjectId24(String(id)));
+    if (ids.length === 0) return res.status(400).json({ message: "IDs inválidos." });
+
+    let finalizadas = 0;
+    let omitidas = 0;
+    const errores = [];
+
+    for (const postulacionId of ids) {
+      try {
+        const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId });
+        if (!leg || leg.estado !== "solicitada_finalizacion") { omitidas++; continue; }
+
+        leg.estado = "finalizada";
+        leg.finalizadaAt = new Date();
+        leg.historial.push({
+          estadoAnterior: "solicitada_finalizacion",
+          estadoNuevo: "finalizada",
+          usuario: req.user?.id ?? null,
+          detalle: "Finalización masiva desde el listado de legalizaciones",
+        });
+        await leg.save();
+
+        // Notificación al estudiante (sin bloquear si falla)
+        try {
+          const ctx = await loadMtmPostulacionContext(postulacionId);
+          if (ctx) {
+            await dispatchMonitoriaNotificacion("finalizacion_monitoria", ctx.datos, {
+              estudiante: ctx.estudianteEmail,
+              postulante: ctx.estudianteEmail,
+            });
+          }
+        } catch (_) {}
+
+        finalizadas++;
+      } catch (err) {
+        errores.push({ postulacionId, error: err.message });
+        omitidas++;
+      }
+    }
+
+    res.json({
+      message: `Se finalizaron ${finalizadas} monitoría(s). ${omitidas > 0 ? `${omitidas} omitida(s) (no estaban en solicitud de finalización o tuvieron error).` : ""}`.trim(),
+      finalizadas,
+      omitidas,
+      errores: errores.length > 0 ? errores : undefined,
+    });
+  } catch (err) {
+    console.error("[MTM] finalizarMasivoLegalizacionesMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ─── RQ04_HU011: Solicitud de finalización de MTM ────────────────────────────
+
+/**
+ * POST /legalizaciones/:postulacionId/solicitar-finalizacion
+ * Estudiante-monitor solicita el cierre de su MTM.
+ * Condiciones: legalización aprobada + mínimo 1 seguimiento aprobado.
+ */
+export const solicitarFinalizacionMTM = async (req, res) => {
+  try {
+    const { postulacionId } = req.params;
+    const result = await getLegalizacionMTMForStudent(req, postulacionId);
+    if (result.error) return res.status(result.error).json({ message: result.message });
+
+    const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId });
+    if (!leg) return res.status(404).json({ message: "Legalización no encontrada" });
+    if (leg.estado !== "aprobada") {
+      return res.status(400).json({
+        message: "Solo puedes solicitar la finalización cuando tu legalización esté aprobada",
+      });
+    }
+
+    const aprobados = await SeguimientoMTM.countDocuments({
+      postulacionMTM: postulacionId,
+      estado: "aprobado",
+    });
+    if (aprobados === 0) {
+      return res.status(400).json({
+        message: "Debes tener al menos un seguimiento aprobado para solicitar la finalización",
+      });
+    }
+
+    leg.estado = "solicitada_finalizacion";
+    leg.solicitadaFinalizacionAt = new Date();
+    leg.historial.push({
+      estadoAnterior: "aprobada",
+      estadoNuevo: "solicitada_finalizacion",
+      usuario: req.user?.id ?? null,
+      detalle: "Estudiante solicitó la finalización de la MTM",
+    });
+    await leg.save();
+
+    try {
+      const ctx = await loadMtmPostulacionContext(postulacionId);
+      if (ctx) {
+        await dispatchMonitoriaNotificacion(
+          "solicitud_finalizacion_monitoria",
+          ctx.datos,
+          { coordinador: ctx.coordinadorEmail, lider_mtm: ctx.coordinadorEmail }
+        );
+      }
+    } catch (notifErr) {
+      console.warn("[MTM] solicitarFinalizacionMTM notificación:", notifErr?.message);
+    }
+
+    const updated = await LegalizacionMTM.findById(leg._id)
+      .populate("eps tipoCuenta banco", "value description listId")
+      .lean();
+    res.json({ legalizacion: updated, message: "Solicitud de finalización enviada correctamente" });
+  } catch (err) {
+    console.error("[MTM] solicitarFinalizacionMTM:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * POST /legalizaciones-admin/:postulacionId/finalizar
+ * Coordinador/staff confirma el cierre definitivo de la MTM.
+ * Condición: legalización en solicitada_finalizacion.
+ */
+export const finalizarMTM = async (req, res) => {
+  try {
+    const { postulacionId } = req.params;
+    const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId });
+    if (!leg) return res.status(404).json({ message: "Legalización no encontrada" });
+    if (leg.estado !== "solicitada_finalizacion") {
+      return res.status(400).json({
+        message: "Solo se puede finalizar una MTM cuya solicitud de finalización haya sido enviada por el estudiante",
+      });
+    }
+
+    leg.estado = "finalizada";
+    leg.finalizadaAt = new Date();
+    leg.historial.push({
+      estadoAnterior: "solicitada_finalizacion",
+      estadoNuevo: "finalizada",
+      usuario: req.user?.id ?? null,
+      detalle: "Coordinador finalizó la MTM",
+    });
+    await leg.save();
+
+    try {
+      const ctx = await loadMtmPostulacionContext(postulacionId);
+      if (ctx) {
+        await dispatchMonitoriaNotificacion(
+          "finalizacion_monitoria",
+          ctx.datos,
+          { estudiante: ctx.estudianteEmail, postulante: ctx.estudianteEmail }
+        );
+      }
+    } catch (notifErr) {
+      console.warn("[MTM] finalizarMTM notificación:", notifErr?.message);
+    }
+
+    const updated = await LegalizacionMTM.findById(leg._id)
+      .populate("eps tipoCuenta banco", "value description listId")
+      .lean();
+    res.json({ legalizacion: updated, message: "MTM finalizada correctamente" });
+  } catch (err) {
+    console.error("[MTM] finalizarMTM:", err);
     res.status(500).json({ message: err.message });
   }
 };

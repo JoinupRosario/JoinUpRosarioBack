@@ -67,6 +67,11 @@ import {
   getReporteAsistenciaMTM,
   getReporteAsistenciaMTMStudent,
   getReporteAsistenciaMTMAdminByPostulacion,
+  solicitarFinalizacionMTM,
+  finalizarMTM,
+  getMisDocumentosSoporte,
+  aprobarMasivoLegalizacionesMTM,
+  finalizarMasivoLegalizacionesMTM,
 } from "./oportunidadMTM.controller.js";
 
 const router = express.Router();
@@ -121,6 +126,8 @@ router.get("/legalizaciones-admin/reporte-asistencia", requireStaffPermission("D
 router.get("/para-estudiante", authorizeRoles("student"), getOportunidadesMTMParaEstudiante);
 router.get("/mis-postulaciones", authorizeRoles("student"), getMisPostulacionesMTM);
 router.get("/mis-aceptadas", authorizeRoles("student"), getMisAceptadasMTM);
+// Documentos de soporte del estudiante para el modal de aplicación (RQ04_HU001)
+router.get("/mis-documentos-soporte", authorizeRoles("student"), getMisDocumentosSoporte);
 router.post("/:id/aplicar", authorizeRoles("student"), aplicarOportunidadMTM);
 
 // RQ04_HU004: Legalización MTM (estudiante)
@@ -130,6 +137,8 @@ router.delete("/legalizaciones/:postulacionId/documentos/:definitionId", authori
 router.put("/legalizaciones/:postulacionId", authorizeRoles("student"), updateLegalizacionMTM);
 router.post("/legalizaciones/:postulacionId/documentos", authorizeRoles("student"), uploadLegalizacion.single("file"), uploadDocLegalizacionMTM);
 router.post("/legalizaciones/:postulacionId/remitir-revision", authorizeRoles("student"), remitirRevisionLegalizacionMTM);
+// RQ04_HU011: Solicitud de finalización (estudiante)
+router.post("/legalizaciones/:postulacionId/solicitar-finalizacion", authorizeRoles("student"), solicitarFinalizacionMTM);
 router.get("/legalizaciones/:postulacionId/link-asistencia", authorizeRoles("student"), getOrCreateLinkAsistenciaMTM);
 router.get("/legalizaciones/:postulacionId/reporte-asistencia", authorizeRoles("student"), getReporteAsistenciaMTMStudent);
 
@@ -178,6 +187,23 @@ router.post(
   "/legalizaciones-admin/:postulacionId/rechazar",
   requireStaffPermission("APLM", "ANLM", "ACLM"),
   postRechazarLegalizacionMTM
+);
+// RQ04_HU011: Finalización definitiva (coordinador/staff)
+router.post(
+  "/legalizaciones-admin/:postulacionId/finalizar",
+  requireStaffPermission("APLM", "ACLM", "AMMO"),
+  finalizarMTM
+);
+// Acciones masivas (deben ir antes de /:postulacionId/* para evitar conflicto de rutas)
+router.post(
+  "/legalizaciones-admin/aprobar-masivo",
+  requireStaffPermission("APLM", "APDM", "ACLM"),
+  aprobarMasivoLegalizacionesMTM
+);
+router.post(
+  "/legalizaciones-admin/finalizar-masivo",
+  requireStaffPermission("APLM", "ACLM", "AMMO"),
+  finalizarMasivoLegalizacionesMTM
 );
 
 // RQ04_HU006: Plan de trabajo MTM (estudiante: crear/editar/enviar; profesor/admin: aprobar/rechazar)

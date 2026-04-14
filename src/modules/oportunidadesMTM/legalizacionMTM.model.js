@@ -14,8 +14,10 @@ const legalizacionHistorialEntrySchema = new mongoose.Schema(
 
 /**
  * Legalización MTM (RQ04_HU004). Una por postulación aceptada.
- * Estado: creada (legado UrJobs CREATED/DRAFT) → en_revision → aprobada | finalizada | rechazada | en_ajuste.
- * `finalizada`: proceso cerrado en UrJobs (p. ej. monitoría terminada / flujo completado en legado).
+ * Estado: creada → en_revision → aprobada | rechazada | en_ajuste.
+ *         aprobada → solicitada_finalizacion (estudiante solicita cierre, RQ04_HU011)
+ *                  → finalizada (coordinador confirma el cierre).
+ * `finalizada` también llega desde legado UrJobs (flujo completado en migración).
  * Por documento: estadoDocumento pendiente | aprobado | rechazado + motivoRechazo (revisión coordinador).
  *
  * `historial`: migrado desde monitoring_legalized + change_status_monitoring_legalized (migrateOpportunitiesFromMySQL.js).
@@ -34,7 +36,7 @@ const legalizacionMTMSchema = new mongoose.Schema(
     },
     estado: {
       type: String,
-      enum: ["creada", "en_revision", "aprobada", "finalizada", "rechazada", "en_ajuste"],
+      enum: ["creada", "en_revision", "aprobada", "solicitada_finalizacion", "finalizada", "rechazada", "en_ajuste"],
       default: "creada",
       index: true,
     },
@@ -57,6 +59,8 @@ const legalizacionMTMSchema = new mongoose.Schema(
     enviadoRevisionAt: { type: Date, default: null },
     aprobadoAt: { type: Date, default: null },
     rechazadoAt: { type: Date, default: null },
+    solicitadaFinalizacionAt: { type: Date, default: null },
+    finalizadaAt: { type: Date, default: null },
     rechazoMotivo: { type: String, default: null },
     historial: {
       type: [legalizacionHistorialEntrySchema],

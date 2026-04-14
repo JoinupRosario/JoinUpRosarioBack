@@ -62,6 +62,22 @@ const postulacionMTMSchema = new mongoose.Schema(
     rechazadoAt: { type: Date, default: null },
     revisadoPor: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     comentarios: { type: String, default: null },
+    /**
+     * Documentos de soporte adjuntados por el estudiante al momento de aplicar (RQ04_HU001).
+     * Se almacenan de forma inlined para persistir aunque el estudiante los elimine de su perfil.
+     */
+    documentosSoporte: {
+      type: [
+        {
+          attachmentId: { type: mongoose.Schema.Types.ObjectId, ref: "Attachment", required: true },
+          documentLabel: { type: String, default: "" },
+          originalName: { type: String, default: "" },
+          postulantDocId: { type: String, default: null },
+          _id: false,
+        },
+      ],
+      default: [],
+    },
     /** RQ04_HU010: token único para link de control de asistencia por MTM (todo el semestre) */
     linkAsistenciaToken: { type: String, trim: true, default: null, unique: true, sparse: true },
   },

@@ -1,4 +1,6 @@
 import mongoose from "mongoose";
+import path from "path";
+import { v4 as uuidv4 } from "uuid";
 import Opportunity from "./opportunity.model.js";
 import Company from "../companies/company.model.js";
 import Student from "../students/student.model.js";
@@ -26,6 +28,7 @@ import {
   practicaOpportunityDashboardLink,
 } from "../notificacion/application/practicaOpportunityNotifications.helper.js";
 import { getAdminProgramScope } from "../../utils/adminProgramScope.util.js";
+import { uploadToS3, deleteFromS3, getSignedDownloadUrl } from "../../config/s3.config.js";
 
 const CODE_MAX_JORNADA_ORDINARIA = "PRACTICE_MAX_JORNADA_ORDINARIA_SEMANAL";
 const CODE_MIN_APOYO_ECONOMICO_COP = "PRACTICE_MIN_APOYO_ECONOMICO_COP";
@@ -831,10 +834,9 @@ export const createOpportunity = async (req, res) => {
 
     await normalizeOpportunityRefs(restData);
 
-    // Procesar documentos si vienen en FormData
+    // Procesar documentos si vienen en FormData — subir a S3
     const documentos = [];
     if (req.files) {
-      // Procesar archivos subidos
       let index = 1;
       while (req.files[`documento${index}`]) {
         const file = req.files[`documento${index}`][0] || req.files[`documento${index}`];
@@ -842,36 +844,44 @@ export const createOpportunity = async (req, res) => {
         const requerido = req.body[`documento${index}_requerido`] === 'true';
         const orden = parseInt(req.body[`documento${index}_orden`]) || index;
 
+        const ext = path.extname(file.originalname).toLowerCase();
+        const s3Key = `opportunities/attachments/${uuidv4()}${ext}`;
+        await uploadToS3(s3Key, file.buffer, {
+          contentType: file.mimetype,
+          metadata: { originalName: file.originalname },
+        });
+
         documentos.push({
           nombre,
           archivo: {
             originalName: file.originalname,
-            fileName: file.filename,
-            path: file.path,
+            fileName: file.originalname,
+            path: s3Key,
             size: file.size,
-            mimeType: file.mimetype
+            mimeType: file.mimetype,
           },
           requerido,
-          orden
+          orden,
         });
         index++;
       }
     }
 
-    // Crear la oportunidad con estado "Creada"
+    // Crear la oportunidad directamente en estado "En Revisión"
     const opportunity = await Opportunity.create({
       ...restData,
       company,
       documentos: documentos.length > 0 ? documentos : undefined,
-      estado: "Creada",
+      estado: "En Revisión",
       creadoPor: req.user.id,
       fechaCreacion: new Date(),
+      fechaRevision: new Date(),
       historialEstados: [{
         estadoAnterior: null,
-        estadoNuevo: "Creada",
+        estadoNuevo: "En Revisión",
         cambiadoPor: req.user.id,
         fechaCambio: new Date(),
-        comentarios: "Oportunidad creada"
+        comentarios: "Oportunidad creada y enviada a revisión"
       }]
     });
 
@@ -2913,6 +2923,118 @@ export const crearPracticaAutogestionada = async (req, res) => {
       nextBody.tipo = "practica";
     }
     return createOpportunity({ ...req, body: nextBody }, res);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** Agrega un documento a una oportunidad existente (sube a S3). */
+export const addOpportunityDocument = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const opportunity = await Opportunity.findById(id);
+    if (!opportunity) {
+      return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ message: "No se recibió ningún archivo" });
+    }
+
+    const file = req.file;
+    const nombre = req.body.nombre || file.originalname;
+    const requerido = req.body.requerido === "true";
+    const orden = parseInt(req.body.orden) || (opportunity.documentos.length + 1);
+
+    const ext = path.extname(file.originalname).toLowerCase();
+    const s3Key = `opportunities/attachments/${uuidv4()}${ext}`;
+    await uploadToS3(s3Key, file.buffer, {
+      contentType: file.mimetype,
+      metadata: { originalName: file.originalname },
+    });
+
+    opportunity.documentos.push({
+      nombre,
+      archivo: {
+        originalName: file.originalname,
+        fileName: file.originalname,
+        path: s3Key,
+        size: file.size,
+        mimeType: file.mimetype,
+      },
+      requerido,
+      orden,
+    });
+    await opportunity.save();
+
+    res.json({
+      message: "Documento agregado correctamente",
+      documento: opportunity.documentos[opportunity.documentos.length - 1],
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** Elimina un documento de una oportunidad (de S3 y de la BD). */
+export const deleteOpportunityDocument = async (req, res) => {
+  try {
+    const { id, docId } = req.params;
+    const opportunity = await Opportunity.findById(id);
+    if (!opportunity) {
+      return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+
+    const doc = opportunity.documentos.id(docId);
+    if (!doc) {
+      return res.status(404).json({ message: "Documento no encontrado" });
+    }
+
+    const s3Key = doc.archivo?.path;
+    if (s3Key && s3Key.startsWith("opportunities/")) {
+      try {
+        await deleteFromS3(s3Key);
+      } catch (s3Err) {
+        console.warn("[opportunities] No se pudo eliminar de S3:", s3Err?.message);
+      }
+    }
+
+    doc.deleteOne();
+    await opportunity.save();
+
+    res.json({ message: "Documento eliminado correctamente" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** Retorna URL firmada de S3 para previsualizar un documento de oportunidad. */
+export const getOpportunityDocumentPreview = async (req, res) => {
+  try {
+    const { id, docId } = req.params;
+    const opportunity = await Opportunity.findById(id).lean();
+    if (!opportunity) {
+      return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+
+    const doc = (opportunity.documentos || []).find(
+      (d) => String(d._id) === String(docId)
+    );
+    if (!doc) {
+      return res.status(404).json({ message: "Documento no encontrado" });
+    }
+
+    const s3Key = doc.archivo?.path;
+    if (!s3Key || !s3Key.startsWith("opportunities/")) {
+      return res.status(400).json({ message: "Este documento no está almacenado en S3" });
+    }
+
+    const url = await getSignedDownloadUrl(s3Key, 3600, {
+      responseContentDisposition: `inline; filename="${encodeURIComponent(doc.archivo.originalName || doc.nombre)}"`,
+      responseContentType: doc.archivo.mimeType || "application/octet-stream",
+    });
+
+    res.json({ url });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

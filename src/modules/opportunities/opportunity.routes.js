@@ -1,7 +1,5 @@
 import express from "express";
 import multer from "multer";
-import path from "path";
-import { v4 as uuidv4 } from "uuid";
 import {
   getOpportunities,
   getDistinctEstadosPractica,
@@ -32,6 +30,9 @@ import {
   buscarPerfilParaAutogestionada,
   getEmpresasParaAutogestionada,
   crearPracticaAutogestionada,
+  addOpportunityDocument,
+  deleteOpportunityDocument,
+  getOpportunityDocumentPreview,
 } from "./opportunity.controller.js";
 import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
 import {
@@ -42,26 +43,15 @@ import {
 
 const router = express.Router();
 
-// Configuración de multer para múltiples documentos
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "src/uploads/attachments/");
-  },
-  filename: (req, file, cb) => {
-    const uniqueName = `${uuidv4()}-${Date.now()}${path.extname(file.originalname)}`;
-    cb(null, uniqueName);
-  }
-});
-
+// Memory storage: los buffers se suben directamente a S3 en el controlador
 const fileFilter = (req, file, cb) => {
   const allowedTypes = [
     "application/pdf",
     "application/msword",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "image/jpeg",
-    "image/png"
+    "image/png",
   ];
-  
   if (allowedTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
@@ -69,27 +59,23 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-const upload = multer({
-  storage: storage,
-  fileFilter: fileFilter,
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB por archivo
-    files: 3 // Máximo 3 archivos
-  }
+const uploadMultiple = multer({
+  storage: multer.memoryStorage(),
+  fileFilter,
+  limits: { fileSize: 10 * 1024 * 1024, files: 3 },
 });
 
-// Middleware para manejar múltiples archivos con nombres dinámicos
+const uploadSingle = multer({
+  storage: multer.memoryStorage(),
+  fileFilter,
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
+
+// Middleware para manejar hasta 3 documentos en la creación
 const uploadMultipleDocuments = (req, res, next) => {
-  const uploadFields = [];
-  for (let i = 1; i <= 3; i++) {
-    uploadFields.push({ name: `documento${i}`, maxCount: 1 });
-  }
-  
-  const multerMiddleware = upload.fields(uploadFields);
-  multerMiddleware(req, res, (err) => {
-    if (err) {
-      return res.status(400).json({ message: err.message });
-    }
+  const fields = [1, 2, 3].map((i) => ({ name: `documento${i}`, maxCount: 1 }));
+  uploadMultiple.fields(fields)(req, res, (err) => {
+    if (err) return res.status(400).json({ message: err.message });
     next();
   });
 };
@@ -225,6 +211,24 @@ router.post(
   "/:id/duplicate",
   requireCompanyOrStaffPermission("DOPO", "APRA"),
   duplicateOpportunity
+);
+
+// Gestión de documentos de la oportunidad (S3)
+router.post(
+  "/:id/documentos",
+  requireCompanyOrStaffPermission("APRA", "AOPA"),
+  uploadSingle.single("documento"),
+  addOpportunityDocument
+);
+router.delete(
+  "/:id/documentos/:docId",
+  requireCompanyOrStaffPermission("APRA", "AOPA"),
+  deleteOpportunityDocument
+);
+router.get(
+  "/:id/documentos/:docId/preview",
+  requireCompanyStudentOrStaffPermission("CPAC", "AMOP", "CPRA", "APRA"),
+  getOpportunityDocumentPreview
 );
 
 export default router;
