@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 
-const OPPORTUNITY_PRACTICE_ESTADOS = [
+/** Valores persistidos en `Opportunity.estado` (práctica / pasantía). Reutilizado en reportes y validaciones. */
+export const OPPORTUNITY_PRACTICE_ESTADOS = [
   "Creada",
   "En Revisión",
   "Revisada",

@@ -42,3 +42,25 @@ export function mtmOportunidadMatchesAdminProgram(op, programIds) {
   }
   return false;
 }
+
+/**
+ * Oferta MTM sin refs en `programas`: intentar alinear con programas asignados al admin
+ * por texto en unidad académica, nombre del cargo o nombres/códigos de programas (populate).
+ */
+export function mtmOpportunityMatchesAdminProgramTerms(op, programTerms) {
+  if (!programTerms?.length) return false;
+  const terms = programTerms.map((t) => String(t).trim().toLowerCase()).filter(Boolean);
+  if (!terms.length) return false;
+  const hay = [];
+  const ua = String(op?.unidadAcademica || "").trim().toLowerCase();
+  if (ua) hay.push(ua);
+  const nc = String(op?.nombreCargo || "").trim().toLowerCase();
+  if (nc) hay.push(nc);
+  for (const p of op?.programas || []) {
+    if (p && typeof p === "object") {
+      hay.push(String(p.name || "").trim().toLowerCase());
+      hay.push(String(p.code || "").trim().toLowerCase());
+    }
+  }
+  return terms.some((t) => hay.some((h) => h && (h.includes(t) || t.includes(h))));
+}

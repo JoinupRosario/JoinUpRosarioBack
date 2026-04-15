@@ -39,6 +39,8 @@ import plantillasNotificacionRoutes from '../modules/notificacion/plantillasNoti
 import variablesNotificacionRoutes from '../modules/notificacion/variablesNotificacion/variableNotificacion.routes.js';
 import destinatariosNotificacionRoutes from '../modules/notificacion/destinatariosNotificacion/destinatarioNotificacion.routes.js';
 import accessRoutes from '../modules/access/presentation/routes/access.routes.js';
+import catalogRoutes from '../modules/catalogs/catalog.routes.js';
+import reportingFiltersRoutes from '../modules/reportingFilters/reportingFilters.routes.js';
 
 const router = express.Router();
 
@@ -50,6 +52,8 @@ router.use("/companies", companyRoutes);
 router.use("/opportunities", opportunityRoutes);
 router.use("/internships", internshipRoutes);
 router.use("/reports", reportRoutes);
+router.use("/catalogs", catalogRoutes);
+router.use("/reporting-filters", reportingFiltersRoutes);
 router.use("/parameters", parameterRoutes);
 router.use("/documents", documentRoutes);
 router.use("/roles", rolesRoutes);

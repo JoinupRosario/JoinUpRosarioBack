@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "fromDocument": "reporte_parametros.md",
+  "reportKey": "detalle-ofertas-monitorias",
+  "category": "monitorias",
+  "probableTables": [
+    "opportunity",
+    "study_working",
+    "company",
+    "opportunity_programs",
+    "program",
+    "academic_period"
+  ],
+  "relationshipNotes": [
+    "opportunity (1) — study_working (1, misma PK que opportunity.id)",
+    "opportunity — opportunity_programs — program",
+    "study_working — academic_period vía period_sw (según esquema analizado)"
+  ],
+  "suggestedParameters": [
+    {
+      "filterId": "date_range",
+      "docLabel": "rango de fechas (opportunity.date_creation o closing_offer_date)",
+      "presentation": "date_range",
+      "semanticFields": [
+        { "table": "opportunity", "column": "date_creation" },
+        { "table": "opportunity", "column": "closing_offer_date" }
+      ]
+    },
+    {
+      "filterId": "opportunity_status",
+      "docLabel": "opportunity.status",
+      "presentation": "select_catalog",
+      "semanticFields": [{ "table": "opportunity", "column": "status" }],
+      "catalog": { "strategy": "item_catalog", "routeType": "L_OPPORTUNITY_STATUS" }
+    },
+    {
+      "filterId": "opportunity_type",
+      "docLabel": "opportunity_type / ítems paramétricos",
+      "presentation": "select_catalog",
+      "semanticFields": [{ "table": "opportunity", "column": "opportunity_type" }],
+      "catalog": { "strategy": "item_catalog", "routeType": "L_OPPORTUNITY_TYPE" }
+    },
+    {
+      "filterId": "program_id",
+      "docLabel": "programa (opportunity_programs.program_id)",
+      "presentation": "select_remote",
+      "semanticFields": [{ "table": "opportunity_programs", "column": "program_id" }],
+      "remote": { "endpoint": "/programs" }
+    },
+    {
+      "filterId": "company_id",
+      "docLabel": "empresa",
+      "presentation": "select_remote",
+      "semanticFields": [{ "table": "opportunity", "column": "company_id" }],
+      "remote": { "endpoint": "/companies" }
+    }
+  ]
+}

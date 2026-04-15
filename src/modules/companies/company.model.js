@@ -1,5 +1,8 @@
 import mongoose from "mongoose";
 
+/** Valores de `Company.status` (aprobación / estado de la entidad). */
+export const COMPANY_ENTITY_STATUSES = ["active", "inactive", "pending_approval"];
+
 const companySchema = new mongoose.Schema(
   {
     // Identificación y nombres

@@ -56,6 +56,7 @@ const oportunidadMTMSchema = new mongoose.Schema(
       ref: "items",
       default: null
     },
+    /** Ref a `items` con listId L_MONITORING_TYPE (tipo / categoría de monitoría). */
     categoria: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "items",
