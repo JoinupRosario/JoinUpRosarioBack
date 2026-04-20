@@ -16,6 +16,8 @@ import {
   uploadCompanyInitialFiles,
   getCompanyDocumentSignedUrl,
   deleteCompanyDocument,
+  getMyCompany,
+  getMyCompanyDocumentSignedUrl,
 } from "./company.controller.js";
 import { verifyToken } from "../../middlewares/auth.js";
 import { requirePermission } from "../access/presentation/middlewares/requirePermission.js";
@@ -55,6 +57,11 @@ router.post("/public-register", companyAssetsMiddleware, publicRegisterCompany);
 
 // ── Rutas protegidas (requieren token) ──────────────────────────────────────
 router.use(verifyToken);
+
+// Portal de la propia entidad (rol "company"): no requiere permisos granulares,
+// el controller valida que la empresa y el contacto estén activos.
+router.get("/me", getMyCompany);
+router.get("/me/document/:field", getMyCompanyDocumentSignedUrl);
 
 // AAME = Acceso al módulo Empresa; LEMP = Listar, CEMP = Crear, EEMP = Editar; CCON/ECON/CCEC = Contactos
 router.get("/", requirePermission("AAME", "LEMP"), getCompanies);

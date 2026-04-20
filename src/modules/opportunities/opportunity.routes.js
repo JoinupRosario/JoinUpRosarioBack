@@ -33,6 +33,7 @@ import {
   addOpportunityDocument,
   deleteOpportunityDocument,
   getOpportunityDocumentPreview,
+  getMyEntityOpportunities,
 } from "./opportunity.controller.js";
 import { verifyToken, authorizeRoles } from "../../middlewares/auth.js";
 import {
@@ -94,6 +95,9 @@ router.get(
   requireCompanyOrStaffPermission("CPAC", "AMOP", "CPRA", "AMPR"),
   getDistinctEstadosPractica
 );
+// Portal de la entidad: lista solo las oportunidades de práctica de la propia empresa.
+// El controller resuelve la company a partir del usuario autenticado.
+router.get("/mi-entidad", getMyEntityOpportunities);
 // RQ04_HU004 práctica autogestionada (líder): antes de /:id
 router.get(
   "/autogestionada/buscar-perfil",

@@ -21,6 +21,7 @@ import {
   buildCompanySearchFilter,
   buildAccentInsensitiveMongoRegexPattern,
 } from "./companySearch.helper.js";
+import { mapModuloToRole } from "../../middlewares/auth.js";
 
 const COMPANY_DOC_URL_FIELDS = [
   "chamberOfCommerceCertificate",
@@ -1621,10 +1622,10 @@ export const resetContactPassword = async (req, res) => {
       null,
       {
         accion: "resetear_contraseña_contacto",
-        contactoId,
+        contactoId: contactId,
         tempFromIdentification: useIdentificationAsTemp,
       },
-      { accion: "resetear_contraseña_contacto", contactoId }
+      { accion: "resetear_contraseña_contacto", contactoId: contactId }
     );
 
     res.json({
@@ -1996,5 +1997,117 @@ export const publicRegisterCompany = async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * Resuelve la empresa asociada al usuario autenticado (rol "company" / módulo "entidades").
+ * Devuelve `{ company, contact }` o lanza un error con `status` cuando no se cumplan condiciones.
+ */
+async function resolveAuthenticatedEntityCompany(req) {
+  const role = req.user?.role || mapModuloToRole(req.user?.modulo);
+  if (role !== "company") {
+    const err = new Error("Solo disponible para usuarios de entidad");
+    err.status = 403;
+    throw err;
+  }
+  const company = await Company.findOne({ "contacts.userId": req.user.id })
+    .populate("contacts.userId", "name email estado")
+    .lean();
+  if (!company) {
+    const err = new Error("No se encontró la entidad asociada a tu usuario");
+    err.status = 404;
+    throw err;
+  }
+  const contact = (company.contacts || []).find(
+    (c) => String(c.userId?._id || c.userId) === String(req.user.id)
+  );
+  return { company, contact };
+}
+
+/**
+ * GET /companies/me — Devuelve la entidad del contacto autenticado (portal entidad).
+ * Es solo lectura: omite información administrativa interna (`approvedBy`).
+ */
+export const getMyCompany = async (req, res) => {
+  try {
+    const { company, contact } = await resolveAuthenticatedEntityCompany(req);
+    if (contact && String(contact.status || "active").toLowerCase() !== "active") {
+      return res.status(403).json({ message: "Tu contacto no está activo en la entidad" });
+    }
+    if (String(company.status || "active").toLowerCase() !== "active") {
+      return res
+        .status(403)
+        .json({ message: "Tu entidad aún no está activa. Contacta a la coordinación." });
+    }
+
+    delete company.approvedBy;
+    if (Array.isArray(company.contacts)) {
+      company.contacts = company.contacts.map((c) => {
+        if (c?.userId && typeof c.userId === "object") {
+          const { _id, name, email, estado } = c.userId;
+          return { ...c, userId: { _id, name, email, estado } };
+        }
+        return c;
+      });
+    }
+
+    const documentAttachmentNames = await attachDocumentAttachmentNames(company);
+    if (Object.keys(documentAttachmentNames).length > 0) {
+      company.documentAttachmentNames = documentAttachmentNames;
+    }
+
+    res.json(company);
+  } catch (error) {
+    const status = error.status || 500;
+    res.status(status).json({ message: error.message || "Error al obtener la entidad" });
+  }
+};
+
+/**
+ * GET /companies/me/document/:field — URL firmada para descargar un documento de la propia entidad.
+ * Reusa la misma lógica que `getCompanyDocumentSignedUrl` pero validando ownership por usuario.
+ */
+export const getMyCompanyDocumentSignedUrl = async (req, res) => {
+  try {
+    const field = req.params.field;
+    if (!COMPANY_DOC_URL_FIELDS.includes(field)) {
+      return res.status(400).json({ success: false, message: "Tipo de documento no válido." });
+    }
+    const { company } = await resolveAuthenticatedEntityCompany(req);
+    const key = company[field];
+    if (!key || typeof key !== "string" || !String(key).trim()) {
+      return res.status(404).json({ success: false, message: "No hay archivo registrado." });
+    }
+    const resolved = await resolveCompanyDocumentStorageKey(key);
+    if (resolved.kind === "empty") {
+      return res.status(404).json({ success: false, message: "No hay archivo registrado." });
+    }
+    if (resolved.kind === "legacyMissing") {
+      return res.status(404).json({
+        success: false,
+        message: `No se encontró el adjunto migrado (mysqlId attachment ${resolved.mysqlId}).`,
+      });
+    }
+    if (resolved.kind === "url") {
+      return res.json({ success: true, url: resolved.value });
+    }
+    if (!s3Config.isConfigured) {
+      return res.status(503).json({
+        success: false,
+        message: "Almacenamiento S3 no configurado; no se puede generar el enlace.",
+      });
+    }
+    const url = await getSignedDownloadUrl(resolved.key, 3600);
+    const payload = { success: true, url };
+    if (resolved.kind === "s3Key" && resolved.attachmentName) {
+      payload.fileName = resolved.attachmentName;
+    }
+    return res.json(payload);
+  } catch (error) {
+    const status = error.status || 500;
+    return res
+      .status(status)
+      .json({ success: false, message: error.message || "Error al generar enlace" });
   }
 };

@@ -26,6 +26,10 @@ import {
   loadMtmPostulacionContextFromLegalizacion,
 } from "../notificacion/application/mtmNotifications.helper.js";
 import { getAdminProgramScope, mtmOportunidadMatchesAdminProgram } from "../../utils/adminProgramScope.util.js";
+import {
+  dispararEvaluacionParaLegalizacion,
+  monitorYaAutoEvaluo,
+} from "../evaluacionMTM/evaluacionMTM.service.js";
 
 /** Intersecta `filter._id` con ids permitidos (muta filter). false = intersección vacía. */
 function intersectFilterIds(filter, allowedIds) {
@@ -3761,6 +3765,17 @@ export const finalizarMasivoLegalizacionesMTM = async (req, res) => {
         const leg = await LegalizacionMTM.findOne({ postulacionMTM: postulacionId });
         if (!leg || leg.estado !== "solicitada_finalizacion") { omitidas++; continue; }
 
+        // RQ04_HU011 – paso 17: requiere autoevaluación del monitor antes de finalizar
+        const monitorOk = await monitorYaAutoEvaluo(leg._id);
+        if (!monitorOk) {
+          errores.push({
+            postulacionId,
+            error: "El monitor aún no ha completado su autoevaluación.",
+          });
+          omitidas++;
+          continue;
+        }
+
         leg.estado = "finalizada";
         leg.finalizadaAt = new Date();
         leg.historial.push({
@@ -3842,23 +3857,60 @@ export const solicitarFinalizacionMTM = async (req, res) => {
     });
     await leg.save();
 
-    try {
-      const ctx = await loadMtmPostulacionContext(postulacionId);
-      if (ctx) {
-        await dispatchMonitoriaNotificacion(
-          "solicitud_finalizacion_monitoria",
-          ctx.datos,
-          { coordinador: ctx.coordinadorEmail, lider_mtm: ctx.coordinadorEmail }
+    setImmediate(async () => {
+      try {
+        const ctx = await loadMtmPostulacionContext(postulacionId);
+        if (ctx) {
+          await dispatchMonitoriaNotificacion(
+            "solicitud_finalizacion_monitoria",
+            ctx.datos,
+            { coordinador: ctx.coordinadorEmail, lider_mtm: ctx.coordinadorEmail }
+          );
+        }
+      } catch (notifErr) {
+        console.warn(
+          "[MTM][BG] solicitarFinalizacionMTM notificación coordinador:",
+          notifErr?.message
         );
       }
-    } catch (notifErr) {
-      console.warn("[MTM] solicitarFinalizacionMTM notificación:", notifErr?.message);
-    }
+    });
 
     const updated = await LegalizacionMTM.findById(leg._id)
       .populate("eps tipoCuenta banco", "value description listId")
       .lean();
-    res.json({ legalizacion: updated, message: "Solicitud de finalización enviada correctamente" });
+
+    // Respondemos inmediato: la legalización ya cambió de estado y la cola de
+    // correos se procesa en background. Evita que la UI quede colgada por la
+    // latencia de SendGrid / lookups / encolado.
+    res.json({
+      legalizacion: updated,
+      evaluacion: { encolada: true },
+      message:
+        "Solicitud de finalización enviada correctamente. Las evaluaciones se están enviando por correo en segundo plano.",
+    });
+
+    // RQ04_HU011 – paso 16: dispara las 3 evaluaciones (monitor, profesor, asistentes)
+    // Fire-and-forget: NO bloquea la respuesta HTTP.
+    setImmediate(async () => {
+      try {
+        const r = await dispararEvaluacionParaLegalizacion({
+          legalizacion: leg,
+          disparadaPor: req.user?.id || null,
+        });
+        console.log(
+          `[MTM][BG] Evaluaciones disparadas para legalización=${leg._id}` +
+            ` · monitor=${r?.tokens?.monitor ? "✓" : "✗"}` +
+            ` · profesor=${r?.tokens?.profesor ? "✓" : "✗"}` +
+            ` · estudiantes=${r?.tokens?.estudiantes ?? 0}` +
+            (r?.warnings?.length ? ` · warnings=${r.warnings.length}` : "")
+        );
+      } catch (evalErr) {
+        console.error(
+          `[MTM][BG] disparar evaluaciones falló para legalización=${leg._id}:`,
+          evalErr?.message || evalErr
+        );
+      }
+    });
   } catch (err) {
     console.error("[MTM] solicitarFinalizacionMTM:", err);
     res.status(500).json({ message: err.message });
@@ -3878,6 +3930,15 @@ export const finalizarMTM = async (req, res) => {
     if (leg.estado !== "solicitada_finalizacion") {
       return res.status(400).json({
         message: "Solo se puede finalizar una MTM cuya solicitud de finalización haya sido enviada por el estudiante",
+      });
+    }
+
+    // RQ04_HU011 – paso 17: prerrequisito = autoevaluación del monitor completada
+    const monitorOk = await monitorYaAutoEvaluo(leg._id);
+    if (!monitorOk) {
+      return res.status(409).json({
+        message:
+          "No es posible finalizar la MTM: el monitor aún no ha completado su autoevaluación.",
       });
     }
 

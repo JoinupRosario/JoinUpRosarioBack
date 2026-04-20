@@ -29,6 +29,7 @@ import {
 } from "../notificacion/application/practicaOpportunityNotifications.helper.js";
 import { getAdminProgramScope } from "../../utils/adminProgramScope.util.js";
 import { uploadToS3, deleteFromS3, getSignedDownloadUrl } from "../../config/s3.config.js";
+import { mapModuloToRole } from "../../middlewares/auth.js";
 
 const CODE_MAX_JORNADA_ORDINARIA = "PRACTICE_MAX_JORNADA_ORDINARIA_SEMANAL";
 const CODE_MIN_APOYO_ECONOMICO_COP = "PRACTICE_MIN_APOYO_ECONOMICO_COP";
@@ -527,6 +528,48 @@ export const getOpportunities = async (req, res) => {
   }
 };
 
+/**
+ * GET /opportunities/mi-entidad — Lista las oportunidades de práctica creadas por la entidad
+ * a la que pertenece el usuario autenticado (rol "company" / módulo "entidades").
+ *
+ * Reutiliza `getOpportunities` forzando `tipo=practica` y `company=<idDelUsuario>`,
+ * de modo que un contacto NO pueda ver oportunidades de otra entidad cambiando el query string.
+ */
+export const getMyEntityOpportunities = async (req, res) => {
+  try {
+    const role = req.user?.role || mapModuloToRole(req.user?.modulo);
+    if (role !== "company") {
+      return res.status(403).json({ message: "Solo disponible para usuarios de entidad" });
+    }
+    const company = await Company.findOne({ "contacts.userId": req.user.id })
+      .select("_id status")
+      .lean();
+    if (!company) {
+      return res.status(404).json({ message: "No se encontró la entidad asociada a tu usuario" });
+    }
+    if (String(company.status || "active").toLowerCase() !== "active") {
+      return res.status(403).json({ message: "Tu entidad aún no está activa" });
+    }
+    // Express 5 expone `req.query` como getter; mutamos sus propiedades en lugar de reasignar.
+    try {
+      req.query.company = String(company._id);
+      req.query.tipo = "practica";
+    } catch {
+      // Si por alguna razón el query es de solo lectura, lo construimos en req.entityScopedQuery
+      // y respaldamos con un proxy-like fallback (poco probable, pero seguro).
+      Object.defineProperty(req, "query", {
+        configurable: true,
+        writable: true,
+        value: { ...(req.query || {}), company: String(company._id), tipo: "practica" },
+      });
+    }
+    return getOpportunities(req, res);
+  } catch (error) {
+    console.error("[getMyEntityOpportunities] error:", error);
+    return res.status(500).json({ message: error.message || "Error interno" });
+  }
+};
+
 /** GET /opportunities/meta/distinct-estados — valores de `estado` presentes en BD (solo tipo práctica). */
 export const getDistinctEstadosPractica = async (req, res) => {
   try {
@@ -795,6 +838,19 @@ export const createOpportunity = async (req, res) => {
     const companyExists = await Company.findById(company);
     if (!companyExists) {
       return res.status(400).json({ message: "Empresa no encontrada" });
+    }
+
+    const creatorRole = req.user?.role || mapModuloToRole(req.user?.modulo);
+    if (creatorRole === "company") {
+      const ownsCompany = await Company.exists({
+        _id: company,
+        "contacts.userId": req.user.id,
+      });
+      if (!ownsCompany) {
+        return res.status(403).json({
+          message: "No puedes crear oportunidades para una entidad distinta a la tuya",
+        });
+      }
     }
 
     if (String(restData.tipo || "").toLowerCase() === "practica") {

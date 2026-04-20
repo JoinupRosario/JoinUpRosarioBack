@@ -169,6 +169,11 @@ const permisosIniciales = [
   { codigo: 'CREM_EVAL', nombre: 'Crear una evaluación de monitoría', modulo: 'MONITORIAS' },
   { codigo: 'ACEM', nombre: 'Actualizar una evaluación de monitoría', modulo: 'MONITORIAS' },
   { codigo: 'CEEM', nombre: 'Cambiar el estado de una evaluación de monitoría', modulo: 'MONITORIAS' },
+  // RQ04_HU011 — Evaluación MTM
+  { codigo: 'AESM', nombre: 'Acceso al módulo de evaluación MTM (consulta y reportes)', modulo: 'MONITORIAS' },
+  { codigo: 'PESM', nombre: 'Procesar evaluaciones MTM (disparar, reenviar enlaces)', modulo: 'MONITORIAS' },
+  { codigo: 'CESM', nombre: 'Configurar surveys/plantillas de evaluación MTM (Coordinador general)', modulo: 'MONITORIAS' },
+  { codigo: 'FCMM', nombre: 'Finalizar definitivamente la MTM (cierre del coordinador con evaluaciones listas)', modulo: 'MONITORIAS' },
 
   // ========== MÓDULO REPORTES (155-159) ==========
   { codigo: 'AMRE', nombre: 'Acceso al Módulo de Reportes', modulo: 'REPORTES' },

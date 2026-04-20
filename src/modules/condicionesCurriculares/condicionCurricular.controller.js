@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import CondicionCurricular, { ACADEMIC_VARIABLES, OPERATORS } from "./condicionCurricular.model.js";
 import ProgramFaculty from "../program/model/programFaculty.model.js";
+import Periodo from "../periodos/periodo.model.js";
 import { buildSearchRegex } from "../../utils/searchUtils.js";
 
 const MSG_DUPLICADO =
@@ -105,8 +106,27 @@ export const getProgramasHabilitadosPorPeriodo = async (req, res) => {
     if (!periodo) {
       return res.status(400).json({ message: "Se requiere el parámetro periodo" });
     }
+    const raw = String(periodo).trim();
+    /** CondicionCurricular.periodo es ObjectId de Periodo; aceptar también código (ej. 20262). */
+    let periodoRef;
+    const looksLikeObjectId = mongoose.Types.ObjectId.isValid(raw) && raw.length === 24;
+    if (looksLikeObjectId) {
+      periodoRef = new mongoose.Types.ObjectId(raw);
+    } else {
+      const per = await Periodo.findOne({
+        codigo: raw,
+        tipo: "practica",
+      })
+        .select("_id")
+        .lean();
+      if (!per?._id) {
+        return res.json({ programIds: [] });
+      }
+      periodoRef = per._id;
+    }
+
     const reglas = await CondicionCurricular.find({
-      periodo,
+      periodo: periodoRef,
       estado: "ACTIVE",
     })
       .select("programas")

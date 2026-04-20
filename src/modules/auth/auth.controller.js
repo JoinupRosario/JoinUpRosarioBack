@@ -1,5 +1,6 @@
 import User from "../users/user.model.js";
 import UserSucursal from "../userSucursal/userSucursal.model.js";
+import Company from "../companies/company.model.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 
@@ -67,6 +68,58 @@ export const loginUser = async (req, res) => {
     const validPass = await bcrypt.compare(password, user.password);
     if (!validPass) return res.status(400).json({ message: "Contraseña incorrecta" });
 
+    // Si el usuario es contacto de entidad: validar que la empresa esté activa
+    // y que el contacto dentro de la empresa también esté activo. Esto evita
+    // que un contacto de una empresa inactiva (o un contacto desactivado dentro
+    // de una empresa activa) pueda entrar al portal de entidad.
+    let companyContext = null;
+    if (modulo === "entidades") {
+      const company = await Company.findOne({ "contacts.userId": user._id })
+        .select("name commercialName legalName status contacts")
+        .lean();
+
+      if (!company) {
+        return res.status(403).json({
+          message:
+            "Tu usuario no está asociado a ninguna entidad. Contacta al administrador.",
+        });
+      }
+      if (company.status !== "active") {
+        return res.status(403).json({
+          message:
+            "La entidad a la que perteneces no está activa actualmente. Contacta al administrador.",
+        });
+      }
+      const contacto = (company.contacts || []).find(
+        (c) => String(c.userId) === String(user._id)
+      );
+      if (!contacto) {
+        return res.status(403).json({
+          message:
+            "No se encontró tu contacto dentro de la entidad. Contacta al administrador.",
+        });
+      }
+      const contactoActivo = String(contacto.status || "active").toLowerCase() === "active";
+      if (!contactoActivo) {
+        return res.status(403).json({
+          message:
+            "Tu usuario en la entidad está inactivo. Contacta al administrador.",
+        });
+      }
+      companyContext = {
+        _id: company._id,
+        name: company.commercialName || company.name || company.legalName || "",
+        legalName: company.legalName || company.name || "",
+        contact: {
+          firstName: contacto.firstName,
+          lastName: contacto.lastName,
+          position: contacto.position || "",
+          isPrincipal: !!contacto.isPrincipal,
+          isPracticeTutor: !!contacto.isPracticeTutor,
+        },
+      };
+    }
+
     const token = jwt.sign(
       { id: user._id, modulo: user.modulo },
       process.env.JWT_SECRET,
@@ -93,6 +146,8 @@ export const loginUser = async (req, res) => {
       estado: user.estado !== undefined ? user.estado : true, // Mantener compatibilidad
       sucursales: sucursales || [],
       debeCambiarPassword: user.debeCambiarPassword === true,
+      // Contexto de entidad (solo cuando modulo === 'entidades')
+      company: companyContext,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt
     };
