@@ -15,6 +15,7 @@ import {
   getMetaFiltrosLegalizacionesPracticaAdmin,
   getEstadisticasLegalizacionPractica,
   getLegalizacionPracticaAdmin,
+  patchAsignacionLegalizacionPracticaAdmin,
   getDocumentoLegalizacionPracticaUrlAdmin,
   getDocumentoLegalizacionPracticaDownloadAdmin,
   patchDocumentoLegalizacionPracticaAdmin,
@@ -212,6 +213,11 @@ router.get(
   "/admin/:postulacionId/acuerdo-vinculacion/pdf-emitido",
   authorizeRoles("admin", "superadmin", "leader"),
   getPdfAcuerdoEmitido
+);
+router.patch(
+  "/admin/:postulacionId/asignacion",
+  authorizeRoles("admin", "superadmin", "leader"),
+  patchAsignacionLegalizacionPracticaAdmin
 );
 router.get("/admin/:postulacionId", authorizeRoles("admin", "superadmin", "leader"), getLegalizacionPracticaAdmin);
 router.get(

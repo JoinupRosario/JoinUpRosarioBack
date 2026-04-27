@@ -10,11 +10,29 @@ import DocumentPracticeDefinition from "../documentPracticeDefinition/documentPr
 import EstudianteHabilitado from "../estudiantesHabilitados/estudianteHabilitado.model.js";
 import ProgramFaculty from "../program/model/programFaculty.model.js";
 import { ProfileEnrolledProgram, ProfileProgramExtraInfo } from "../postulants/models/profile/index.js";
+import User from "../users/user.model.js";
+import Item from "../shared/reference-data/models/item.schema.js";
+import { PRACTICE_TYPE_LIST_ID } from "../program/services/programTypePracticeRule.service.js";
 import { uploadToS3, deleteFromS3, getSignedDownloadUrl, getObjectFromS3 } from "../../config/s3.config.js";
 import { esAcuerdoDeVinculacion, buildAcuerdoVinculacionPdfDataFromPostulacion } from "../../services/acuerdoVinculacion.service.js";
 import { buildAcuerdoVinculacionPdf } from "../../services/acuerdoVinculacionPdf.service.js";
 
 const S3_PREFIX = "legalizaciones-practica";
+
+function fmtFechaEvalPractica(d) {
+  if (!d) return "—";
+  try {
+    return new Date(d).toLocaleDateString("es-CO", { day: "2-digit", month: "2-digit", year: "numeric" });
+  } catch {
+    return "—";
+  }
+}
+
+function parseDateInputEval(v) {
+  if (v == null || v === "") return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
 const MIME_TO_EXT = {
   "application/pdf": "pdf",
@@ -283,9 +301,14 @@ export function resolveTutorPractica(opp, postulacionId) {
   const arr = opp?.cierreDatosTutor || [];
   const row = arr.find((t) => t.postulacionId && String(t.postulacionId) === String(postulacionId));
   if (row) {
+    const telTutor =
+      row.telefonoTutor != null && String(row.telefonoTutor).trim() !== ""
+        ? String(row.telefonoTutor).trim()
+        : null;
     return {
       nombres: [row.nombreTutor, row.apellidoTutor].filter(Boolean).join(" ").trim() || "—",
       email: row.emailTutor || "—",
+      telefono: telTutor,
       cargo: row.cargoTutor || "—",
       tipoIdent: row.tipoIdentTutor || "—",
       identificacion: row.identificacionTutor || "—",
@@ -295,11 +318,21 @@ export function resolveTutorPractica(opp, postulacionId) {
   const company = opp?.company;
   const c = company?.contacts?.find((x) => x.isPracticeTutor) || company?.contacts?.[0];
   if (!c) {
-    return { nombres: "—", email: "—", cargo: "—", tipoIdent: c?.idType || "—", identificacion: "—", arlEmpresa: null };
+    return {
+      nombres: "—",
+      email: "—",
+      telefono: null,
+      cargo: "—",
+      tipoIdent: "—",
+      identificacion: "—",
+      arlEmpresa: null,
+    };
   }
+  const telContact = c.mobile || c.phone;
   return {
     nombres: [c.firstName, c.lastName].filter(Boolean).join(" ").trim() || "—",
     email: c.alternateEmail || c.userEmail || "—",
+    telefono: telContact != null && String(telContact).trim() !== "" ? String(telContact).trim() : null,
     cargo: c.position || c.dependency || "—",
     tipoIdent: c.idType || "—",
     identificacion: c.identification || "—",
@@ -381,7 +414,9 @@ export const getMisLegalizacionesPractica = async (req, res) => {
       .lean();
 
     const ids = postulaciones.map((p) => p._id);
-    const legs = await LegalizacionPractica.find({ postulacionOportunidad: { $in: ids } }).lean();
+    const legs = await LegalizacionPractica.find({ postulacionOportunidad: { $in: ids } })
+      .populate("coordinadorUser", "name email")
+      .lean();
     const legByPo = new Map(legs.map((l) => [String(l.postulacionOportunidad), l]));
 
     const profileIdsRaw = [...new Set(postulaciones.map((p) => p.postulantProfile?._id || p.postulantProfile).filter((id) => id && mongoose.Types.ObjectId.isValid(String(id))))].map(
@@ -416,7 +451,13 @@ export const getMisLegalizacionesPractica = async (req, res) => {
       const profileIdStr = String(profile?._id || profile || "");
       const pu = postulantById.get(String(po.postulant));
       const sp = splitNombreCompleto(pu?.postulantId?.name || "");
-      const tutor = resolveTutorPractica(opp, po._id);
+      const c = leg?.coordinadorUser;
+      const coordinadorStr =
+        c?.name && String(c.name).trim() !== ""
+          ? String(c.name).trim()
+          : c?.email && String(c.email).trim() !== ""
+            ? String(c.email).trim()
+            : "—";
       return {
         _id: po._id,
         opportunityId: opp?._id,
@@ -427,7 +468,8 @@ export const getMisLegalizacionesPractica = async (req, res) => {
         programa: programaPorPerfil.get(profileIdStr) || "—",
         periodo: opp?.periodo?.codigo ?? "—",
         empresa: company?.commercialName || company?.name || "—",
-        docenteMonitor: tutor.nombres,
+        /** Coordinador de prácticas asignado en revisión (User); no el tutor de la empresa. */
+        coordinador: coordinadorStr,
         fechaInicio: opp?.fechaInicioPractica ?? null,
         fechaFin: opp?.fechaFinPractica ?? null,
         estadoPostulacion: po.estado,
@@ -460,13 +502,20 @@ export const getLegalizacionPracticaEstudiante = async (req, res) => {
     if (result.error) return res.status(result.error).json({ message: result.message });
     const { po } = result;
 
-    let leg = await LegalizacionPractica.findOne({ postulacionOportunidad: postulacionId }).lean();
+    const legPopulate = () =>
+      LegalizacionPractica.findOne({ postulacionOportunidad: postulacionId })
+        .populate("coordinadorUser", "name email")
+        .populate("tipoPracticaLegalizacion", "value description listId");
+    let leg = await legPopulate().lean();
     if (!leg) {
       const created = await LegalizacionPractica.create({
         postulacionOportunidad: postulacionId,
         estado: "borrador",
       });
-      leg = await LegalizacionPractica.findById(created._id).lean();
+      leg = await LegalizacionPractica.findById(created._id)
+        .populate("coordinadorUser", "name email")
+        .populate("tipoPracticaLegalizacion", "value description listId")
+        .lean();
     }
 
     const definicionesDocumentos = await listDefinicionesPracticaParaPostulacion(po);
@@ -488,6 +537,12 @@ export const getLegalizacionPracticaEstudiante = async (req, res) => {
     const company = opp?.company;
     const lr = company?.legalRepresentative;
     const tutor = resolveTutorPractica(opp, postulacionId);
+    const tutorTelefonoDisplay =
+      tutor.telefono != null && String(tutor.telefono).trim() !== ""
+        ? String(tutor.telefono).trim()
+        : company?.phone && String(company.phone).trim() !== ""
+          ? String(company.phone).trim()
+          : "—";
     const alertaLegalizacion = alertaVentanaLegalizacion(opp?.periodo);
 
     const diasPractica =
@@ -538,7 +593,7 @@ export const getLegalizacionPracticaEstudiante = async (req, res) => {
         tutorTipoId: tutor.tipoIdent,
         tutorNumeroId: tutor.identificacion,
         tutorCargo: tutor.cargo,
-        tutorTelefono: company?.phone || "—",
+        tutorTelefono: tutorTelefonoDisplay,
         tutorEmail: tutor.email,
       },
       practica: {
@@ -546,6 +601,12 @@ export const getLegalizacionPracticaEstudiante = async (req, res) => {
         correoDocenteMonitor: tutor.email,
         cedulaDocenteMonitor: tutor.identificacion,
         cargoDocenteMonitor: tutor.cargo,
+        tipoPracticaNacionalInternacional: leg.tipoPracticaLegalizacion
+          ? leg.tipoPracticaLegalizacion.value || leg.tipoPracticaLegalizacion.description || "—"
+          : "—",
+        coordinadorPracticas: leg.coordinadorUser
+          ? { nombre: leg.coordinadorUser.name ?? "—", email: leg.coordinadorUser.email ?? "—" }
+          : null,
         programaLegaliza: firstEnrolled?.programId?.name ?? "—",
         periodoLegaliza: opp?.periodo?.codigo ?? "—",
         fechaInicio: opp?.fechaInicioPractica,
@@ -562,8 +623,8 @@ export const getLegalizacionPracticaEstudiante = async (req, res) => {
         afiliacionArlUniversidad: "—",
         pais: opp?.pais?.name ?? opp?.pais?.sortname ?? "—",
         ciudad: opp?.ciudad?.name ?? "—",
-        primeraEvaluacion: "—",
-        segundaEvaluacion: "—",
+        primeraEvaluacion: fmtFechaEvalPractica(leg.fechaEvaluacionParcial),
+        segundaEvaluacion: fmtFechaEvalPractica(leg.fechaEvaluacionFinal),
       },
       historial: leg.historial || [],
       historialPlanTrabajoPractica: leg.historialPlanTrabajoPractica || [],
@@ -1008,7 +1069,10 @@ export const getLegalizacionPracticaAdmin = async (req, res) => {
     if (chk.error) return res.status(chk.error).json({ message: chk.message });
     const { po, leg } = chk;
     const definicionesDocumentos = await listDefinicionesPracticaParaPostulacion(po);
-    const legLean = await LegalizacionPractica.findById(leg._id).lean();
+    const legLean = await LegalizacionPractica.findById(leg._id)
+      .populate("coordinadorUser", "name email")
+      .populate("tipoPracticaLegalizacion", "value description listId")
+      .lean();
     const opp = po.opportunity;
     const profileId = po.postulantProfile?._id ?? po.postulantProfile;
     const [postulantUser, postulantDatos, enrolledPrograms] = await Promise.all([
@@ -1025,6 +1089,12 @@ export const getLegalizacionPracticaAdmin = async (req, res) => {
     const company = opp?.company;
     const lr = company?.legalRepresentative;
     const tutor = resolveTutorPractica(opp, postulacionId);
+    const tutorTelefonoDisplay =
+      tutor.telefono != null && String(tutor.telefono).trim() !== ""
+        ? String(tutor.telefono).trim()
+        : company?.phone && String(company.phone).trim() !== ""
+          ? String(company.phone).trim()
+          : "—";
     const diasPractica =
       opp?.fechaInicioPractica && opp?.fechaFinPractica
         ? Math.max(0, Math.ceil((new Date(opp.fechaFinPractica) - new Date(opp.fechaInicioPractica)) / 86400000))
@@ -1072,7 +1142,7 @@ export const getLegalizacionPracticaAdmin = async (req, res) => {
         tutorTipoId: tutor.tipoIdent,
         tutorNumeroId: tutor.identificacion,
         tutorCargo: tutor.cargo,
-        tutorTelefono: company?.phone || "—",
+        tutorTelefono: tutorTelefonoDisplay,
         tutorEmail: tutor.email,
       },
       practica: {
@@ -1080,6 +1150,12 @@ export const getLegalizacionPracticaAdmin = async (req, res) => {
         correoDocenteMonitor: tutor.email,
         cedulaDocenteMonitor: tutor.identificacion,
         cargoDocenteMonitor: tutor.cargo,
+        tipoPracticaNacionalInternacional: legLean.tipoPracticaLegalizacion
+          ? legLean.tipoPracticaLegalizacion.value || legLean.tipoPracticaLegalizacion.description || "—"
+          : "—",
+        coordinadorPracticas: legLean.coordinadorUser
+          ? { nombre: legLean.coordinadorUser.name ?? "—", email: legLean.coordinadorUser.email ?? "—" }
+          : null,
         programaLegaliza: firstEnrolled?.programId?.name ?? "—",
         periodoLegaliza: opp?.periodo?.codigo ?? "—",
         fechaInicio: opp?.fechaInicioPractica,
@@ -1096,14 +1172,71 @@ export const getLegalizacionPracticaAdmin = async (req, res) => {
         afiliacionArlUniversidad: "—",
         pais: opp?.pais?.name ?? opp?.pais?.sortname ?? "—",
         ciudad: opp?.ciudad?.name ?? "—",
-        primeraEvaluacion: "—",
-        segundaEvaluacion: "—",
+        primeraEvaluacion: fmtFechaEvalPractica(legLean.fechaEvaluacionParcial),
+        segundaEvaluacion: fmtFechaEvalPractica(legLean.fechaEvaluacionFinal),
       },
       historial: legLean.historial || [],
       historialPlanTrabajoPractica: legLean.historialPlanTrabajoPractica || [],
     });
   } catch (err) {
     console.error("[LegalizacionPractica] getLegalizacionPracticaAdmin:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/** Coordinación: asignar responsable (User) y tipo nacional/internacional (ítem L_PRACTICE_TYPE). */
+export const patchAsignacionLegalizacionPracticaAdmin = async (req, res) => {
+  try {
+    const { postulacionId } = req.params;
+    const body = req.body || {};
+    const chk = await assertAdminLegalizacionAccess(req, postulacionId);
+    if (chk.error) return res.status(chk.error).json({ message: chk.message });
+    const { leg } = chk;
+
+    if (Object.prototype.hasOwnProperty.call(body, "coordinadorUserId")) {
+      const v = body.coordinadorUserId;
+      if (v == null || v === "") {
+        leg.set("coordinadorUser", null);
+      } else if (mongoose.Types.ObjectId.isValid(String(v))) {
+        const u = await User.findById(v).select("_id").lean();
+        if (!u) return res.status(400).json({ message: "Usuario coordinador no encontrado" });
+        leg.set("coordinadorUser", v);
+      } else {
+        return res.status(400).json({ message: "coordinadorUserId no válido" });
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "tipoPracticaLegalizacionId")) {
+      const v = body.tipoPracticaLegalizacionId;
+      if (v == null || v === "") {
+        leg.set("tipoPracticaLegalizacion", null);
+      } else if (mongoose.Types.ObjectId.isValid(String(v))) {
+        const it = await Item.findById(v).select("listId isActive").lean();
+        if (!it) return res.status(400).json({ message: "Ítem tipo de práctica no encontrado" });
+        if (it.listId !== PRACTICE_TYPE_LIST_ID) {
+          return res.status(400).json({ message: "El ítem no pertenece al catálogo de tipo de práctica (L_PRACTICE_TYPE)" });
+        }
+        if (it.isActive === false) return res.status(400).json({ message: "El ítem está inactivo" });
+        leg.set("tipoPracticaLegalizacion", v);
+      } else {
+        return res.status(400).json({ message: "tipoPracticaLegalizacionId no válido" });
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, "fechaEvaluacionParcial")) {
+      leg.set("fechaEvaluacionParcial", parseDateInputEval(body.fechaEvaluacionParcial));
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "fechaEvaluacionFinal")) {
+      leg.set("fechaEvaluacionFinal", parseDateInputEval(body.fechaEvaluacionFinal));
+    }
+
+    await leg.save();
+    const fresh = await LegalizacionPractica.findById(leg._id)
+      .populate("coordinadorUser", "name email")
+      .populate("tipoPracticaLegalizacion", "value description listId")
+      .lean();
+    res.json({ legalizacion: fresh, message: "Asignación actualizada" });
+  } catch (err) {
+    console.error("[LegalizacionPractica] patchAsignacionLegalizacionPracticaAdmin:", err);
     res.status(500).json({ message: err.message });
   }
 };
@@ -1214,16 +1347,21 @@ export const postAprobarLegalizacionPractica = async (req, res) => {
     const defIds = new Set(defList.map((d) => String(d._id)));
     const docs = leg.documentos || {};
     const entries = Object.entries(docs).filter(([k, v]) => v && typeof v === "object" && v.key && defIds.has(String(k)));
+    const hayObligatoriosEnParametria = defList.some((d) => d.documentMandatory);
     if (entries.length === 0) {
-      return res.status(400).json({ message: "No hay documentos cargados para aprobar la legalización." });
-    }
-    const algunRechazado = entries.some(([, d]) => d.estadoDocumento === "rechazado");
-    const algunPendiente = entries.some(([, d]) => d.key && (!d.estadoDocumento || d.estadoDocumento === "pendiente"));
-    if (algunRechazado) {
-      return res.status(400).json({ message: "Hay documentos rechazados. Envíe a ajuste al estudiante." });
-    }
-    if (algunPendiente) {
-      return res.status(400).json({ message: "Debe aprobar o rechazar todos los documentos cargados antes de aprobar la legalización." });
+      if (hayObligatoriosEnParametria) {
+        return res.status(400).json({ message: "No hay documentos cargados para aprobar la legalización." });
+      }
+      // Ningún documento obligatorio y el estudiante no subió archivos: se aprueba el trámite sin revisión de anexos.
+    } else {
+      const algunRechazado = entries.some(([, d]) => d.estadoDocumento === "rechazado");
+      const algunPendiente = entries.some(([, d]) => d.key && (!d.estadoDocumento || d.estadoDocumento === "pendiente"));
+      if (algunRechazado) {
+        return res.status(400).json({ message: "Hay documentos rechazados. Envíe a ajuste al estudiante." });
+      }
+      if (algunPendiente) {
+        return res.status(400).json({ message: "Debe aprobar o rechazar todos los documentos cargados antes de aprobar la legalización." });
+      }
     }
     const prev = leg.estado;
     leg.estado = "aprobada";

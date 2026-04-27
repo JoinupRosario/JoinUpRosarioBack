@@ -203,10 +203,10 @@ router.post(
   closeOpportunity
 );
 
-// Historial de estados
+// Historial de estados (empresa: misma lógica que otras rutas; el controlador restringe a dueños)
 router.get(
   "/:id/history",
-  requireStaffPermission("CCEP", "CPAC", "CEPR", "AMOP"),
+  requireCompanyOrStaffPermission("CCEP", "CPAC", "CEPR", "AMOP"),
   getStatusHistory
 );
 

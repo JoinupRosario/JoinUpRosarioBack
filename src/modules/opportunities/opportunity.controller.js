@@ -9,7 +9,7 @@ import Postulant from "../postulants/models/postulants.schema.js";
 import PostulantProfile from "../postulants/models/profile/profile.schema.js";
 import User from "../users/user.model.js";
 import PostulacionOportunidad from "./postulacionOportunidad.model.js";
-import { ProfileEnrolledProgram, ProfileGraduateProgram, ProfileSkill, ProfileCv } from "../postulants/models/profile/index.js";
+import { ProfileEnrolledProgram, ProfileGraduateProgram, ProfileSkill, ProfileCv, ProfileSupport } from "../postulants/models/profile/index.js";
 import Periodo from "../periodos/periodo.model.js";
 import Country from "../shared/location/models/country.schema.js";
 import City from "../shared/location/models/city.schema.js";
@@ -787,6 +787,18 @@ export const getOpportunityById = async (req, res) => {
       return res.status(403).json({ message: "No autorizado para ver esta oportunidad." });
     }
 
+    const role = req.user?.role || mapModuloToRole(req.user?.modulo);
+    if (role === "company") {
+      const companyId = opportunity.company?._id || opportunity.company;
+      const owns = await Company.exists({
+        _id: companyId,
+        "contacts.userId": req.user.id,
+      });
+      if (!owns) {
+        return res.status(403).json({ message: "No autorizado para ver esta oportunidad." });
+      }
+    }
+
     const payload = opportunity.toObject ? opportunity.toObject() : { ...opportunity };
     // Si dedicacion viene como string (legacy), resolver a Item para que el front reciba objeto
     if (payload.dedicacion && typeof payload.dedicacion === "string") {
@@ -1267,6 +1279,7 @@ export const closeOpportunity = async (req, res) => {
         "nombreTutor",
         "apellidoTutor",
         "emailTutor",
+        "telefonoTutor",
         "cargoTutor",
         "tipoIdentTutor",
         "identificacionTutor",
@@ -1444,10 +1457,22 @@ export const getStatusHistory = async (req, res) => {
   try {
     const opportunity = await Opportunity.findById(req.params.id)
       .populate("historialEstados.cambiadoPor", "name email")
-      .select("historialEstados");
+      .select("historialEstados company");
 
     if (!opportunity) {
       return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+
+    const role = req.user?.role || mapModuloToRole(req.user?.modulo);
+    if (role === "company") {
+      const companyId = opportunity.company?._id || opportunity.company;
+      const owns = await Company.exists({
+        _id: companyId,
+        "contacts.userId": req.user.id,
+      });
+      if (!owns) {
+        return res.status(403).json({ message: "No autorizado para ver el historial de esta oportunidad." });
+      }
     }
 
     res.json({
@@ -1465,6 +1490,18 @@ export const duplicateOpportunity = async (req, res) => {
     
     if (!originalOpportunity) {
       return res.status(404).json({ message: "Oportunidad no encontrada" });
+    }
+
+    const role = req.user?.role || mapModuloToRole(req.user?.modulo);
+    if (role === "company") {
+      const companyId = originalOpportunity.company?.toString?.() || originalOpportunity.company;
+      const owns = await Company.exists({
+        _id: companyId,
+        "contacts.userId": req.user.id,
+      });
+      if (!owns) {
+        return res.status(403).json({ message: "No autorizado para duplicar esta oportunidad." });
+      }
     }
 
     // Crear nueva oportunidad con los mismos datos pero estado "Creada"
@@ -1620,12 +1657,12 @@ export const applyToOpportunity = async (req, res) => {
 
 /**
  * RQ04_HU002: Postulante (estudiante) se postula a una oportunidad con una hoja de vida.
- * POST /opportunities/:id/aplicar — body: { profileId } (PostulantProfile._id), opcional { profileVersionId } (ProfileProfileVersion._id)
+ * POST /opportunities/:id/aplicar — body: { profileId } (PostulantProfile._id), opcional { profileVersionId }, opcional { documentosSoporteIds: string[] }
  */
 export const aplicarOportunidad = async (req, res) => {
   try {
     const { id: opportunityId } = req.params;
-    const { profileId, profileVersionId } = req.body;
+    const { profileId, profileVersionId, documentosSoporteIds } = req.body;
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ message: "No autenticado" });
     if (!profileId) return res.status(400).json({ message: "Debe seleccionar un perfil (hoja de vida)" });
@@ -1687,11 +1724,29 @@ export const aplicarOportunidad = async (req, res) => {
       return res.status(400).json({ message: "Ya se ha postulado a esta oportunidad" });
     }
 
+    let documentosSoporte = [];
+    if (Array.isArray(documentosSoporteIds) && documentosSoporteIds.length > 0) {
+      const postulantDocIdStr = postulant._id.toString();
+      const misPerfiles = await PostulantProfile.find({ postulantId: postulant._id }).select("_id").lean();
+      const misPerfilesIds = misPerfiles.map((p) => p._id);
+      const supports = await ProfileSupport.find({
+        _id: { $in: documentosSoporteIds },
+        profileId: { $in: misPerfilesIds },
+      }).populate("attachmentId", "name filepath contentType").lean();
+      documentosSoporte = supports.map((s) => ({
+        attachmentId: s.attachmentId?._id ?? s.attachmentId,
+        documentLabel: s.documentLabel || "",
+        originalName: s.attachmentId?.name || "",
+        postulantDocId: postulantDocIdStr,
+      }));
+    }
+
     const postulacion = await PostulacionOportunidad.create({
       postulant: postulant._id,
       opportunity: opportunityId,
       postulantProfile: profileId,
       profileVersionId: resolvedProfileVersionId || undefined,
+      documentosSoporte,
       estado: "aplicado",
     });
 
@@ -2224,6 +2279,15 @@ export const getApplicationDetail = async (req, res) => {
             },
           }
         );
+        const poRefreshed = await PostulacionOportunidad.findOne({
+          _id: postulacionId,
+          opportunity: opportunityId,
+        })
+          .populate("postulant", "postulantId")
+          .populate("postulantProfile", "studentCode yearsExperience totalTimeExperience")
+          .populate({ path: "postulant", populate: { path: "postulantId", select: "name email" } })
+          .lean();
+        if (poRefreshed) po = poRefreshed;
       }
       // Perfil (y versión) con el que se postuló: solo CVs de ESE perfil/versión
       const profileIdRaw = po.postulantProfile?._id ?? po.postulantProfile;
@@ -2298,6 +2362,12 @@ export const getApplicationDetail = async (req, res) => {
           attachmentId: c.attachmentId?._id,
           name: c.attachmentId?.name || "Hoja de vida",
           postulantDocId: postulantDocId || postulantDoc?._id?.toString(),
+        })),
+        documentosSoporte: (po.documentosSoporte || []).map((d) => ({
+          attachmentId: d.attachmentId,
+          documentLabel: d.documentLabel,
+          originalName: d.originalName,
+          postulantDocId: d.postulantDocId || postulantDocId,
         })),
       });
       return;
@@ -2503,6 +2573,7 @@ export const seleccionarPostulantePractica = async (req, res) => {
       "nombreTutor",
       "apellidoTutor",
       "emailTutor",
+      "telefonoTutor",
       "cargoTutor",
       "tipoIdentTutor",
       "identificacionTutor",
@@ -2537,12 +2608,19 @@ export const seleccionarPostulantePractica = async (req, res) => {
         nombreTutor: String(body.nombreTutor).trim(),
         apellidoTutor: String(body.apellidoTutor).trim(),
         emailTutor: String(body.emailTutor).trim(),
+        telefonoTutor: String(body.telefonoTutor).trim(),
         cargoTutor: String(body.cargoTutor).trim(),
         tipoIdentTutor: String(body.tipoIdentTutor).trim(),
         arlEmpresa: String(body.arlEmpresa).trim(),
         identificacionTutor: String(body.identificacionTutor).trim(),
         fechaInicioPractica: fechaInicio,
       });
+      if (!Array.isArray(oppDoc.cierrePostulantesSeleccionados)) {
+        oppDoc.cierrePostulantesSeleccionados = [];
+      }
+      if (!oppDoc.cierrePostulantesSeleccionados.some((id) => String(id) === String(pid))) {
+        oppDoc.cierrePostulantesSeleccionados.push(pid);
+      }
       await oppDoc.save();
     }
 

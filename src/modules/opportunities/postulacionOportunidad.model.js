@@ -57,6 +57,22 @@ const postulacionOportunidadSchema = new mongoose.Schema(
     rechazadoAt: { type: Date, default: null },
     revisadoPor: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     comentarios: { type: String, default: null },
+    /**
+     * Documentos de soporte adjuntados al aplicar (misma idea que postulación MTM).
+     * Inlined para conservarlos aunque el estudiante los elimine del perfil.
+     */
+    documentosSoporte: {
+      type: [
+        {
+          attachmentId: { type: mongoose.Schema.Types.ObjectId, ref: "Attachment", required: true },
+          documentLabel: { type: String, default: "" },
+          originalName: { type: String, default: "" },
+          postulantDocId: { type: String, default: null },
+          _id: false,
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );

@@ -261,6 +261,7 @@ const opportunitySchema = new mongoose.Schema(
       nombreTutor: String,
       apellidoTutor: String,
       emailTutor: String,
+      telefonoTutor: { type: String, trim: true, default: "" },
       cargoTutor: String,
       tipoIdentTutor: String,
       arlEmpresa: String,

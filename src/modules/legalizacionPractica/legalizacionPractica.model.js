@@ -63,6 +63,16 @@ const legalizacionPracticaSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    /** Asignado en revisión (paso coordinación): usuario base `User` vinculado a personal administrativo. */
+    coordinadorUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
+    /** Catálogo `items` con listId L_PRACTICE_TYPE (p. ej. Práctica nacional / internacional). */
+    tipoPracticaLegalizacion: { type: mongoose.Schema.Types.ObjectId, ref: "items", default: null },
+    /**
+     * Fechas de evaluación parcial/final (RQ04). El responsable académico UR es el mismo `coordinadorUser`
+     * (personal administrativo), no se duplican nombres/documentos.
+     */
+    fechaEvaluacionParcial: { type: Date, default: null },
+    fechaEvaluacionFinal: { type: Date, default: null },
     enviadoRevisionAt: { type: Date, default: null },
     aprobadoAt: { type: Date, default: null },
     rechazadoAt: { type: Date, default: null },

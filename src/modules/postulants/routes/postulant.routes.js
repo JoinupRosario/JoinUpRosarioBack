@@ -60,6 +60,11 @@ import {
   uploadProfileSupport,
 } from "../controllers/postulantProfile.controller.js";
 import { verifyToken, mapModuloToRole } from "../../../middlewares/auth.js";
+import Company from "../../companies/company.model.js";
+import Opportunity from "../../opportunities/opportunity.model.js";
+import PostulacionOportunidad from "../../opportunities/postulacionOportunidad.model.js";
+import OportunidadMTM from "../../oportunidadesMTM/oportunidadMTM.model.js";
+import PostulacionMTM from "../../oportunidadesMTM/postulacionMTM.model.js";
 import { requirePermission } from "../../access/presentation/middlewares/requirePermission.js";
 import { userHasPermission } from "../../access/presentation/helpers/checkPermission.js";
 import { upload, handleUploadError, uploadProfileSupportMemory, handleProfileSupportUploadError } from "../../../middlewares/upload.js";
@@ -80,6 +85,54 @@ function requirePermissionOrOwnPostulant(...permissionCodes) {
     for (const code of permissionCodes) {
       const has = await userHasPermission(userId, code);
       if (has) return next();
+    }
+    return res.status(403).json({ message: "No tiene permiso para esta acción" });
+  };
+}
+
+/**
+ * Usuario de empresa (portal entidad): puede descargar CV/docs del postulante si tiene postulación
+ * a una oportunidad de práctica o MTM de su compañía.
+ */
+async function companyHasPostulacionConEntidad(userId, postulantDocId) {
+  const company = await Company.findOne({ "contacts.userId": userId }).select("_id").lean();
+  if (!company) return false;
+  const [oppPractica, oppMtm] = await Promise.all([
+    Opportunity.find({ company: company._id }).select("_id").lean(),
+    OportunidadMTM.find({ company: company._id }).select("_id").lean(),
+  ]);
+  const practicaIds = oppPractica.map((d) => d._id);
+  const mtmIds = oppMtm.map((d) => d._id);
+  if (practicaIds.length === 0 && mtmIds.length === 0) return false;
+  const [practicaOk, mtmOk] = await Promise.all([
+    practicaIds.length
+      ? PostulacionOportunidad.exists({ postulant: postulantDocId, opportunity: { $in: practicaIds } })
+      : false,
+    mtmIds.length
+      ? PostulacionMTM.exists({ postulant: postulantDocId, oportunidadMTM: { $in: mtmIds } })
+      : false,
+  ]);
+  return Boolean(practicaOk || mtmOk);
+}
+
+/** Descarga de adjuntos: postulante dueño, staff VPPO/EMIP, o empresa con postulación en su oferta. */
+function requireDownloadPostulantAttachmentAccess() {
+  return async (req, res, next) => {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ message: "No autorizado: usuario no identificado" });
+    const { id } = req.params;
+    let postulant = id ? await Postulant.findById(id).select("_id postulantId").lean() : null;
+    if (!postulant && id) {
+      postulant = await Postulant.findOne({ postulantId: id }).select("_id postulantId").lean();
+    }
+    if (postulant && String(postulant.postulantId) === String(userId)) return next();
+    for (const code of ["VPPO", "EMIP"]) {
+      const has = await userHasPermission(userId, code);
+      if (has) return next();
+    }
+    const role = req.user?.role || mapModuloToRole(req.user?.modulo);
+    if (role === "company" && postulant) {
+      if (await companyHasPostulacionConEntidad(userId, postulant._id)) return next();
     }
     return res.status(403).json({ message: "No tiene permiso para esta acción" });
   };
@@ -170,7 +223,7 @@ router.put("/:id/aplicar-info-universitas", requirePermission("ADPS"), aplicarIn
 router.get("/:id/consulta-inf-academica-universitas", requirePermission("ADAP"), consultaInfAcademicaUniversitas);
 router.put("/:id/aplicar-info-academica-universitas", requirePermission("ADAP"), aplicarInfoAcademicaUniversitas);
 router.put("/:id/toggle-estado", requirePermission("CEPO"), togglePostulantEstado);
-router.get("/:id/attachments/:attachmentId/download", requirePermissionOrOwnPostulant("VPPO", "EMIP"), downloadAttachment);
+router.get("/:id/attachments/:attachmentId/download", requireDownloadPostulantAttachmentAccess(), downloadAttachment);
 router.get("/:id", requirePermissionOrOwnPostulant("VPPO", "EMIP"), getPostulantById);
 
 // Subir foto de perfil — propio postulante o EPOS/EMIP
